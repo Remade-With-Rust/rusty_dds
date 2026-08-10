@@ -32,6 +32,8 @@ pub enum Error {
     ShortFile,
     UnsupportedFormat,
     OutOfBounds,
+    /// Payload is shorter than the layout implied by the headers.
+    TruncatedData,
 }
 
 impl fmt::Display for Error {
@@ -47,6 +49,9 @@ impl fmt::Display for Error {
                 write!(f, "Format is not supported well enough for this operation")
             }
             Error::OutOfBounds => write!(f, "Request is out of bounds"),
+            Error::TruncatedData => {
+                write!(f, "Payload is truncated relative to header layout")
+            }
         }
     }
 }

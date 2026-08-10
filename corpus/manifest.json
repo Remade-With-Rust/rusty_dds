@@ -1,0 +1,224 @@
+{
+  "version": 1,
+  "description": "CC0 ambientCG proxy corpus for rusty_dds vs DirectXTex encode bake-offs",
+  "license": "CC0-1.0",
+  "resolution": "1K",
+  "assets": [
+    {
+      "id": "Bricks097",
+      "title": "Bricks 097",
+      "source": "ambientcg",
+      "source_url": "https://ambientcg.com/view?id=Bricks097",
+      "download": "https://ambientcg.com/get?file=Bricks097_1K-PNG.zip",
+      "category": "brick"
+    },
+    {
+      "id": "Metal063",
+      "title": "Metal 063",
+      "source": "ambientcg",
+      "source_url": "https://ambientcg.com/view?id=Metal063",
+      "download": "https://ambientcg.com/get?file=Metal063_1K-PNG.zip",
+      "category": "metal"
+    },
+    {
+      "id": "Rock064",
+      "title": "Rock 064",
+      "source": "ambientcg",
+      "source_url": "https://ambientcg.com/view?id=Rock064",
+      "download": "https://ambientcg.com/get?file=Rock064_1K-PNG.zip",
+      "category": "rock"
+    },
+    {
+      "id": "Wood095",
+      "title": "Wood 095",
+      "source": "ambientcg",
+      "source_url": "https://ambientcg.com/view?id=Wood095",
+      "download": "https://ambientcg.com/get?file=Wood095_1K-PNG.zip",
+      "category": "wood"
+    }
+  ],
+  "maps": [
+    {
+      "suffix": "Color",
+      "role": "albedo",
+      "targets": [
+        "bc1",
+        "bc7"
+      ]
+    },
+    {
+      "suffix": "NormalGL",
+      "role": "normal",
+      "targets": [
+        "bc5u",
+        "bc5s"
+      ]
+    },
+    {
+      "suffix": "Roughness",
+      "role": "mask",
+      "targets": [
+        "bc4u",
+        "bc4s"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "id": "Bricks097_Color",
+      "asset": "Bricks097",
+      "role": "albedo",
+      "map": "Color",
+      "path": "raw/Bricks097/Bricks097_1K-PNG_Color.png",
+      "targets": [
+        "bc1",
+        "bc7"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Bricks097",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Bricks097_NormalGL",
+      "asset": "Bricks097",
+      "role": "normal",
+      "map": "NormalGL",
+      "path": "raw/Bricks097/Bricks097_1K-PNG_NormalGL.png",
+      "targets": [
+        "bc5u",
+        "bc5s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Bricks097",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Bricks097_Roughness",
+      "asset": "Bricks097",
+      "role": "mask",
+      "map": "Roughness",
+      "path": "raw/Bricks097/Bricks097_1K-PNG_Roughness.png",
+      "targets": [
+        "bc4u",
+        "bc4s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Bricks097",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Metal063_Color",
+      "asset": "Metal063",
+      "role": "albedo",
+      "map": "Color",
+      "path": "raw/Metal063/Metal063_1K-PNG_Color.png",
+      "targets": [
+        "bc1",
+        "bc7"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Metal063",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Metal063_NormalGL",
+      "asset": "Metal063",
+      "role": "normal",
+      "map": "NormalGL",
+      "path": "raw/Metal063/Metal063_1K-PNG_NormalGL.png",
+      "targets": [
+        "bc5u",
+        "bc5s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Metal063",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Metal063_Roughness",
+      "asset": "Metal063",
+      "role": "mask",
+      "map": "Roughness",
+      "path": "raw/Metal063/Metal063_1K-PNG_Roughness.png",
+      "targets": [
+        "bc4u",
+        "bc4s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Metal063",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Rock064_Color",
+      "asset": "Rock064",
+      "role": "albedo",
+      "map": "Color",
+      "path": "raw/Rock064/Rock064_1K-PNG_Color.png",
+      "targets": [
+        "bc1",
+        "bc7"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Rock064",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Rock064_NormalGL",
+      "asset": "Rock064",
+      "role": "normal",
+      "map": "NormalGL",
+      "path": "raw/Rock064/Rock064_1K-PNG_NormalGL.png",
+      "targets": [
+        "bc5u",
+        "bc5s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Rock064",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Rock064_Roughness",
+      "asset": "Rock064",
+      "role": "mask",
+      "map": "Roughness",
+      "path": "raw/Rock064/Rock064_1K-PNG_Roughness.png",
+      "targets": [
+        "bc4u",
+        "bc4s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Rock064",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Wood095_Color",
+      "asset": "Wood095",
+      "role": "albedo",
+      "map": "Color",
+      "path": "raw/Wood095/Wood095_1K-PNG_Color.png",
+      "targets": [
+        "bc1",
+        "bc7"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Wood095",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Wood095_NormalGL",
+      "asset": "Wood095",
+      "role": "normal",
+      "map": "NormalGL",
+      "path": "raw/Wood095/Wood095_1K-PNG_NormalGL.png",
+      "targets": [
+        "bc5u",
+        "bc5s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Wood095",
+      "license": "CC0-1.0"
+    },
+    {
+      "id": "Wood095_Roughness",
+      "asset": "Wood095",
+      "role": "mask",
+      "map": "Roughness",
+      "path": "raw/Wood095/Wood095_1K-PNG_Roughness.png",
+      "targets": [
+        "bc4u",
+        "bc4s"
+      ],
+      "source_url": "https://ambientcg.com/view?id=Wood095",
+      "license": "CC0-1.0"
+    }
+  ]
+}

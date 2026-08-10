@@ -1,3 +1,13 @@
 /target/
 **/*.rs.bk
 Cargo.lock
+third_party/DirectXTex/
+tools/dxtex_decode_bench/build/
+docs/artifacts/dxtex_raw.json
+docs/artifacts/dxtex_*.json
+corpus/raw/
+target/
+*.pdb
+.DS_Store
+
+docs/artifacts/bc45-refine-skip-harvest.csv

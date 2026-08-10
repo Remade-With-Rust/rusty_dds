@@ -1,24 +1,31 @@
-extern crate ddsfile;
-use ddsfile::*;
+//! Compatibility shim — prefer `rusty-dds info`.
 
+use rusty_dds::*;
 use std::env;
 use std::fs::File;
+use std::process::ExitCode;
 
-fn main() {
-    let filename = match env::args().nth(1) {
-        Some(arg) => arg,
-        None => panic!("Usage: ddsinfo <filename>"),
+fn main() -> ExitCode {
+    eprintln!("note: `ddsinfo` is deprecated; use `rusty-dds info`");
+    let Some(filename) = env::args().nth(1) else {
+        eprintln!("Usage: ddsinfo <filename>");
+        return ExitCode::from(2);
     };
-
-    let mut file = match File::open(&*filename) {
+    let mut file = match File::open(&filename) {
         Ok(f) => f,
-        Err(e) => panic!("{}", e),
+        Err(e) => {
+            eprintln!("open {filename}: {e}");
+            return ExitCode::FAILURE;
+        }
     };
-
-    let dds = match Dds::read(&mut file) {
-        Ok(dds) => dds,
-        Err(e) => panic!("{}", e),
-    };
-
-    println!("{:?}", dds);
+    match Dds::read(&mut file) {
+        Ok(dds) => {
+            println!("{dds:?}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("read {filename}: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

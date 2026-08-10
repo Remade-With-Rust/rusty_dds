@@ -1,0 +1,206 @@
+{
+  "iters": 50,
+  "notes": [
+    "Same .dds case files for both peers.",
+    "Both paths include DDS parse + decode to RGBA8 each iteration.",
+    "ratio > 1 means rusty_dds is slower. Struggle threshold: ratio > 1.25.",
+    "BC6H / float HDR excluded from this LDR RGBA8 gate."
+  ],
+  "ours": {
+    "name": "rusty_dds",
+    "protocol": "Dds::read + decode_rgba8 -> RGBA8"
+  },
+  "peer": {
+    "name": "Microsoft DirectXTex",
+    "protocol": "LoadFromDDSMemory + Decompress|Convert -> R8G8B8A8_UNORM",
+    "repo": "https://github.com/microsoft/DirectXTex"
+  },
+  "rows": [
+    {
+      "content": "bc1",
+      "context": "X-2D",
+      "directxtex_ns": 17402.0,
+      "directxtex_ok": true,
+      "id": "bc1__X-2D",
+      "ratio_rusty_over_dxtex": 0.19469026548672566,
+      "rusty_dds_ns": 3388.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc2",
+      "context": "X-2D",
+      "directxtex_ns": 19204.0,
+      "directxtex_ok": true,
+      "id": "bc2__X-2D",
+      "ratio_rusty_over_dxtex": 0.2582795250989377,
+      "rusty_dds_ns": 4960.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc3",
+      "context": "X-2D",
+      "directxtex_ns": 20574.0,
+      "directxtex_ok": true,
+      "id": "bc3__X-2D",
+      "ratio_rusty_over_dxtex": 0.2236803732866725,
+      "rusty_dds_ns": 4602.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc4u",
+      "context": "X-2D",
+      "directxtex_ns": 32678.0,
+      "directxtex_ok": true,
+      "id": "bc4u__X-2D",
+      "ratio_rusty_over_dxtex": 0.16824775078034152,
+      "rusty_dds_ns": 5498.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc4s",
+      "context": "X-2D",
+      "directxtex_ns": 36862.0,
+      "directxtex_ok": true,
+      "id": "bc4s__X-2D",
+      "ratio_rusty_over_dxtex": 0.15696381097064727,
+      "rusty_dds_ns": 5786.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc5u",
+      "context": "X-2D",
+      "directxtex_ns": 37740.0,
+      "directxtex_ok": true,
+      "id": "bc5u__X-2D",
+      "ratio_rusty_over_dxtex": 0.31542130365659776,
+      "rusty_dds_ns": 11904.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc5s",
+      "context": "X-2D",
+      "directxtex_ns": 43856.0,
+      "directxtex_ok": true,
+      "id": "bc5s__X-2D",
+      "ratio_rusty_over_dxtex": 0.17133345494345129,
+      "rusty_dds_ns": 7514.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc7",
+      "context": "X-2D",
+      "directxtex_ns": 63590.0,
+      "directxtex_ok": true,
+      "id": "bc7__X-2D",
+      "ratio_rusty_over_dxtex": 0.3827331341405881,
+      "rusty_dds_ns": 24338.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "rgba8",
+      "context": "X-2D",
+      "directxtex_ns": 472.0,
+      "directxtex_ok": true,
+      "id": "rgba8__X-2D",
+      "ratio_rusty_over_dxtex": 1.5338983050847457,
+      "rusty_dds_ns": 724.0,
+      "rusty_slower": true,
+      "verdict": "behind"
+    },
+    {
+      "content": "bgra8",
+      "context": "X-2D",
+      "directxtex_ns": 10822.0,
+      "directxtex_ok": true,
+      "id": "bgra8__X-2D",
+      "ratio_rusty_over_dxtex": 0.3010534097209388,
+      "rusty_dds_ns": 3258.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc1",
+      "context": "X-MIP",
+      "directxtex_ns": 322.0,
+      "directxtex_ok": true,
+      "id": "bc1__X-MIP-tip",
+      "ratio_rusty_over_dxtex": 0.9440993788819876,
+      "rusty_dds_ns": 304.0,
+      "rusty_slower": false,
+      "verdict": "parity"
+    },
+    {
+      "content": "bc3",
+      "context": "X-ARRAY",
+      "directxtex_ns": 5664.0,
+      "directxtex_ok": true,
+      "id": "bc3__X-ARRAY",
+      "ratio_rusty_over_dxtex": 0.2687146892655367,
+      "rusty_dds_ns": 1522.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc1",
+      "context": "X-CUBE",
+      "directxtex_ns": 4784.0,
+      "directxtex_ok": true,
+      "id": "bc1__X-CUBE-face",
+      "ratio_rusty_over_dxtex": 0.2529264214046823,
+      "rusty_dds_ns": 1210.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc7",
+      "context": "X-NPOT",
+      "directxtex_ns": 538.0,
+      "directxtex_ok": true,
+      "id": "bc7__X-NPOT",
+      "ratio_rusty_over_dxtex": 0.7360594795539034,
+      "rusty_dds_ns": 396.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    },
+    {
+      "content": "bc1",
+      "context": "X-VOL",
+      "directxtex_ns": 5598.0,
+      "directxtex_ok": true,
+      "id": "bc1__X-VOL",
+      "ratio_rusty_over_dxtex": 0.3022508038585209,
+      "rusty_dds_ns": 1692.0,
+      "rusty_slower": false,
+      "verdict": "ahead"
+    }
+  ],
+  "summary": {
+    "ahead": 13,
+    "behind": 1,
+    "cases": 15,
+    "dxtex_failed": 0,
+    "parity": 1
+  },
+  "title": "rusty_dds vs Microsoft DirectXTex — DDS decode to RGBA8",
+  "worst_behind": [
+    {
+      "content": "rgba8",
+      "context": "X-2D",
+      "directxtex_ns": 472.0,
+      "directxtex_ok": true,
+      "id": "rgba8__X-2D",
+      "ratio_rusty_over_dxtex": 1.5338983050847457,
+      "rusty_dds_ns": 724.0,
+      "rusty_slower": true,
+      "verdict": "behind"
+    }
+  ]
+}

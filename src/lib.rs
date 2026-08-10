@@ -20,13 +20,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-//! The main entry point for this library is the `Dds` type.
+//! The main entry point for this library is the [`Dds`] type.
+//!
+//! # Features
+//!
+//! | Feature | Default | Provides |
+//! |---------|---------|----------|
+//! | `decode` | yes | [`Dds::decode_rgba8`], `bcdec_rs` BCn kernels |
+//! | `encode` | yes | [`Dds::encode_from_rgba8`], [`EncodeLayout`] |
+//!
+//! Container parse/compose, surfaces, content classification, and GPU upload
+//! plans are always available. Use `default-features = false, features = ["decode"]`
+//! for loaders / WASM that never encode.
+
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 #[macro_use]
 extern crate bitflags;
-
-//#[cfg(test)]
-//mod tests;
 
 mod error;
 pub use error::*;
@@ -39,6 +49,25 @@ pub use header::{Caps, Caps2, Header, HeaderFlags};
 
 mod header10;
 pub use header10::{AlphaMode, D3D10ResourceDimension, Header10, MiscFlag};
+
+mod surface;
+pub use surface::{CubemapFace, SubresourceId, SurfaceView, SurfaceViewMut};
+
+mod content;
+pub use content::{DecodeContent, ImageRgba8};
+
+#[cfg(feature = "decode")]
+mod decode;
+#[cfg(feature = "decode")]
+pub use decode::reference;
+
+#[cfg(feature = "encode")]
+mod encode;
+#[cfg(feature = "encode")]
+pub use encode::{max_abs_diff, psnr_rgba8, EncodeLayout, EncodeQuality};
+
+mod upload;
+pub use upload::{GpuFormat, UploadPath, UploadPlan};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt;

@@ -1,17 +1,114 @@
 [package]
-name = "ddsfile"
-version = "0.5.3-unstable"
-authors = ["Mike Dilger <mike@optcomp.nz>"]
-description = "DirectDraw Surface file format parser/composer"
-repository = "https://github.com/SiegeEngine/ddsfile"
-documentation = "https://docs.rs/ddsfile"
+name = "rusty_dds"
+version = "0.1.0"
+authors = [
+    "Mike Dilger <mike@optcomp.nz>",
+    "Remade With Rust / Mata Network",
+]
+description = "Memory-safe DDS texture toolkit — container, decode, encode, GPU upload plans (Remade With Rust)"
+repository = "https://github.com/Remade-With-Rust/rusty_dds"
+homepage = "https://github.com/Remade-With-Rust/rusty_dds"
+documentation = "https://docs.rs/rusty_dds"
 license = "MIT"
-keywords = [ "dds" ]
+keywords = ["dds", "texture", "directx", "bc7", "gpu"]
+categories = ["encoding", "graphics", "parsing"]
 readme = "README.md"
 edition = "2021"
+rust-version = "1.73"
+exclude = [
+    "third_party/*",
+    "tools/*",
+    "corpus/raw/*",
+    "corpus/manifest.json",
+    "docs/artifacts/*.json",
+    "target/*",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["decode", "encode"]
+# CPU BCn/RGBA decode via bcdec_rs (pure Rust).
+decode = ["dep:bcdec_rs"]
+# CPU RGBA → DDS encode (pure Rust; no extra deps).
+encode = []
 
 [dependencies]
 bitflags = "2.4"
 byteorder = "1.5"
 enum-primitive-derive = "0.2"
 num-traits = "0.2"
+bcdec_rs = { version = "0.2", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Off-the-shelf container baseline for parse A/B (not used by the library itself).
+ddsfile = "0.5.2"
+serde_json = "1"
+tiff = { version = "0.9", default-features = true }
+png = "0.17"
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+rfd = "0.15"
+
+[[bin]]
+name = "rusty-dds"
+path = "src/bin/rusty_dds.rs"
+required-features = ["decode", "encode"]
+
+[[bin]]
+name = "ddsinfo"
+path = "src/bin/ddsinfo.rs"
+
+[[bin]]
+name = "retag"
+path = "src/bin/retag.rs"
+
+[[bench]]
+name = "parse_ab"
+harness = false
+
+[[bench]]
+name = "decode_ab"
+harness = false
+required-features = ["decode"]
+
+[[example]]
+name = "gen_fixtures"
+
+[[example]]
+name = "bench_vs_directxtex"
+required-features = ["decode"]
+
+[[example]]
+name = "bench_baselines"
+required-features = ["decode", "encode"]
+
+[[example]]
+name = "harvest_encode_quality"
+required-features = ["decode", "encode"]
+
+[[example]]
+name = "harvest_encode_quality_vs_dxtex"
+required-features = ["decode", "encode"]
+
+[[example]]
+name = "harvest_corpus_vs_dxtex"
+required-features = ["decode", "encode"]
+
+[[example]]
+name = "harvest_corpus_decode_vs_dxtex"
+required-features = ["decode", "encode"]
+
+[[example]]
+name = "demo_tiff_side_by_side"
+required-features = ["decode", "encode"]
+
+[[test]]
+name = "decode_matrix"
+required-features = ["decode"]
+
+[[test]]
+name = "encode_matrix"
+required-features = ["encode", "decode"]
