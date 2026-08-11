@@ -33,7 +33,7 @@
 //! plans are always available. Use `default-features = false, features = ["decode"]`
 //! for loaders / WASM that never encode.
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
 extern crate bitflags;

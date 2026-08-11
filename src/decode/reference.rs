@@ -1,6 +1,6 @@
 //! Bit-exact reference tiling using `bcdec_rs` directly (tests + benches).
 //!
-//! Mirrors [`super::decode_surface_pixels`] so A/B compares the same work.
+//! Mirrors the public decode path so A/B compares the same work.
 
 use super::super::content::{slice_payload_bytes, DecodeContent};
 use crate::error::Error;
