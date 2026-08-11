@@ -166,7 +166,12 @@ Formats: [docs/formats.md](docs/formats.md).
 **Remade With Rust** ([Mata Network](https://www.mata.network)) rebuilds essential
 C/C++ tools in Rust — memory safety, predictable performance, permissive license.
 
-→ **[github.com/Remade-With-Rust/rusty_dds](https://github.com/Remade-With-Rust/rusty_dds)**
+Part of the same family as **[remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)** —
+FFmpeg remade in Rust for memory-safe encode/decode and the broader Remade media stack
+(H.264, AV1, Opus, PNG/JPEG, and more).
+
+→ **[github.com/Remade-With-Rust/rusty_dds](https://github.com/Remade-With-Rust/rusty_dds)** ·
+**[github.com/Remade-With-Rust/remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)**
 
 ## License
 
