@@ -100,7 +100,7 @@ cargo run --bin rusty-dds -- info path/to/file.dds
 cargo run --bin rusty-dds -- decode path/to/file.dds -o out.rgba
 cargo run --bin rusty-dds -- encode --width 64 --height 64 --format bc7 pixels.rgba -o out.dds
 
-# Corpus bake-off vs DirectXTex (needs tools/dxtex_decode_bench built)
+# Corpus bake-off vs DirectXTex (optional local harness; not in this repo)
 python corpus/fetch_ambientcg.py   # once
 cargo run --release --example harvest_corpus_vs_dxtex
 cargo run --release --example harvest_corpus_decode_vs_dxtex

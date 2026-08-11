@@ -168,19 +168,13 @@ and (3) a Criterion arm in `decode_ab`.
 
 ### Official peer artifact (Microsoft DirectXTex)
 
-Not a Rust-crate A/B — the decode completeness speed artifact compares against
-**[Microsoft DirectXTex](https://github.com/microsoft/DirectXTex)**:
+Not a Rust-crate A/B — decode/encode boards compare against
+**[Microsoft DirectXTex](https://github.com/microsoft/DirectXTex)**. The C++ harness
+is **local-only** (not shipped in this repo; see [`tools/README.md`](../../tools/README.md)).
+Published results: [`docs/artifacts/`](../artifacts/).
 
-```text
-git clone --depth 1 https://github.com/microsoft/DirectXTex.git third_party/DirectXTex
-# VS x64 Native Tools:
-cmake -S tools/dxtex_decode_bench -B tools/dxtex_decode_bench/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build tools/dxtex_decode_bench/build
-cargo run --release --example bench_vs_directxtex
-```
-
-Outputs: `docs/artifacts/decode-vs-directxtex.json` (+ `.md`). Protocol: same `.dds`
-bytes → RGBA8 (`Dds::read`+`decode_rgba8` vs `LoadFromDDSMemory`+`Decompress`/`Convert`).
+Protocol: same `.dds` bytes → RGBA8 (`Dds::read`+`decode_rgba8` vs
+`LoadFromDDSMemory`+`Decompress`/`Convert`).
 
 ### Phase 2c — Decode hot-path (BC5 / BC7 / tiling) ✅
 
@@ -233,8 +227,8 @@ X-2D / X-MIP / X-ARRAY / X-CUBE / X-NPOT / X-VOL).
 | **Microsoft DirectXTex** | Sole competitive peer — decode (`Decompress`/`Convert`) + encode (`Compress` / `TEX_COMPRESS_BC7_QUICK`) |
 | crates.io `ddsfile` | Parse A/B only (Criterion `parse_ab`; container lineage, not a speed rival) |
 
-**Harness:** `cargo run --release --example bench_baselines`  
-(requires `tools/dxtex_decode_bench` → `dxtex_decode_bench` + `dxtex_encode_bench`)
+**Harness:** `cargo run --release --example bench_baselines` /
+`harvest_corpus_*` (optional local DirectXTex peer; not shipped in-tree).
 
 - Every `DecodeContent` × every context (`X-2D` / `X-MIP` / `X-ARRAY` / `X-CUBE` /
   `X-NPOT` / `X-VOL`), single-surface.
