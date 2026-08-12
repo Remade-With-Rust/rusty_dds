@@ -1,6 +1,6 @@
 # Plan: Texture pipeline beyond the DDS container
 
-Status: Phase 5 complete (productization); post-1.0 = BC6H / publish / quality RDO  
+Status: Phase 5 complete (productization); **Phase 6 encoder campaign (2026-08) in flight** — see §Phase 6; post-1.0 = BC6H / publish / quality RDO  
 Scope: turn `rusty_dds` from a container envelope parser into a rendering-ready DDS texture stack  
 Baseline: fork of [PistonDevelopers/ddsfile](https://github.com/PistonDevelopers/ddsfile) (container parse/compose only)
 
@@ -219,6 +219,45 @@ X-2D / X-MIP / X-ARRAY / X-CUBE / X-NPOT / X-VOL).
 - Unsupported formats fail closed via `Error::UnsupportedFormat`.
 
 **Exit:** feature matrix builds; CLI works; docs match shipping surface. ✅
+
+### Phase 6 — Encoder speed+quality campaign (2026-08, mandate: both axes, no trades)
+
+Gate harness: `examples/bench_encode_corpus.rs` (PNG corpus + 16 CryTIF from
+CRYTEK/GameSDK + 10 USC-SIPI TIFFs; per-case round-trip PSNR + payload FNV in a
+deterministic pass, best-of-N timing separately) + `bench/ab_encode.ps1`
+(ABBA-interleaved, core-pinned, CPU-time verdicts).
+
+| Brick | Type | Result |
+|---|---|---|
+| BC7 palette precompute + fused SSE + seed dedup + interior gather | speed, byte-identical | **BC7 2.05×** (10/10 pairs, z=3.16; CPU 37→18 s) |
+| BC1 PCA seed + iterated LS refine | quality, monotone | Bricks +1.65 / Rock +1.41 / Wood +0.57 dB — all three DXT losses flip to wins |
+| BC1 inverted-565 mode fix | quality (latent bug) | stored c0>c1 decodes 4-color; old code fitted a 3-color palette there |
+| BC1 fused pack+score with early abort | speed, byte-identical (oracle: 200k-block twin test) | pays for the signed window |
+| BC4S/BC5S ±4 windowed endpoint sweep (harvest-gated: span 8–32, err>4) | quality, monotone | Wood BC5S 52.18→52.60 (DXT 52.69 = tie band); all signed cases +0.4–0.6 dB |
+| BC3 alpha: full BC4-grade search replaces min/max-only | quality, monotone | (gating in flight) |
+
+Method notes: signed-sweep gate tuned from a 643k-block observe-only harvest
+(`signed_sweep_harvest` ignored test); full-span sweep ceiling kept in-tree as
+the `bc5s_wood_ceiling` oracle. Iterated-LS-alone was REFUTED for the Wood gap
+(+0.000 dB — the LS fixed point is the local optimum; the win is discrete
+UNORM-lattice search near the incumbent).
+
+#### Deferred items, re-scoped by this campaign
+
+- **BC6H / float HDR** (the remaining format-matrix hole): needs `ImageRgbaf32`
+  (decode) + half-float endpoint machinery (encode). Decode first — oracle is
+  `bcdec_rs::bc6h_float` (already a dep) — then encode mode-11-only (the
+  BC7-mode-6 analog: single subset, 16-bit endpoints, 4-bit indices, no
+  partitions) gated by the same round-trip + corpus discipline. The corpus
+  needs real HDR sources (EXR/HDR → float TIFF); acquisition parallels the
+  CryTIF hunt. Sized at a full session; not attempted inside this campaign.
+- **Quality RDO** (rate-distortion for BC7 mode selection) becomes relevant
+  only when more BC7 modes exist; mode 6 alone has no rate axis. Blocked on
+  multi-mode BC7, which the speed headroom from this campaign now affords.
+- **BC1 true punch-through** (c0<=c1 3-color mode for alpha<128 content):
+  the campaign's mode-fix revealed the encoder never deliberately emits
+  3-color mode; BC1A content currently loses its transparency. Small brick,
+  needs an alpha-aware seed pass + the punch SSE accounting already present.
 
 ## 5. Competitive baselines ✅
 

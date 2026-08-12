@@ -210,12 +210,15 @@ pub fn encode_bc1(pixels: [[u8; 4]; 16], out: &mut [u8]) {
 
 fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     let (max_c, min_c) = extrema_opaque(&pixels);
-    let a = pack_bc1(pixels, max_c, min_c);
+    // Fused pack+score: the index fit's per-pixel argmin distance IS the SSE
+    // contribution, so the old pack-then-bc1_sse re-walk is pure recompute.
+    let (a, a_err) = pack_bc1_scored(&pixels, max_c, min_c, i32::MAX)
+        .expect("unbounded pack always packs");
     if rgb_channel_span_sum(&pixels) < 24 {
         return a;
     }
     let mut best = a;
-    let mut best_err = bc1_sse(&pixels, &a);
+    let mut best_err = a_err;
     if best_err == 0 {
         return best;
     }
@@ -232,7 +235,7 @@ fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     }
     // Least-squares endpoint refine from the winner's indices, iterated while
     // the decode-matched SSE keeps falling (candidates only ever ADD, picked
-    // by the same bc1_sse — per-block error is monotonically ≤ the old path).
+    // by the same scoring — per-block error is monotonically ≤ the old path).
     for _ in 0..4 {
         if best_err == 0 {
             break;
@@ -256,12 +259,87 @@ fn consider_bc1(
     best: &mut [u8; 8],
     best_err: &mut i32,
 ) {
-    let cand = pack_bc1(*pixels, e0, e1);
-    let err = bc1_sse(pixels, &cand);
-    if err < *best_err {
+    if let Some((cand, err)) = pack_bc1_scored(pixels, e0, e1, *best_err) {
         *best = cand;
         *best_err = err;
     }
+}
+
+/// Pack a BC1 block AND its decode-matched SSE in one walk, aborting early
+/// once the partial SSE reaches `err_limit` (an aborted candidate could
+/// never win under strict `<`, so selection is identical to pack+bc1_sse).
+fn pack_bc1_scored(
+    pixels: &[[u8; 4]; 16],
+    max_c: [u8; 3],
+    min_c: [u8; 3],
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
+    let mut max565 = to_565(max_c);
+    let min565 = to_565(min_c);
+    if max565 == min565 {
+        max565 = max565.saturating_add(1);
+    }
+    let (c0, c1, colors, punch) = if max565 > min565 {
+        let ca = from_565(max565);
+        let cb = from_565(min565);
+        (
+            max565,
+            min565,
+            [ca, cb, lerp_rgb(ca, cb, 2, 1), lerp_rgb(ca, cb, 1, 2)],
+            false,
+        )
+    } else if max565 < min565 {
+        // 565 quantization inverted the seed order: stored c0 > c1 still
+        // decodes as 4-COLOR mode, so fit indices against the decode-true
+        // 4-color palette. (The old code fitted a 3-color+black palette here
+        // that no decoder would ever reconstruct.)
+        let ca = from_565(min565);
+        let cb = from_565(max565);
+        (
+            min565,
+            max565,
+            [ca, cb, lerp_rgb(ca, cb, 2, 1), lerp_rgb(ca, cb, 1, 2)],
+            false,
+        )
+    } else {
+        // Equal even after the +1 nudge (0xFFFF): true 3-color mode.
+        let ca = from_565(min565);
+        let cb = from_565(max565);
+        (
+            min565,
+            max565,
+            [ca, cb, lerp_rgb(ca, cb, 1, 1), [0, 0, 0]],
+            true,
+        )
+    };
+    let mut table = 0u32;
+    let mut err = 0i32;
+    for (i, p) in pixels.iter().enumerate() {
+        let (idx, e) = if punch && p[3] < 128 {
+            (3usize, sqr_rgb([p[0], p[1], p[2]], colors[3]))
+        } else {
+            let mut best = 0usize;
+            let mut best_d = i32::MAX;
+            for (j, c) in colors.iter().enumerate() {
+                let d = sqr_rgb([p[0], p[1], p[2]], *c);
+                if d < best_d {
+                    best_d = d;
+                    best = j;
+                }
+            }
+            (best, best_d)
+        };
+        table |= (idx as u32) << (2 * i);
+        err += e;
+        if err >= err_limit {
+            return None;
+        }
+    }
+    let mut out = [0u8; 8];
+    out[0..2].copy_from_slice(&c0.to_le_bytes());
+    out[2..4].copy_from_slice(&c1.to_le_bytes());
+    out[4..8].copy_from_slice(&table.to_le_bytes());
+    Some((out, err))
 }
 
 /// Principal-axis extremes: project RGB onto the covariance principal axis
@@ -397,6 +475,7 @@ fn channel_minmax_rgb(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     (mx, mn)
 }
 
+#[cfg(test)]
 fn bc1_sse(pixels: &[[u8; 4]; 16], block: &[u8]) -> i32 {
     let c0 = u16::from_le_bytes([block[0], block[1]]);
     let c1 = u16::from_le_bytes([block[2], block[3]]);
@@ -443,6 +522,7 @@ pub fn encode_bc3(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     out[8..16].copy_from_slice(&encode_bc1_bytes(pixels));
 }
 
+#[cfg(test)]
 fn pack_bc1(pixels: [[u8; 4]; 16], max_c: [u8; 3], min_c: [u8; 3]) -> [u8; 8] {
     let mut max565 = to_565(max_c);
     let min565 = to_565(min_c);
@@ -457,6 +537,15 @@ fn pack_bc1(pixels: [[u8; 4]; 16], max_c: [u8; 3], min_c: [u8; 3]) -> [u8; 8] {
             lerp_rgb(from_565(max565), from_565(min565), 1, 2),
         ];
         (max565, min565, pack_indices_2bit(&pixels, &colors, false))
+    } else if max565 < min565 {
+        // Stored c0 > c1 decodes as 4-color; fit against the decode palette.
+        let colors = [
+            from_565(min565),
+            from_565(max565),
+            lerp_rgb(from_565(min565), from_565(max565), 2, 1),
+            lerp_rgb(from_565(min565), from_565(max565), 1, 2),
+        ];
+        (min565, max565, pack_indices_2bit(&pixels, &colors, false))
     } else {
         let colors = [
             from_565(min565),
@@ -631,11 +720,19 @@ fn refine_alpha_u(
     let fast = quality_is_fast();
     let do_ls = full || (!fast && n_unique > 2 && *best_err > 8) || (fast && *best_err > 8);
     if do_ls {
-        if let Some((r0, r1)) = ls_alpha_endpoints_u(samples, best) {
+        // Iterate LS -> index refit while SSE keeps falling (BC1-refine shape).
+        for _ in 0..4 {
+            let Some((r0, r1)) = ls_alpha_endpoints_u(samples, best) else {
+                break;
+            };
+            let prev = *best_err;
             consider_alpha_u(r0, r1, samples, best, best_err);
             consider_alpha_u(r1, r0, samples, best, best_err);
             if *best_err == 0 {
                 return;
+            }
+            if *best_err >= prev {
+                break;
             }
         }
     }
@@ -861,6 +958,48 @@ fn snorm_i32_to_unorm_u8(s: i32) -> u8 {
 }
 
 fn encode_alpha_block_signed(samples: [u8; 16]) -> [u8; 8] {
+    let (mut best, mut best_err, lo, hi, span, _n_unique) =
+        encode_alpha_block_signed_presweep(samples);
+    // Windowed endpoint sweep: the LS/±2 search leaves ~0.5 dB on smooth
+    // signed content (Wood normals) — the UNORM-scored optimum sits beyond
+    // its reach but NEAR the current best (harvest: ±4 window keeps 93% of
+    // Wood's ceiling gain at ~80 pairs/block; a full-span sweep costs 6-25x
+    // more for gains only on maps already ahead of DirectXTex).
+    let _ = (lo, hi);
+    if !quality_is_fast() && signed_sweep_gate(span, best_err) {
+        signed_window_sweep(&samples, &mut best, &mut best_err);
+    }
+    best
+}
+
+/// ±4 exhaustive window around the pre-sweep winner (both palette modes are
+/// reachable near the b0==b1 boundary); strict `<` keeps it quality-monotone.
+fn signed_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
+    let b0 = best[0] as i8 as i32;
+    let b1 = best[1] as i8 as i32;
+    for d0 in -4i32..=4 {
+        for d1 in -4i32..=4 {
+            if d0 == 0 && d1 == 0 {
+                continue;
+            }
+            consider_alpha_s(
+                (b0 + d0).clamp(-127, 127),
+                (b1 + d1).clamp(-127, 127),
+                samples,
+                best,
+                best_err,
+            );
+            if *best_err == 0 {
+                return;
+            }
+        }
+    }
+}
+
+/// The full signed search pipeline BEFORE the exhaustive sweep.
+/// Returns (block, err, lo, hi, span, n_unique) — split out so the harvest
+/// test can measure the sweep's null arm.
+fn encode_alpha_block_signed_presweep(samples: [u8; 16]) -> ([u8; 8], i32, i32, i32, i32, usize) {
     // Search endpoints in SNORM, but score (and assign indices) by UNORM recon —
     // the bake-off PSNR is UNORM after snorm→unorm, not SNORM-domain SSE.
     let mut vals = [0i32; 16];
@@ -873,7 +1012,9 @@ fn encode_alpha_block_signed(samples: [u8; 16]) -> [u8; 8] {
         hi = hi.max(v);
     }
     if lo == hi {
-        return pack_alpha_indices_s(hi, lo, &alpha_palette4_s(hi, lo), &samples);
+        let b = pack_alpha_indices_s(hi, lo, &alpha_palette4_s(hi, lo), &samples);
+        let err = alpha_sse_s(&samples, &b);
+        return (b, err, lo, hi, 0, 1);
     }
 
     let mut best = pack_alpha_indices_s(hi, lo, &alpha_palette6_s(hi, lo), &samples);
@@ -892,7 +1033,37 @@ fn encode_alpha_block_signed(samples: [u8; 16]) -> [u8; 8] {
         consider_alpha_s(lo + 1, hi - 1, &samples, &mut best, &mut best_err);
     }
     refine_alpha_s(&samples, &vals, n_unique, span, &mut best, &mut best_err);
-    best
+    (best, best_err, lo, hi, span, n_unique)
+}
+
+/// Harvest-tuned gate (target/signed_sweep_harvest.csv, 643k blocks):
+/// span < 8 gained ZERO across 169k blocks, and `gain <= best_err` means a
+/// tiny residual can never pay for the window.
+#[inline]
+fn signed_sweep_gate(span: i32, best_err: i32) -> bool {
+    // Harvest-tuned (target/signed_sweep_harvest.csv, 643k blocks): span < 8
+    // gained ZERO across 169k blocks; spans > 32 only gain on maps already
+    // ahead of DirectXTex; `gain <= best_err` means err <= 4 can't pay.
+    (8..=32).contains(&span) && best_err > 4
+}
+
+/// Bounded near-exhaustive signed endpoint sweep (both orders => both
+/// palette modes), candidates added under strict `<` (quality-monotone).
+#[cfg(test)]
+fn signed_sweep(lo: i32, hi: i32, samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
+    let a_lo = (lo - 8).max(-127);
+    let a_hi = (hi + 8).min(127);
+    for e0 in a_lo..=a_hi {
+        for e1 in a_lo..=a_hi {
+            if e0 == e1 {
+                continue;
+            }
+            consider_alpha_s(e0, e1, samples, best, best_err);
+            if *best_err == 0 {
+                return;
+            }
+        }
+    }
 }
 
 fn unique_values_s_capped(vals: &[i32; 16], cap: usize) -> (usize, [i32; 16]) {
@@ -947,11 +1118,20 @@ fn refine_alpha_s(
     let fast = quality_is_fast();
     let do_ls = full || (!fast && n_unique > 2 && *best_err > 8) || (fast && *best_err > 8);
     if do_ls {
-        if let Some((r0, r1)) = ls_alpha_endpoints_s(vals, best) {
+        // Iterate LS -> index refit while the UNORM-scored SSE keeps falling
+        // (same shape as the BC1 refine loop; each pass is ~2 pack evals).
+        for _ in 0..4 {
+            let Some((r0, r1)) = ls_alpha_endpoints_s(vals, best) else {
+                break;
+            };
+            let prev = *best_err;
             consider_alpha_s(r0, r1, samples, best, best_err);
             consider_alpha_s(r1, r0, samples, best, best_err);
             if *best_err == 0 {
                 return;
+            }
+            if *best_err >= prev {
+                break;
             }
         }
     }
@@ -1693,6 +1873,7 @@ fn lerp_rgb(a: [u8; 3], b: [u8; 3], aw: u32, bw: u32) -> [u8; 3] {
     ]
 }
 
+#[cfg(test)]
 fn pack_indices_2bit(pixels: &[[u8; 4]; 16], colors: &[[u8; 3]; 4], alpha_punch: bool) -> u32 {
     let mut table = 0u32;
     for (i, p) in pixels.iter().enumerate() {
@@ -1757,5 +1938,251 @@ impl BitWriter {
         out[0..8].copy_from_slice(&self.low.to_le_bytes());
         out[8..16].copy_from_slice(&self.high.to_le_bytes());
         out
+    }
+}
+
+#[cfg(test)]
+mod ceiling_probe {
+    use super::*;
+
+    fn load_png_gray_channels(path: &str) -> (usize, usize, Vec<u8>, Vec<u8>) {
+        let f = std::fs::File::open(path).expect("png");
+        let mut dec = png::Decoder::new(std::io::BufReader::new(f));
+        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = dec.read_info().unwrap();
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        buf.truncate(info.buffer_size());
+        let (w, h) = (info.width as usize, info.height as usize);
+        let step = match info.color_type {
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            png::ColorType::Grayscale => 1,
+            png::ColorType::GrayscaleAlpha => 2,
+            _ => panic!("unexpected color type"),
+        };
+        let mut r = Vec::with_capacity(w * h);
+        let mut g = Vec::with_capacity(w * h);
+        for px in buf.chunks_exact(step) {
+            r.push(px[0]);
+            g.push(px[if step >= 3 { 1 } else { 0 }]);
+        }
+        (w, h, r, g)
+    }
+
+    fn block_samples(chan: &[u8], w: usize, bx: usize, by: usize) -> [u8; 16] {
+        let mut s = [0u8; 16];
+        for row in 0..4 {
+            for col in 0..4 {
+                s[row * 4 + col] = chan[(by * 4 + row) * w + bx * 4 + col];
+            }
+        }
+        s
+    }
+
+    /// UNORM-domain SSE of the best signed encoding found by a bounded
+    /// near-exhaustive endpoint sweep (both orders => both palette modes).
+    fn exhaustive_signed_sse(samples: &[u8; 16]) -> i64 {
+        let mut lo = 127i32;
+        let mut hi = -127i32;
+        for &s in samples {
+            let v = unorm_u8_to_snorm_i32(s);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        let a_lo = (lo - 8).max(-127);
+        let a_hi = (hi + 8).min(127);
+        let current = encode_alpha_block_signed(*samples);
+        let mut best_err = alpha_sse_s(samples, &current);
+        let mut best = current;
+        for e0 in a_lo..=a_hi {
+            for e1 in a_lo..=a_hi {
+                if e0 == e1 {
+                    continue;
+                }
+                consider_alpha_s(e0, e1, samples, &mut best, &mut best_err);
+            }
+        }
+        // 4-lerp sentinel mode benefits from endpoints at range edges too.
+        best_err as i64
+    }
+
+    fn load_tiff_gray(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+        use tiff::decoder::DecodingResult;
+        use tiff::ColorType;
+        let f = std::fs::File::open(path).ok()?;
+        let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(f)).ok()?;
+        let (w, h) = dec.dimensions().ok()?;
+        let ct = dec.colortype().ok()?;
+        match (ct, dec.read_image().ok()?) {
+            (ColorType::Gray(8), DecodingResult::U8(v)) => Some((w as usize, h as usize, v)),
+            _ => None,
+        }
+    }
+
+    /// Observe-only harvest for the signed sweep gate: every signed block in
+    /// the corpus -> (map, span, n_unique, null_err, gain, pairs).
+    #[test]
+    #[ignore]
+    fn signed_sweep_harvest() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let mut sources: Vec<(String, Vec<(usize, usize, Vec<u8>)>)> = Vec::new();
+        // Normals (R+G channels -> bc5s) and roughness masks (R -> bc4s).
+        for asset in ["Bricks097", "Metal063", "Rock064", "Wood095"] {
+            let p = format!("{root}/corpus/raw/{asset}/{asset}_1K-PNG_NormalGL.png");
+            if std::path::Path::new(&p).exists() {
+                let (w, h, r, g) = load_png_gray_channels(&p);
+                sources.push((format!("{asset}_normal"), vec![(w, h, r), (w, h, g)]));
+            }
+            let p = format!("{root}/corpus/raw/{asset}/{asset}_1K-PNG_Roughness.png");
+            if std::path::Path::new(&p).exists() {
+                let (w, h, r, _) = load_png_gray_channels(&p);
+                sources.push((format!("{asset}_mask"), vec![(w, h, r)]));
+            }
+        }
+        for tex in ["tex_bark", "tex_straw", "tex_water", "tex_wool", "tex_brick_1024"] {
+            let p = format!("{root}/corpus/raw_tif/{tex}.tiff");
+            if let Some((w, h, v)) = load_tiff_gray(&p) {
+                sources.push((tex.to_string(), vec![(w, h, v)]));
+            }
+        }
+        let mut csv = String::from("map,span,n_unique,null_err,gain,pairs,dcheb\n");
+        for (name, chans) in &sources {
+            for (w, h, chan) in chans {
+                for by in 0..h / 4 {
+                    for bx in 0..w / 4 {
+                        let s = block_samples(chan, *w, bx, by);
+                        let (mut best, mut err, lo, hi, span, n_unique) =
+                            encode_alpha_block_signed_presweep(s);
+                        let null_err = err;
+                        if null_err == 0 {
+                            continue;
+                        }
+                        let pre0 = best[0] as i8 as i32;
+                        let pre1 = best[1] as i8 as i32;
+                        signed_sweep(lo, hi, &s, &mut best, &mut err);
+                        let gain = null_err - err;
+                        // Chebyshev distance from pre-sweep endpoints to the
+                        // winners (order-insensitive: try both pairings).
+                        let dcheb = if gain > 0 {
+                            let w0 = best[0] as i8 as i32;
+                            let w1 = best[1] as i8 as i32;
+                            let d_a = (w0 - pre0).abs().max((w1 - pre1).abs());
+                            let d_b = (w0 - pre1).abs().max((w1 - pre0).abs());
+                            d_a.min(d_b)
+                        } else {
+                            -1
+                        };
+                        let range = (hi + 8).min(127) - (lo - 8).max(-127) + 1;
+                        csv.push_str(&format!(
+                            "{name},{span},{n_unique},{null_err},{gain},{},{dcheb}\n",
+                            range * range
+                        ));
+                    }
+                }
+            }
+        }
+        std::fs::write(format!("{root}/target/signed_sweep_harvest.csv"), csv).unwrap();
+        println!("wrote target/signed_sweep_harvest.csv");
+    }
+
+    #[test]
+    #[ignore]
+    fn bc5s_wood_ceiling() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{root}/corpus/raw/Wood095/Wood095_1K-PNG_NormalGL.png");
+        let (w, h, r, g) = load_png_gray_channels(&path);
+        let (bw, bh) = (w / 4, h / 4);
+        let mut cur_sse = 0i64;
+        let mut ceil_sse = 0i64;
+        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let rows_per = (bh + nthreads - 1) / nthreads;
+        let results: Vec<(i64, i64)> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for t in 0..nthreads {
+                let (r, g) = (&r, &g);
+                handles.push(scope.spawn(move || {
+                    let mut cur = 0i64;
+                    let mut ceil = 0i64;
+                    for by in (t * rows_per)..((t + 1) * rows_per).min(bh) {
+                        for bx in 0..bw {
+                            for chan in [r, g] {
+                                let s = block_samples(chan, w, bx, by);
+                                let enc = encode_alpha_block_signed(s);
+                                cur += alpha_sse_s(&s, &enc) as i64;
+                                ceil += exhaustive_signed_sse(&s);
+                            }
+                        }
+                    }
+                    (cur, ceil)
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (c, x) in results {
+            cur_sse += c;
+            ceil_sse += x;
+        }
+        let n = (w * h * 2) as f64;
+        let psnr = |sse: i64| 10.0 * (255.0f64 * 255.0 / (sse as f64 / n)).log10();
+        println!(
+            "Wood BC5S: current={:.3} dB  ceiling={:.3} dB  (delta {:+.3})",
+            psnr(cur_sse),
+            psnr(ceil_sse),
+            psnr(ceil_sse) - psnr(cur_sse)
+        );
+    }
+}
+
+#[cfg(test)]
+mod fuse_oracle {
+    use super::*;
+
+    /// pack_bc1_scored must equal the old pack_bc1 + bc1_sse pair exactly.
+    #[test]
+    fn bc1_scored_matches_pack_plus_sse() {
+        let mut state = 0x243F6A8885A308D3u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..200_000 {
+            let mut px = [[0u8; 4]; 16];
+            let flat = case % 7 == 0;
+            let base = (rng() & 0xFF) as u8;
+            for p in px.iter_mut() {
+                let r = rng();
+                if flat {
+                    p[0] = base.wrapping_add((r & 3) as u8);
+                    p[1] = base.wrapping_add(((r >> 2) & 3) as u8);
+                    p[2] = base.wrapping_add(((r >> 4) & 3) as u8);
+                } else {
+                    p[0] = (r & 0xFF) as u8;
+                    p[1] = ((r >> 8) & 0xFF) as u8;
+                    p[2] = ((r >> 16) & 0xFF) as u8;
+                }
+                // Mix in punch-through alphas sometimes.
+                p[3] = if case % 5 == 0 && (r >> 24) & 3 == 0 {
+                    ((r >> 26) & 0x7F) as u8
+                } else {
+                    255
+                };
+            }
+            let e0 = [(rng() & 0xFF) as u8, (rng() & 0xFF) as u8, (rng() & 0xFF) as u8];
+            let e1 = [(rng() & 0xFF) as u8, (rng() & 0xFF) as u8, (rng() & 0xFF) as u8];
+            let old_block = pack_bc1(px, e0, e1);
+            let old_err = bc1_sse(&px, &old_block);
+            let (new_block, new_err) =
+                pack_bc1_scored(&px, e0, e1, i32::MAX).expect("unbounded");
+            assert_eq!(old_block, new_block, "block bytes diverged (case {case})");
+            assert_eq!(old_err, new_err, "sse diverged (case {case})");
+            // Early-abort contract: limit == err must return None (>= abort).
+            assert!(pack_bc1_scored(&px, e0, e1, new_err).is_none());
+            if new_err > 0 {
+                assert!(pack_bc1_scored(&px, e0, e1, new_err + 1).is_some());
+            }
+        }
     }
 }
