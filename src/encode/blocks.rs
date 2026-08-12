@@ -667,7 +667,50 @@ fn encode_alpha_block_unsigned(samples: [u8; 16]) -> [u8; 8] {
         consider_alpha_u(a_lo, a_hi, &samples, &mut best, &mut best_err);
     }
     refine_alpha_u(&samples, n_unique, span, &mut best, &mut best_err);
+    // Unsigned twin of the signed windowed sweep: ±4 exhaustive around the
+    // winner, with the same provably-safe range-bound prune and the same
+    // gate as the signed path (UNORM span 16..=64 ≡ SNORM 8..=32; err > 4 —
+    // an err>16 variant was tried and kept only 10-45% of the smooth-map
+    // gains, which live at err 5..16). Quality-monotone.
+    if !quality_is_fast() && (16..=64).contains(&span) && best_err > 4 {
+        unsigned_window_sweep(&samples, &mut best, &mut best_err);
+    }
     best
+}
+
+/// ±4 exhaustive window around the unsigned winner; 6-lerp pairs whose
+/// palette range provably can't beat `best_err` are skipped (4-lerp pairs
+/// carry 0/255 sentinels and are never pruned); strict `<` keeps it
+/// quality-monotone.
+fn unsigned_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
+    let b0 = best[0] as i32;
+    let b1 = best[1] as i32;
+    let mut smin = 255u8;
+    let mut smax = 0u8;
+    for &s in samples {
+        smin = smin.min(s);
+        smax = smax.max(s);
+    }
+    for d0 in -4i32..=4 {
+        for d1 in -4i32..=4 {
+            if d0 == 0 && d1 == 0 {
+                continue;
+            }
+            let a0 = (b0 + d0).clamp(0, 255) as u8;
+            let a1 = (b1 + d1).clamp(0, 255) as u8;
+            if a0 > a1 {
+                let over = (smax as i32 - a0 as i32).max(0);
+                let under = (a1 as i32 - smin as i32).max(0);
+                if over * over + under * under >= *best_err {
+                    continue;
+                }
+            }
+            consider_alpha_u(a0, a1, samples, best, best_err);
+            if *best_err == 0 {
+                return;
+            }
+        }
+    }
 }
 
 /// Collect up to `cap` uniques; returns `cap+1` if busier (no full sort).
