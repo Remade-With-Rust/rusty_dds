@@ -244,19 +244,29 @@ fn rusty_roundtrip(pixels: &[u8], content: DecodeContent, ctx: &Ctx) -> Result<P
         .decode_rgba8(SubresourceId::mip_layer(0, 0))
         .map_err(|e| e.to_string())?;
     let ch = channels_for(content);
+    // SNORM recon comes back as raw SNORM bytes; map to the UNORM source
+    // domain before scoring (mirrors harvest_corpus_vs_dxtex and the DXT arm,
+    // whose C++ tool already emits UNORM) — without this the board
+    // under-scores our signed formats by ~35 dB.
+    let recon = match content {
+        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm => {
+            snorm_bits_rgba_to_unorm(&img.pixels)
+        }
+        _ => img.pixels.clone(),
+    };
     let psnr = match content {
         DecodeContent::Rgba8 | DecodeContent::Bgra8 => {
-            if img.pixels == pixels {
+            if recon == *pixels {
                 Some(f64::INFINITY)
             } else {
-                psnr_channels(&img.pixels, pixels, ch)
+                psnr_channels(&recon, pixels, ch)
             }
         }
-        _ => psnr_channels(&img.pixels, pixels, ch),
+        _ => psnr_channels(&recon, pixels, ch),
     };
     Ok(PeerResult {
         psnr,
-        max_abs: max_abs_diff(&img.pixels, pixels),
+        max_abs: max_abs_diff(&recon, pixels),
         ok: true,
         error: None,
     })
@@ -484,4 +494,16 @@ fn fill_rgba(content: DecodeContent, w: u32, h: u32, d: u32) -> Vec<u8> {
         }
     }
     v
+}
+
+/// SNORM-bit RGBA bytes → UNORM domain (matches harvest_corpus_vs_dxtex).
+fn snorm_bits_rgba_to_unorm(px: &[u8]) -> Vec<u8> {
+    let mut out = px.to_vec();
+    for p in out.chunks_exact_mut(4) {
+        for c in 0..3 {
+            let s = (p[c] as i8 as i32).clamp(-127, 127);
+            p[c] = ((((s + 127) * 255) + 127) / 254) as u8;
+        }
+    }
+    out
 }

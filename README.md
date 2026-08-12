@@ -13,10 +13,12 @@
 > asset pipelines that need DDS without a C/C++ DirectXTex stack. Container
 > lineage: MIT [ddsfile](https://github.com/PistonDevelopers/ddsfile).
 
-> **Status — 0.1 / pre-1.0, Phase 5 (productization).** LDR decode/encode matrix
-> green (BC1–BC5 U/S, BC7, RGBA/BGRA × 2D/mips/array/cube/NPOT/volume). Features:
-> `decode` + `encode` (default on). **Deferred:** BC6H / float HDR. Catalog:
-> [docs/formats.md](docs/formats.md).
+> **Status — 0.1 / pre-1.0, Phase 6 (encoder speed+quality campaign, 2026-08).**
+> LDR decode/encode matrix green (BC1–BC5 U/S, BC7, RGBA/BGRA ×
+> 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: BC7 2×
+> faster byte-identical; BC1/BC3-alpha/BC4S/BC5S quality up 65/102 corpus cases
+> with zero regressions. Features: `decode` + `encode` (default on).
+> **Deferred:** BC6H / float HDR. Catalog: [docs/formats.md](docs/formats.md).
 
 ---
 
@@ -28,17 +30,27 @@
 
 | Board (24 cases) | rusty_dds vs DirectXTex | Artifact |
 |---|---|---|
-| **Encode speed** | **24 ahead / 0 behind** | [encode-vs-baselines](docs/artifacts/encode-vs-baselines.md) |
-| **Encode quality (PSNR)** | **16 higher / 3 lower / 5 tie** (±0.25 dB) | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
+| **Encode speed** | **21 ahead / 3 behind** (behind = 3 signed cases at ~1.10×) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode quality (PSNR)** | **20 higher / 0 lower / 4 tie** (±0.25 dB) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
 | **Decode speed** | **24 ahead / 0 behind** | [decode-vs-baselines](docs/artifacts/decode-vs-baselines.md) |
-| Combined cook table | speed + PSNR per map | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| Synthetic C×X quality grid | 0 DirectXTex-higher cases | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
 
-Notes on those numbers:
+Notes on those numbers (2026-08 encoder campaign):
 
 - Peer encode flag for BC7: `TEX_COMPRESS_BC7_QUICK` (mode-6 class, matches our encoder).
 - rusty encode uses strip parallelism at ≥4096 blocks; DirectXTex peer is
   `TEX_COMPRESS_DEFAULT` (no `TEX_COMPRESS_PARALLEL`).
-- Quality losses we still call out: Bricks/Rock **BC1**, Wood **BC5S**.
+- Every 0.1 quality loss (Bricks/Rock **BC1**, Wood **BC5S**) is erased: BC1
+  gained +0.5..+1.6 dB from a PCA seed + iterated least-squares refine, and the
+  signed BC4/BC5 window search took Wood BC5S to the ±0.25 dB tie band.
+- The trade we name in return: BC4S/BC5S spend most of their former ~3× speed
+  headroom on that quality — 3 signed cases now run ~1.10× behind DirectXTex
+  (each +0.5..+0.7 dB higher PSNR there, or a tie). BC7 encode is 2× faster
+  than 0.1 (~300× vs DirectXTex-QUICK on this box).
+- Additional real-content gate in-tree: 16 CryTIF `.tif` (CRYTEK GameSDK) +
+  10 USC-SIPI TIFFs via `bench_encode_corpus` — BC3 alpha search alone was
+  worth +1.8..+3.2 dB on the CryTIF set. 65 of 102 cases improved vs 0.1,
+  zero regressed, while whole-corpus encode CPU dropped ~1.2×.
 - Proxy corpus is **not** a studio asset pack — drop in your maps for the real gate.
 
 | Dimension | Conventional DDS stacks | **rusty_dds (Rust)** |

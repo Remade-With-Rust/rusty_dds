@@ -1,621 +1,1480 @@
 {
-  "protocol": "Same corpus PNG sources \u2192 encode \u2192 decode \u2192 PSNR vs source",
+  "notes": [
+    "Identical fill_rgba sources as encode-quality / bench_baselines.",
+    "DirectXTex via dxtex_roundtrip: Compress|Convert then Decompress|Convert.",
+    "BC7 peer flag: TEX_COMPRESS_BC7_QUICK (mode-6 class).",
+    "BC4: R only; BC5: R+G; BC1: RGB; else full RGBA. RGBA/BGRA: bit-exact preferred.",
+    "verdict uses ±0.25 dB deadband for tie.",
+    "Δ = rusty_psnr − directxtex_psnr (positive ⇒ rusty_dds higher fidelity on this source)."
+  ],
   "peers": [
     "rusty_dds",
     "Microsoft DirectXTex"
   ],
-  "notes": [
-    "Primary quality baseline: ambientCG proxy corpus.",
-    "delta = rusty_psnr - directxtex_psnr. +/-0.25 dB deadband for tie.",
-    "Source harvest: corpus-vs-directxtex.json."
-  ],
+  "protocol": "Same RGBA8 source → encode → decode → PSNR vs source (preserved channels)",
   "rows": [
     {
-      "id": "Bricks097_Color__bc1",
+      "channels": [
+        0,
+        1,
+        2
+      ],
       "content": "bc1",
-      "context": "albedo",
-      "asset": "Bricks097",
-      "entry": "Bricks097_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 32.92,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 0.1,
       "directxtex": {
+        "error": null,
+        "max_abs": 19,
         "ok": true,
-        "psnr_db": 34.28,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 33.18,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": -1.3563835994938742,
+      "floor_db": 18.0,
+      "id": "bc1__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 18,
+        "ok": true,
+        "psnr_db": 33.28,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc2",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": -1.14,
+      "directxtex": {
+        "error": null,
+        "max_abs": 19,
+        "ok": true,
+        "psnr_db": 33.44,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc2__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 18,
+        "ok": true,
+        "psnr_db": 32.3,
+        "psnr_infinite": false
+      },
       "verdict": "directxtex_higher_psnr"
     },
     {
-      "id": "Bricks097_Color__bc7",
-      "content": "bc7",
-      "context": "albedo",
-      "asset": "Bricks097",
-      "entry": "Bricks097_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 40.08,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 0.09,
       "directxtex": {
+        "error": null,
+        "max_abs": 19,
         "ok": true,
-        "psnr_db": 39.85,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 34.43,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.23434754052117768,
+      "floor_db": 18.0,
+      "id": "bc3__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 18,
+        "ok": true,
+        "psnr_db": 34.52,
+        "psnr_infinite": false
+      },
       "verdict": "tie"
     },
     {
-      "id": "Bricks097_NormalGL__bc5u",
-      "content": "bc5u",
-      "context": "normal",
-      "asset": "Bricks097",
-      "entry": "Bricks097_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 44.41,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 43.81,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.6002134480233465,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Bricks097_NormalGL__bc5s",
-      "content": "bc5s",
-      "context": "normal",
-      "asset": "Bricks097",
-      "entry": "Bricks097_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 44.32,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 43.92,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.39336676505342183,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Bricks097_Roughness__bc4u",
+      "channels": [
+        0
+      ],
       "content": "bc4u",
-      "context": "mask",
-      "asset": "Bricks097",
-      "entry": "Bricks097_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 43.01,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 0.28,
       "directxtex": {
+        "error": null,
+        "max_abs": 192,
         "ok": true,
-        "psnr_db": 42.42,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 51.14,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.5858141832266526,
+      "floor_db": 28.0,
+      "id": "bc4u__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 1,
+        "ok": true,
+        "psnr_db": 51.42,
+        "psnr_infinite": false
+      },
       "verdict": "rusty_higher_psnr"
     },
     {
-      "id": "Bricks097_Roughness__bc4s",
+      "channels": [
+        0
+      ],
       "content": "bc4s",
-      "context": "mask",
-      "asset": "Bricks097",
-      "entry": "Bricks097_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 43.0,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 9.54,
       "directxtex": {
+        "error": null,
+        "max_abs": 193,
         "ok": true,
-        "psnr_db": 42.54,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 50.63,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.45287932231332917,
+      "floor_db": 28.0,
+      "id": "bc4s__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 60.17,
+        "psnr_infinite": false
+      },
       "verdict": "rusty_higher_psnr"
     },
     {
-      "id": "Metal063_Color__bc1",
-      "content": "bc1",
-      "context": "albedo",
-      "asset": "Metal063",
-      "entry": "Metal063_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 39.0,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5u",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 0.28,
       "directxtex": {
+        "error": null,
+        "max_abs": 1,
         "ok": true,
-        "psnr_db": 38.93,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 51.14,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.07455517931678912,
+      "floor_db": 28.0,
+      "id": "bc5u__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 1,
+        "ok": true,
+        "psnr_db": 51.42,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5s",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": 9.54,
+      "directxtex": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 50.63,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5s__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 60.17,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": -0.04,
+      "directxtex": {
+        "error": null,
+        "max_abs": 17,
+        "ok": true,
+        "psnr_db": 35.13,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 17,
+        "ok": true,
+        "psnr_db": 35.09,
+        "psnr_infinite": false
+      },
       "verdict": "tie"
     },
     {
-      "id": "Metal063_Color__bc7",
-      "content": "bc7",
-      "context": "albedo",
-      "asset": "Metal063",
-      "entry": "Metal063_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 47.35,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-2D",
+      "delta_rusty_minus_dxtex_db": null,
       "directxtex": {
-        "ok": true,
-        "psnr_db": 47.0,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.3535971396447124,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Metal063_NormalGL__bc5u",
-      "content": "bc5u",
-      "context": "normal",
-      "asset": "Metal063",
-      "entry": "Metal063_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
         "ok": true,
         "psnr_db": null,
-        "psnr_infinite": true,
-        "max_abs": null,
-        "error": null
+        "psnr_infinite": true
       },
-      "directxtex": {
+      "floor_db": null,
+      "id": "rgba8__X-2D",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
         "ok": true,
-        "psnr_db": 99.04,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": null,
+        "psnr_infinite": true
       },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bgra8",
+      "context": "X-2D",
       "delta_rusty_minus_dxtex_db": null,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Metal063_NormalGL__bc5s",
-      "content": "bc5s",
-      "context": "normal",
-      "asset": "Metal063",
-      "entry": "Metal063_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 51.14,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
       "directxtex": {
+        "error": null,
+        "max_abs": 0,
         "ok": true,
-        "psnr_db": 51.14,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": null,
+        "psnr_infinite": true
       },
-      "delta_rusty_minus_dxtex_db": -0.0002070946591459233,
-      "verdict": "tie"
-    },
-    {
-      "id": "Metal063_Roughness__bc4u",
-      "content": "bc4u",
-      "context": "mask",
-      "asset": "Metal063",
-      "entry": "Metal063_Roughness",
       "floor_db": null,
-      "channels": null,
+      "id": "bgra8__X-2D",
       "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
         "ok": true,
-        "psnr_db": 46.12,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": null,
+        "psnr_infinite": true
       },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 45.36,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.7610901168325057,
-      "verdict": "rusty_higher_psnr"
+      "verdict": "tie_exact"
     },
     {
-      "id": "Metal063_Roughness__bc4s",
-      "content": "bc4s",
-      "context": "mask",
-      "asset": "Metal063",
-      "entry": "Metal063_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 46.12,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 45.59,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.5297161724888682,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Rock064_Color__bc1",
+      "channels": [
+        0,
+        1,
+        2
+      ],
       "content": "bc1",
-      "context": "albedo",
-      "asset": "Rock064",
-      "entry": "Rock064_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 32.37,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": -0.35,
       "directxtex": {
+        "error": null,
+        "max_abs": 101,
         "ok": true,
-        "psnr_db": 32.81,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 15.84,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": -0.43547116955287635,
+      "floor_db": 18.0,
+      "id": "bc1__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 115,
+        "ok": true,
+        "psnr_db": 15.49,
+        "psnr_infinite": false
+      },
       "verdict": "directxtex_higher_psnr"
     },
     {
-      "id": "Rock064_Color__bc7",
-      "content": "bc7",
-      "context": "albedo",
-      "asset": "Rock064",
-      "entry": "Rock064_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 38.4,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc2",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": -0.35,
       "directxtex": {
+        "error": null,
+        "max_abs": 101,
         "ok": true,
-        "psnr_db": 38.28,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 17.09,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.11968940376989678,
-      "verdict": "tie"
-    },
-    {
-      "id": "Rock064_NormalGL__bc5u",
-      "content": "bc5u",
-      "context": "normal",
-      "asset": "Rock064",
-      "entry": "Rock064_NormalGL",
-      "floor_db": null,
-      "channels": null,
+      "floor_db": 18.0,
+      "id": "bc2__X-MIP",
       "rusty_dds": {
+        "error": null,
+        "max_abs": 115,
         "ok": true,
-        "psnr_db": 46.76,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 16.74,
+        "psnr_infinite": false
       },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 46.02,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.7443523043445808,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Rock064_NormalGL__bc5s",
-      "content": "bc5s",
-      "context": "normal",
-      "asset": "Rock064",
-      "entry": "Rock064_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 46.72,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 46.19,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.5267656415612265,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Rock064_Roughness__bc4u",
-      "content": "bc4u",
-      "context": "mask",
-      "asset": "Rock064",
-      "entry": "Rock064_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 47.05,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 46.2,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.8554035019484445,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Rock064_Roughness__bc4s",
-      "content": "bc4s",
-      "context": "mask",
-      "asset": "Rock064",
-      "entry": "Rock064_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 46.99,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 46.44,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.5553416623816858,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Wood095_Color__bc1",
-      "content": "bc1",
-      "context": "albedo",
-      "asset": "Wood095",
-      "entry": "Wood095_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 40.31,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 40.41,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": -0.09591744339896024,
-      "verdict": "tie"
-    },
-    {
-      "id": "Wood095_Color__bc7",
-      "content": "bc7",
-      "context": "albedo",
-      "asset": "Wood095",
-      "entry": "Wood095_Color",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 48.99,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 48.56,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 0.42822463898193064,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Wood095_NormalGL__bc5u",
-      "content": "bc5u",
-      "context": "normal",
-      "asset": "Wood095",
-      "entry": "Wood095_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 53.61,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 52.02,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": 1.592545801627054,
-      "verdict": "rusty_higher_psnr"
-    },
-    {
-      "id": "Wood095_NormalGL__bc5s",
-      "content": "bc5s",
-      "context": "normal",
-      "asset": "Wood095",
-      "entry": "Wood095_NormalGL",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 52.18,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "directxtex": {
-        "ok": true,
-        "psnr_db": 52.69,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
-      "delta_rusty_minus_dxtex_db": -0.5118253299508311,
       "verdict": "directxtex_higher_psnr"
     },
     {
-      "id": "Wood095_Roughness__bc4u",
-      "content": "bc4u",
-      "context": "mask",
-      "asset": "Wood095",
-      "entry": "Wood095_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 54.53,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": -0.35,
       "directxtex": {
+        "error": null,
+        "max_abs": 101,
         "ok": true,
-        "psnr_db": 52.63,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 17.09,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 1.8909489950493281,
+      "floor_db": 18.0,
+      "id": "bc3__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 115,
+        "ok": true,
+        "psnr_db": 16.74,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4u",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": -0.84,
+      "directxtex": {
+        "error": null,
+        "max_abs": 145,
+        "ok": true,
+        "psnr_db": 35.96,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4u__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 6,
+        "ok": true,
+        "psnr_db": 35.12,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4s",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": 0.7,
+      "directxtex": {
+        "error": null,
+        "max_abs": 147,
+        "ok": true,
+        "psnr_db": 35.89,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4s__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 36.59,
+        "psnr_infinite": false
+      },
       "verdict": "rusty_higher_psnr"
     },
     {
-      "id": "Wood095_Roughness__bc4s",
-      "content": "bc4s",
-      "context": "mask",
-      "asset": "Wood095",
-      "entry": "Wood095_Roughness",
-      "floor_db": null,
-      "channels": null,
-      "rusty_dds": {
-        "ok": true,
-        "psnr_db": 54.53,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
-      },
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5u",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": -0.84,
       "directxtex": {
+        "error": null,
+        "max_abs": 5,
         "ok": true,
-        "psnr_db": 54.13,
-        "psnr_infinite": false,
-        "max_abs": null,
-        "error": null
+        "psnr_db": 35.96,
+        "psnr_infinite": false
       },
-      "delta_rusty_minus_dxtex_db": 0.3967511246827016,
+      "floor_db": 28.0,
+      "id": "bc5u__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 6,
+        "ok": true,
+        "psnr_db": 35.12,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5s",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": 0.7,
+      "directxtex": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 35.89,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5s__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 36.59,
+        "psnr_infinite": false
+      },
       "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": 0.03,
+      "directxtex": {
+        "error": null,
+        "max_abs": 100,
+        "ok": true,
+        "psnr_db": 17.06,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 100,
+        "ok": true,
+        "psnr_db": 17.08,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "rgba8__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bgra8",
+      "context": "X-MIP",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "bgra8__X-MIP",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2
+      ],
+      "content": "bc1",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": -0.36,
+      "directxtex": {
+        "error": null,
+        "max_abs": 27,
+        "ok": true,
+        "psnr_db": 27.79,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc1__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 32,
+        "ok": true,
+        "psnr_db": 27.44,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc2",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": -0.67,
+      "directxtex": {
+        "error": null,
+        "max_abs": 27,
+        "ok": true,
+        "psnr_db": 28.73,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc2__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 32,
+        "ok": true,
+        "psnr_db": 28.07,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": -0.36,
+      "directxtex": {
+        "error": null,
+        "max_abs": 27,
+        "ok": true,
+        "psnr_db": 29.04,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc3__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 32,
+        "ok": true,
+        "psnr_db": 28.68,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4u",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": 4.19,
+      "directxtex": {
+        "error": null,
+        "max_abs": 186,
+        "ok": true,
+        "psnr_db": 46.95,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4u__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 1,
+        "ok": true,
+        "psnr_db": 51.14,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4s",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": 0.0,
+      "directxtex": {
+        "error": null,
+        "max_abs": 187,
+        "ok": true,
+        "psnr_db": 49.76,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4s__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 49.76,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5u",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": 4.19,
+      "directxtex": {
+        "error": null,
+        "max_abs": 2,
+        "ok": true,
+        "psnr_db": 46.95,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5u__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 1,
+        "ok": true,
+        "psnr_db": 51.14,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5s",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": 0.0,
+      "directxtex": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 49.76,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5s__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 49.76,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": -0.02,
+      "directxtex": {
+        "error": null,
+        "max_abs": 28,
+        "ok": true,
+        "psnr_db": 29.15,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 25,
+        "ok": true,
+        "psnr_db": 29.14,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "rgba8__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bgra8",
+      "context": "X-ARRAY",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "bgra8__X-ARRAY",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2
+      ],
+      "content": "bc1",
+      "context": "X-CUBE",
+      "delta_rusty_minus_dxtex_db": -0.36,
+      "directxtex": {
+        "error": null,
+        "max_abs": 27,
+        "ok": true,
+        "psnr_db": 27.79,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc1__X-CUBE",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 32,
+        "ok": true,
+        "psnr_db": 27.44,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-CUBE",
+      "delta_rusty_minus_dxtex_db": -0.36,
+      "directxtex": {
+        "error": null,
+        "max_abs": 27,
+        "ok": true,
+        "psnr_db": 29.04,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc3__X-CUBE",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 32,
+        "ok": true,
+        "psnr_db": 28.68,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-CUBE",
+      "delta_rusty_minus_dxtex_db": -0.02,
+      "directxtex": {
+        "error": null,
+        "max_abs": 28,
+        "ok": true,
+        "psnr_db": 29.15,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-CUBE",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 25,
+        "ok": true,
+        "psnr_db": 29.14,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-CUBE",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "rgba8__X-CUBE",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2
+      ],
+      "content": "bc1",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": -0.35,
+      "directxtex": {
+        "error": null,
+        "max_abs": 86,
+        "ok": true,
+        "psnr_db": 16.56,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc1__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 96,
+        "ok": true,
+        "psnr_db": 16.21,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc2",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": -0.35,
+      "directxtex": {
+        "error": null,
+        "max_abs": 86,
+        "ok": true,
+        "psnr_db": 17.81,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc2__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 96,
+        "ok": true,
+        "psnr_db": 17.46,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": -0.35,
+      "directxtex": {
+        "error": null,
+        "max_abs": 86,
+        "ok": true,
+        "psnr_db": 17.81,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc3__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 96,
+        "ok": true,
+        "psnr_db": 17.46,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4u",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 100,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": 28.0,
+      "id": "bc4u__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4s",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 100,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": 28.0,
+      "id": "bc4s__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5u",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": 28.0,
+      "id": "bc5u__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5s",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": 28.0,
+      "id": "bc5s__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": -0.1,
+      "directxtex": {
+        "error": null,
+        "max_abs": 85,
+        "ok": true,
+        "psnr_db": 17.76,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 100,
+        "ok": true,
+        "psnr_db": 17.66,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "rgba8__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bgra8",
+      "context": "X-NPOT",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "bgra8__X-NPOT",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2
+      ],
+      "content": "bc1",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": -0.38,
+      "directxtex": {
+        "error": null,
+        "max_abs": 50,
+        "ok": true,
+        "psnr_db": 21.84,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc1__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 65,
+        "ok": true,
+        "psnr_db": 21.46,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc2",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": -0.49,
+      "directxtex": {
+        "error": null,
+        "max_abs": 50,
+        "ok": true,
+        "psnr_db": 23.03,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc2__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 65,
+        "ok": true,
+        "psnr_db": 22.54,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc3",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": -0.38,
+      "directxtex": {
+        "error": null,
+        "max_abs": 50,
+        "ok": true,
+        "psnr_db": 23.09,
+        "psnr_infinite": false
+      },
+      "floor_db": 18.0,
+      "id": "bc3__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 65,
+        "ok": true,
+        "psnr_db": 22.71,
+        "psnr_infinite": false
+      },
+      "verdict": "directxtex_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4u",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": 4.87,
+      "directxtex": {
+        "error": null,
+        "max_abs": 174,
+        "ok": true,
+        "psnr_db": 40.83,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4u__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 3,
+        "ok": true,
+        "psnr_db": 45.7,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0
+      ],
+      "content": "bc4s",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": 1.53,
+      "directxtex": {
+        "error": null,
+        "max_abs": 174,
+        "ok": true,
+        "psnr_db": 41.48,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc4s__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 43.01,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5u",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": 4.87,
+      "directxtex": {
+        "error": null,
+        "max_abs": 4,
+        "ok": true,
+        "psnr_db": 40.83,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5u__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 3,
+        "ok": true,
+        "psnr_db": 45.7,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1
+      ],
+      "content": "bc5s",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": 1.53,
+      "directxtex": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 41.48,
+        "psnr_infinite": false
+      },
+      "floor_db": 28.0,
+      "id": "bc5s__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 128,
+        "ok": true,
+        "psnr_db": 43.01,
+        "psnr_infinite": false
+      },
+      "verdict": "rusty_higher_psnr"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bc7",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": -0.01,
+      "directxtex": {
+        "error": null,
+        "max_abs": 58,
+        "ok": true,
+        "psnr_db": 23.11,
+        "psnr_infinite": false
+      },
+      "floor_db": 22.0,
+      "id": "bc7__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 50,
+        "ok": true,
+        "psnr_db": 23.1,
+        "psnr_infinite": false
+      },
+      "verdict": "tie"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "rgba8",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "rgba8__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
+    },
+    {
+      "channels": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "content": "bgra8",
+      "context": "X-VOL",
+      "delta_rusty_minus_dxtex_db": null,
+      "directxtex": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "floor_db": null,
+      "id": "bgra8__X-VOL",
+      "rusty_dds": {
+        "error": null,
+        "max_abs": 0,
+        "ok": true,
+        "psnr_db": null,
+        "psnr_infinite": true
+      },
+      "verdict": "tie_exact"
     }
   ],
   "summary": {
-    "cases": 24,
-    "compared": 24,
-    "rusty_higher_psnr": 16,
-    "directxtex_higher_psnr": 3,
-    "tie": 5
+    "cases": 54,
+    "compared": 54,
+    "directxtex_higher_psnr": 17,
+    "rusty_higher_psnr": 12,
+    "tie": 25
   }
 }
