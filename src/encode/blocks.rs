@@ -214,16 +214,163 @@ fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     if rgb_channel_span_sum(&pixels) < 24 {
         return a;
     }
+    let mut best = a;
+    let mut best_err = bc1_sse(&pixels, &a);
+    if best_err == 0 {
+        return best;
+    }
     let (mx, mn) = channel_minmax_rgb(&pixels);
-    if mx == max_c && mn == min_c {
-        return a;
+    if !(mx == max_c && mn == min_c) {
+        consider_bc1(&pixels, mx, mn, &mut best, &mut best_err);
     }
-    let b = pack_bc1(pixels, mx, mn);
-    if bc1_sse(&pixels, &b) < bc1_sse(&pixels, &a) {
-        b
-    } else {
-        a
+    if quality_is_fast() || best_err == 0 {
+        return best;
     }
+    // PCA-axis extremes: luminance extrema mis-seed chroma-dominant blocks.
+    if let Some((pa, pb)) = pca_extremes_rgb(&pixels) {
+        consider_bc1(&pixels, pa, pb, &mut best, &mut best_err);
+    }
+    // Least-squares endpoint refine from the winner's indices, iterated while
+    // the decode-matched SSE keeps falling (candidates only ever ADD, picked
+    // by the same bc1_sse — per-block error is monotonically ≤ the old path).
+    for _ in 0..4 {
+        if best_err == 0 {
+            break;
+        }
+        let Some((e0, e1)) = ls_endpoints_bc1(&pixels, &best) else {
+            break;
+        };
+        let prev = best_err;
+        consider_bc1(&pixels, e0, e1, &mut best, &mut best_err);
+        if best_err >= prev {
+            break;
+        }
+    }
+    best
+}
+
+fn consider_bc1(
+    pixels: &[[u8; 4]; 16],
+    e0: [u8; 3],
+    e1: [u8; 3],
+    best: &mut [u8; 8],
+    best_err: &mut i32,
+) {
+    let cand = pack_bc1(*pixels, e0, e1);
+    let err = bc1_sse(pixels, &cand);
+    if err < *best_err {
+        *best = cand;
+        *best_err = err;
+    }
+}
+
+/// Principal-axis extremes: project RGB onto the covariance principal axis
+/// (3 power iterations) and return the two extreme PIXELS along it.
+fn pca_extremes_rgb(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+    let mut mean = [0f32; 3];
+    for p in pixels {
+        for c in 0..3 {
+            mean[c] += p[c] as f32;
+        }
+    }
+    for m in mean.iter_mut() {
+        *m /= 16.0;
+    }
+    // Covariance (upper triangle).
+    let mut cov = [0f32; 6]; // rr rg rb gg gb bb
+    for p in pixels {
+        let d = [
+            p[0] as f32 - mean[0],
+            p[1] as f32 - mean[1],
+            p[2] as f32 - mean[2],
+        ];
+        cov[0] += d[0] * d[0];
+        cov[1] += d[0] * d[1];
+        cov[2] += d[0] * d[2];
+        cov[3] += d[1] * d[1];
+        cov[4] += d[1] * d[2];
+        cov[5] += d[2] * d[2];
+    }
+    let mut axis = [
+        cov[0] + cov[1] + cov[2],
+        cov[1] + cov[3] + cov[4],
+        cov[2] + cov[4] + cov[5],
+    ];
+    for _ in 0..3 {
+        let n = [
+            cov[0] * axis[0] + cov[1] * axis[1] + cov[2] * axis[2],
+            cov[1] * axis[0] + cov[3] * axis[1] + cov[4] * axis[2],
+            cov[2] * axis[0] + cov[4] * axis[1] + cov[5] * axis[2],
+        ];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len < 1e-6 {
+            return None;
+        }
+        axis = [n[0] / len, n[1] / len, n[2] / len];
+    }
+    let mut lo_t = f32::MAX;
+    let mut hi_t = f32::MIN;
+    let mut lo_p = [0u8; 3];
+    let mut hi_p = [0u8; 3];
+    for p in pixels {
+        let t = (p[0] as f32 - mean[0]) * axis[0]
+            + (p[1] as f32 - mean[1]) * axis[1]
+            + (p[2] as f32 - mean[2]) * axis[2];
+        if t < lo_t {
+            lo_t = t;
+            lo_p = [p[0], p[1], p[2]];
+        }
+        if t > hi_t {
+            hi_t = t;
+            hi_p = [p[0], p[1], p[2]];
+        }
+    }
+    if lo_p == hi_p {
+        return None;
+    }
+    Some((hi_p, lo_p))
+}
+
+/// LS endpoints from a packed BC1 block's indices (4-color mode only).
+/// Weights toward c1: idx0=0, idx1=1, idx2=1/3, idx3=2/3.
+fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Option<([u8; 3], [u8; 3])> {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+    if c0 <= c1 {
+        return None; // 3-color + punch-through mode: skip LS.
+    }
+    let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
+    let mut a00 = 0f32;
+    let mut a01 = 0f32;
+    let mut a11 = 0f32;
+    let mut b0 = [0f32; 3];
+    let mut b1 = [0f32; 3];
+    for (i, p) in pixels.iter().enumerate() {
+        let w = W[((table >> (2 * i)) & 3) as usize];
+        let u = 1.0 - w;
+        a00 += u * u;
+        a01 += u * w;
+        a11 += w * w;
+        for c in 0..3 {
+            let x = p[c] as f32;
+            b0[c] += u * x;
+            b1[c] += w * x;
+        }
+    }
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() < 1e-4 {
+        return None;
+    }
+    let mut e0 = [0u8; 3];
+    let mut e1 = [0u8; 3];
+    for c in 0..3 {
+        let x0 = (a11 * b0[c] - a01 * b1[c]) / det;
+        let x1 = (a00 * b1[c] - a01 * b0[c]) / det;
+        e0[c] = x0.round().clamp(0.0, 255.0) as u8;
+        e1[c] = x1.round().clamp(0.0, 255.0) as u8;
+    }
+    Some((e0, e1))
 }
 
 fn rgb_channel_span_sum(pixels: &[[u8; 4]; 16]) -> i32 {
