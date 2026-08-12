@@ -9,3 +9,5 @@ corpus/raw/
 *.pdb
 .DS_Store
 docs/artifacts/bc45-refine-skip-harvest.csv
+corpus/raw_crytif/
+corpus/raw_tif/

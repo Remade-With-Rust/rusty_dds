@@ -105,6 +105,10 @@ required-features = ["decode", "encode"]
 name = "demo_tiff_side_by_side"
 required-features = ["decode", "encode"]
 
+[[example]]
+name = "bench_encode_corpus"
+required-features = ["decode", "encode"]
+
 [[test]]
 name = "decode_matrix"
 required-features = ["decode"]

@@ -54,3 +54,23 @@ cargo run --release --example harvest_corpus_vs_dxtex
 ```
 
 Writes `docs/artifacts/corpus-vs-directxtex.{json,md}` (encode µs + round-trip PSNR).
+
+## Real .tif / CryTIF corpora (encoder campaign, gitignored)
+
+| Dir | Source | License / provenance | Contents |
+|-----|--------|---------------------|----------|
+| `raw_crytif/` | [CRYTEK/GameSDK](https://github.com/CRYTEK/GameSDK) (`release` branch, `Libs/UI/...`) | Crytek GameSDK sample-project assets, downloaded for local benchmarking only (not redistributed) | 16 genuine CryTIF-pipeline `.tif` (RGBA UI textures, alpha-heavy; 512²–2048×1024) |
+| `raw_tif/` | [USC-SIPI image database](https://sipi.usc.edu/database/) | Research-use image database, local benchmarking only | 10 real `.tiff` (big-endian): color (mandrill/peppers/airplane/aerials) + grayscale Brodatz textures |
+
+Fetch (re-run skips existing): see git history of this file / `bench_encode_corpus.rs` header.
+Roles: CryTIF RGBA → BC1/BC3/BC7; SIPI color → BC1/BC3/BC7; SIPI gray → BC4U/BC4S/BC1.
+
+## Encoder A/B gate
+
+```bash
+cargo run --release --example bench_encode_corpus   # table + target/encode_corpus_bench.json
+```
+
+Per-case round-trip PSNR + payload FNV (byte-identity gate for speed bricks) in one
+deterministic pass; encode wall best-of-N in a separate pass (`RUSTY_DDS_ITERS`,
+`RUSTY_DDS_FILTER` to subset; pin the process externally for A/B verdicts).
