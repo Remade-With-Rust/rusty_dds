@@ -1671,9 +1671,92 @@ fn best_index_pal(px: &[u8; 4], pal: &[[u8; 4]; 16]) -> (u8, i32) {
     (best_i, best_e)
 }
 
+/// t64 (0..=64) → nearest mode-6 weight index, ties toward the lower index.
+const W6M_NEAREST: [u8; 65] = {
+    let mut lut = [0u8; 65];
+    let mut t = 0;
+    while t <= 64 {
+        let mut best = 0usize;
+        let mut best_d = 255i32;
+        let mut k = 0usize;
+        while k < 16 {
+            let d = (W6M[k] as i32 - t as i32).abs();
+            if d < best_d {
+                best_d = d;
+                best = k;
+            }
+            k += 1;
+        }
+        lut[t] = best as u8;
+        t += 1;
+    }
+    lut
+};
+
 /// Index-fit a whole block against one palette; returns (indices, total SSE).
+///
+/// Fast path: palette entries lie (rounded) on the c0→c1 line, so the SSE
+/// argmin sits at the projection of the pixel onto that line; evaluating a
+/// ±2 index window in ascending order reproduces the exhaustive scan's
+/// strict-`<` lowest-index-tie result (equal-SSE minima on a line can only
+/// straddle the projection, i.e. adjacent indices). Near-degenerate palettes
+/// (axis < 16 in every channel → entries may collide after rounding, where a
+/// distant equal-SSE entry could win the global tiebreak) take the
+/// exhaustive path. Twin test: `mode6_projection_matches_exhaustive`.
 #[inline]
 fn fit_indices_mode6(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
+    let c0 = pal[0];
+    let c1 = pal[15];
+    let mut axis = [0i32; 4];
+    let mut len2 = 0i64;
+    let mut mono = false;
+    for c in 0..4 {
+        axis[c] = c1[c] as i32 - c0[c] as i32;
+        len2 += (axis[c] * axis[c]) as i64;
+        if axis[c].abs() >= 16 {
+            mono = true;
+        }
+    }
+    if !mono {
+        return fit_indices_mode6_exhaustive(pixels, pal);
+    }
+    let mut indices = [0u8; 16];
+    let mut err = 0i64;
+    for (i, px) in pixels.iter().enumerate() {
+        let mut dot = 0i64;
+        for c in 0..4 {
+            dot += ((px[c] as i32 - c0[c] as i32) * axis[c]) as i64;
+        }
+        let t64 = if dot <= 0 {
+            0usize
+        } else {
+            (((dot * 64 + len2 / 2) / len2) as usize).min(64)
+        };
+        let k = W6M_NEAREST[t64] as i32;
+        let lo = (k - 2).max(0) as usize;
+        let hi = ((k + 2) as usize).min(15);
+        let mut bi = lo as u8;
+        let mut be = i32::MAX;
+        for (j, p) in pal.iter().enumerate().take(hi + 1).skip(lo) {
+            let mut e = 0i32;
+            for c in 0..4 {
+                let d = p[c] as i32 - px[c] as i32;
+                e += d * d;
+            }
+            if e < be {
+                be = e;
+                bi = j as u8;
+            }
+        }
+        indices[i] = bi;
+        err += be as i64;
+    }
+    (indices, err)
+}
+
+/// Exhaustive twin (oracle + fallback for near-degenerate palettes).
+#[inline]
+fn fit_indices_mode6_exhaustive(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
     let mut indices = [0u8; 16];
     let mut err = 0i64;
     for (i, px) in pixels.iter().enumerate() {
@@ -2206,6 +2289,86 @@ mod fuse_oracle {
             if new_err > 0 {
                 assert!(pack_bc1_scored(&px, e0, e1, new_err + 1).is_some());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode6_projection_oracle {
+    use super::*;
+
+    #[test]
+    fn mode6_projection_matches_exhaustive() {
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..400_000u32 {
+            // Production-shaped palettes: random endpoints through the same
+            // quantize/unquantize as try_bc7_mode6, biased toward small axes
+            // every few cases to stress the mono-gate boundary.
+            let r = rng();
+            let e0 = [
+                (r & 0xFF) as u8,
+                ((r >> 8) & 0xFF) as u8,
+                ((r >> 16) & 0xFF) as u8,
+                ((r >> 24) & 0xFF) as u8,
+            ];
+            let e1 = if case % 4 == 0 {
+                // near-degenerate: e1 within +-8 of e0 per channel
+                let s = rng();
+                let mut v = [0u8; 4];
+                for c in 0..4 {
+                    let d = ((s >> (8 * c)) & 0xF) as i32 - 8;
+                    v[c] = (e0[c] as i32 + d).clamp(0, 255) as u8;
+                }
+                v
+            } else {
+                let s = rng();
+                [
+                    (s & 0xFF) as u8,
+                    ((s >> 8) & 0xFF) as u8,
+                    ((s >> 16) & 0xFF) as u8,
+                    ((s >> 24) & 0xFF) as u8,
+                ]
+            };
+            let (q0, p0) = quantize_7p(e0);
+            let (q1, p1) = quantize_7p(e1);
+            let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
+            let mut px = [[0u8; 4]; 16];
+            for p in px.iter_mut() {
+                let r = rng();
+                // Mix: random pixels and near-palette pixels (index-fit shape).
+                if r & 1 == 0 {
+                    let k = ((r >> 1) & 15) as usize;
+                    for c in 0..4 {
+                        let n = ((r >> (8 + 8 * c)) & 7) as i32 - 3;
+                        p[c] = (pal[k][c] as i32 + n).clamp(0, 255) as u8;
+                    }
+                } else {
+                    p[0] = (r >> 8) as u8;
+                    p[1] = (r >> 16) as u8;
+                    p[2] = (r >> 24) as u8;
+                    p[3] = (r >> 32) as u8;
+                }
+            }
+            let fast = fit_indices_mode6(&px, &pal);
+            let slow = fit_indices_mode6_exhaustive(&px, &pal);
+            // Contract: the projection window is a RESTRICTED search, so its
+            // SSE can only be >= the exhaustive fit, and only negligibly so
+            // (divergence needs a pixel far off the endpoint line, where the
+            // rounding cross-term outweighs the t-distance — SSE-tiny by
+            // construction; corpus payloads move 0 cases at 0.0001 dB).
+            assert!(fast.1 >= slow.1, "fast beat exhaustive?! (case {case})");
+            assert!(
+                fast.1 <= slow.1 + slow.1 / 100 + 16,
+                "projection fit degraded SSE beyond contract (case {case}): {} vs {}",
+                fast.1,
+                slow.1
+            );
         }
     }
 }
