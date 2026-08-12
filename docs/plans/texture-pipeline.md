@@ -242,6 +242,24 @@ the `bc5s_wood_ceiling` oracle. Iterated-LS-alone was REFUTED for the Wood gap
 (+0.000 dB — the LS fixed point is the local optimum; the win is discrete
 UNORM-lattice search near the incumbent).
 
+#### Phase 6b follow-ups (second pass, same session)
+
+| Brick | Type | Result |
+|---|---|---|
+| BC7 projection-window index fit (±2 around the pixel's axis projection; exhaustive fallback for near-degenerate palettes) | speed, quality-gated | BC7 total 1122→935 ms pinned (**1.20×**); 0/102 corpus cases move at 0.0001 dB; contract oracle over 400k adversarial cases |
+| Unsigned BC4/BC5 ±4 window (same gate + prune as signed) | quality, monotone | 14 cases +0.15..+0.45 dB, 0 down; campaign cumulative **72/102 up, 0 down**; CPU margin vs 0.1.2 thins 1.21×→1.09× (ABBA 5/5) |
+| err>16 tight unsigned gate | REVERTED | kept only 10–45% of smooth-map gains (they live at err 5..16) |
+| BC1 565-lattice endpoint window | OPEN (not attempted) | expected +0.05..0.2 dB at ~2.7× BC1 cost — would spend the bc1 board margin for marginal gain |
+
+**Board status:** `corpus-vs-directxtex` was regenerated clean earlier in the
+campaign (sanity gate: byte-identical bc4u/bc5u read their known 0.33–0.40
+standing). The post-follow-up refresh is PENDING a calm box — the 2026-08-12
+afternoon attempts were poisoned by a standing `ocr_batch` + IDE load at 100%
+CPU (physically impossible ratios: bc7 "loss" at 300× advantage). Expected
+honest deltas when re-run: bc7 ratios improve ~1.2×, bc4u/bc5u move from
+~0.33–0.40 toward ~0.85–1.0 (quality purchase, same trade already named for
+the signed formats).
+
 #### Deferred items, re-scoped by this campaign
 
 - **BC6H / float HDR** (the remaining format-matrix hole): needs `ImageRgbaf32`
