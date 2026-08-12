@@ -155,11 +155,25 @@ fn encode_image_parallel(
 
 #[inline]
 fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 4]; 16] {
+    let x0 = bx * 4;
+    let y0 = by * 4;
+    if x0 + 4 <= w && y0 + 4 <= h {
+        // Interior block: four contiguous 16-byte row copies, no per-pixel clamps.
+        let mut pixels = [[0u8; 4]; 16];
+        for row in 0..4 {
+            let src = ((y0 + row) * w + x0) * 4;
+            for col in 0..4 {
+                let i = src + col * 4;
+                pixels[row * 4 + col] = [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+            }
+        }
+        return pixels;
+    }
     let mut pixels = [[0u8, 0, 0, 255]; 16];
     for row in 0..4 {
         for col in 0..4 {
-            let x = bx * 4 + col;
-            let y = by * 4 + row;
+            let x = x0 + col;
+            let y = y0 + row;
             let sx = x.min(w.saturating_sub(1));
             let sy = y.min(h.saturating_sub(1));
             let i = (sy * w + sx) * 4;
@@ -1163,8 +1177,8 @@ pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     let mut best_seed = extrema_rgba(&pixels);
     let mut have = false;
 
-    let seeds = bc7_mode6_seeds(&pixels);
-    for (ep0, ep1) in seeds {
+    let (seeds, n_seeds) = bc7_mode6_seeds(&pixels);
+    for &(ep0, ep1) in &seeds[..n_seeds] {
         if let Some((bits, err)) = try_bc7_mode6(&pixels, ep0, ep1, false) {
             if err < best_err {
                 best_err = err;
@@ -1197,15 +1211,31 @@ fn rgba_span_sum(pixels: &[[u8; 4]; 16]) -> i32 {
     (0..4).map(|c| (mx[c] - mn[c]) as i32).sum()
 }
 
-fn bc7_mode6_seeds(pixels: &[[u8; 4]; 16]) -> Vec<([u8; 4], [u8; 4])> {
-    let mut seeds = Vec::with_capacity(5);
-    seeds.push(extrema_rgba(pixels));
-    seeds.push(channel_minmax_rgba(pixels));
+type Seed = ([u8; 4], [u8; 4]);
+
+/// Push with dedup: a duplicate trial can never win under strict `<`, so
+/// skipping it is byte-identical and saves a whole index-fit pass.
+#[inline]
+fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
+    for seed in seeds[..*n].iter() {
+        if *seed == s {
+            return;
+        }
+    }
+    seeds[*n] = s;
+    *n += 1;
+}
+
+fn bc7_mode6_seeds(pixels: &[[u8; 4]; 16]) -> ([Seed; 5], usize) {
+    let mut seeds = [([0u8; 4], [0u8; 4]); 5];
+    let mut n = 0usize;
+    push_seed(&mut seeds, &mut n, extrema_rgba(pixels));
+    push_seed(&mut seeds, &mut n, channel_minmax_rgba(pixels));
 
     let span = rgba_span_sum(pixels);
     // Low variance: extrema + channel minmax are enough.
     if span <= 16 {
-        return seeds;
+        return (seeds, n);
     }
 
     let (mx, mn) = extrema_rgba(pixels);
@@ -1216,8 +1246,8 @@ fn bc7_mode6_seeds(pixels: &[[u8; 4]; 16]) -> Vec<([u8; 4], [u8; 4])> {
         }
     }
     let mean = mean.map(|v| (v / 16) as u8);
-    seeds.push((mx, mean));
-    seeds.push((mean, mn));
+    push_seed(&mut seeds, &mut n, (mx, mean));
+    push_seed(&mut seeds, &mut n, (mean, mn));
 
     // Farthest-pair only on busy blocks (O(16²)).
     if span > 48 {
@@ -1238,9 +1268,9 @@ fn bc7_mode6_seeds(pixels: &[[u8; 4]; 16]) -> Vec<([u8; 4], [u8; 4])> {
                 }
             }
         }
-        seeds.push((pa, pb));
+        push_seed(&mut seeds, &mut n, (pa, pb));
     }
-    seeds
+    (seeds, n)
 }
 
 fn channel_minmax_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
@@ -1255,6 +1285,55 @@ fn channel_minmax_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
     (mx, mn)
 }
 
+/// Mode-6 interpolation weights. Symmetric: `W[15-i] == 64 - W[i]`, so an
+/// endpoint swap + index inversion reconstructs identical pixels.
+const W6M: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+
+/// Reconstructed 16-entry palette for one (c0, c1) pair — computed ONCE per
+/// trial instead of re-lerping per pixel per candidate index.
+#[inline]
+fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    let mut pal = [[0u8; 4]; 16];
+    for (k, &w) in W6M.iter().enumerate() {
+        for c in 0..4 {
+            pal[k][c] = (((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64) as u8;
+        }
+    }
+    pal
+}
+
+/// Nearest palette entry (strict `<`: lowest index wins ties) + its SSE.
+#[inline]
+fn best_index_pal(px: &[u8; 4], pal: &[[u8; 4]; 16]) -> (u8, i32) {
+    let mut best_i = 0u8;
+    let mut best_e = i32::MAX;
+    for (k, p) in pal.iter().enumerate() {
+        let mut e = 0i32;
+        for c in 0..4 {
+            let d = p[c] as i32 - px[c] as i32;
+            e += d * d;
+        }
+        if e < best_e {
+            best_e = e;
+            best_i = k as u8;
+        }
+    }
+    (best_i, best_e)
+}
+
+/// Index-fit a whole block against one palette; returns (indices, total SSE).
+#[inline]
+fn fit_indices_mode6(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
+    let mut indices = [0u8; 16];
+    let mut err = 0i64;
+    for (i, px) in pixels.iter().enumerate() {
+        let (idx, e) = best_index_pal(px, pal);
+        indices[i] = idx;
+        err += e as i64;
+    }
+    (indices, err)
+}
+
 fn try_bc7_mode6(
     pixels: &[[u8; 4]; 16],
     ep0: [u8; 4],
@@ -1263,13 +1342,10 @@ fn try_bc7_mode6(
 ) -> Option<([u8; 16], i64)> {
     let (mut q0, mut p0) = quantize_7p(ep0);
     let (mut q1, mut p1) = quantize_7p(ep1);
-    let c0 = unquantize_7p(q0, p0);
-    let c1 = unquantize_7p(q1, p1);
-
-    let mut indices = [0u8; 16];
-    for (i, px) in pixels.iter().enumerate() {
-        indices[i] = best_index4(px, c0, c1);
-    }
+    let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
+    // SSE is accumulated during the index fit — the recon after an endpoint
+    // swap + index inversion is identical (W6M symmetry), so no re-walk.
+    let (mut indices, mut err) = fit_indices_mode6(pixels, &pal);
     if indices[0] > 7 {
         std::mem::swap(&mut q0, &mut q1);
         std::mem::swap(&mut p0, &mut p1);
@@ -1283,32 +1359,27 @@ fn try_bc7_mode6(
         if let Some((r0, r1)) = ls_endpoints_mode6(pixels, &indices) {
             let (nq0, np0) = quantize_7p(r0);
             let (nq1, np1) = quantize_7p(r1);
-            let nc0 = unquantize_7p(nq0, np0);
-            let nc1 = unquantize_7p(nq1, np1);
-            let mut nidx = [0u8; 16];
-            for (i, px) in pixels.iter().enumerate() {
-                nidx[i] = best_index4(px, nc0, nc1);
-            }
-            let (fq0, fp0, fq1, fp1, findices) = if nidx[0] > 7 {
-                let mut inv = nidx;
-                for idx in inv.iter_mut() {
+            let npal = palette_mode6(unquantize_7p(nq0, np0), unquantize_7p(nq1, np1));
+            let (mut nidx, nerr) = fit_indices_mode6(pixels, &npal);
+            if nidx[0] > 7 {
+                for idx in nidx.iter_mut() {
                     *idx = 15 - *idx;
                 }
-                (nq1, np1, nq0, np0, inv)
+                q0 = nq1;
+                p0 = np1;
+                q1 = nq0;
+                p1 = np0;
             } else {
-                (nq0, np0, nq1, np1, nidx)
-            };
-            q0 = fq0;
-            p0 = fp0;
-            q1 = fq1;
-            p1 = fp1;
-            indices = findices;
+                q0 = nq0;
+                p0 = np0;
+                q1 = nq1;
+                p1 = np1;
+            }
+            indices = nidx;
+            err = nerr;
         }
     }
 
-    let c0 = unquantize_7p(q0, p0);
-    let c1 = unquantize_7p(q1, p1);
-    let err = sse_mode6(pixels, c0, c1, &indices);
     Some((pack_bc7_mode6(q0, p0, q1, p1, indices), err))
 }
 
@@ -1349,20 +1420,6 @@ fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8
         e1[c] = x1.round().clamp(0.0, 255.0) as u8;
     }
     Some((e0, e1))
-}
-
-fn sse_mode6(pixels: &[[u8; 4]; 16], c0: [u8; 4], c1: [u8; 4], indices: &[u8; 16]) -> i64 {
-    const W: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
-    let mut err = 0i64;
-    for i in 0..16 {
-        let w = W[indices[i] as usize];
-        for c in 0..4 {
-            let v = ((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64;
-            let d = v as i64 - pixels[i][c] as i64;
-            err += d * d;
-        }
-    }
-    err
 }
 
 fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: [u8; 16]) -> [u8; 16] {
@@ -1427,26 +1484,6 @@ fn unquantize_7p(q: [u8; 4], p: u8) -> [u8; 4] {
 fn unquantize_7p_chan(q: u8, p: u8) -> u8 {
     let v = ((q as u32) << 1) | (p as u32);
     v as u8
-}
-
-fn best_index4(px: &[u8; 4], c0: [u8; 4], c1: [u8; 4]) -> u8 {
-    const W: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
-    let mut best_i = 0u8;
-    let mut best_e = i32::MAX;
-    for i in 0..16u8 {
-        let w = W[i as usize];
-        let mut e = 0i32;
-        for c in 0..4 {
-            let v = ((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64;
-            let d = v as i32 - px[c] as i32;
-            e += d * d;
-        }
-        if e < best_e {
-            best_e = e;
-            best_i = i;
-        }
-    }
-    best_i
 }
 
 fn extrema_opaque(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
