@@ -518,7 +518,11 @@ pub fn encode_bc2(pixels: [[u8; 4]; 16], out: &mut [u8]) {
 }
 
 pub fn encode_bc3(pixels: [[u8; 4]; 16], out: &mut [u8]) {
-    out[..8].copy_from_slice(&encode_alpha_block_fast_u(pixels.map(|p| p[3])));
+    // Full BC4-grade alpha search (uniques/LS/neighborhood) instead of the
+    // min/max-only fast path: quality-monotone (same dual seed, candidates
+    // only added under strict `<`), and CryTIF-style UI content is
+    // alpha-gradient-heavy.
+    out[..8].copy_from_slice(&encode_alpha_block_unsigned(pixels.map(|p| p[3])));
     out[8..16].copy_from_slice(&encode_bc1_bytes(pixels));
 }
 
