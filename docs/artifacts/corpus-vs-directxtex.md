@@ -14,41 +14,41 @@
   "cases": 24,
   "quality": {
     "compared": 24,
-    "directxtex_higher_psnr": 3,
-    "rusty_higher_psnr": 16,
-    "tie": 5
+    "directxtex_higher_psnr": 0,
+    "rusty_higher_psnr": 20,
+    "tie": 4
   },
   "speed": {
-    "directxtex_faster": 0,
-    "rusty_faster": 24,
-    "tie": 0
+    "directxtex_faster": 14,
+    "rusty_faster": 9,
+    "tie": 1
   }
 }
 ```
 
 | Case | Role | rusty µs | DX µs | Ratio | rusty PSNR | DX PSNR | Δ | Speed | Quality |
 |------|------|----------|-------|-------|------------|---------|---|-------|----------|
-| Bricks097_Color__bc1 | albedo | 2066 | 15007 | 0.138 | 32.92 | 34.28 | -1.36 | rusty_faster | directxtex_higher_psnr |
-| Bricks097_Color__bc7 | albedo | 23863 | 4618520 | 0.005 | 40.08 | 39.85 | +0.23 | rusty_faster | tie |
-| Bricks097_NormalGL__bc5u | normal | 4375 | 18117 | 0.241 | 44.41 | 43.81 | +0.60 | rusty_faster | rusty_higher_psnr |
-| Bricks097_NormalGL__bc5s | normal | 5137 | 19419 | 0.265 | 44.32 | 43.92 | +0.39 | rusty_faster | rusty_higher_psnr |
-| Bricks097_Roughness__bc4u | mask | 3377 | 11005 | 0.307 | 43.01 | 42.42 | +0.59 | rusty_faster | rusty_higher_psnr |
-| Bricks097_Roughness__bc4s | mask | 3512 | 11658 | 0.301 | 43.00 | 42.54 | +0.45 | rusty_faster | rusty_higher_psnr |
-| Metal063_Color__bc1 | albedo | 2607 | 26652 | 0.098 | 39.00 | 38.93 | +0.07 | rusty_faster | tie |
-| Metal063_Color__bc7 | albedo | 42334 | 8219840 | 0.005 | 47.35 | 47.00 | +0.35 | rusty_faster | rusty_higher_psnr |
-| Metal063_NormalGL__bc5u | normal | 3924 | 31330 | 0.125 | ∞ | 99.04 | — | rusty_faster | rusty_higher_psnr |
-| Metal063_NormalGL__bc5s | normal | 2663 | 27313 | 0.097 | 51.14 | 51.14 | -0.00 | rusty_faster | tie |
-| Metal063_Roughness__bc4u | mask | 6606 | 21492 | 0.307 | 46.12 | 45.36 | +0.76 | rusty_faster | rusty_higher_psnr |
-| Metal063_Roughness__bc4s | mask | 6246 | 22186 | 0.282 | 46.12 | 45.59 | +0.53 | rusty_faster | rusty_higher_psnr |
-| Rock064_Color__bc1 | albedo | 3068 | 30918 | 0.099 | 32.37 | 32.81 | -0.44 | rusty_faster | directxtex_higher_psnr |
-| Rock064_Color__bc7 | albedo | 53463 | 9966950 | 0.005 | 38.40 | 38.28 | +0.12 | rusty_faster | tie |
-| Rock064_NormalGL__bc5u | normal | 7232 | 37626 | 0.192 | 46.76 | 46.02 | +0.74 | rusty_faster | rusty_higher_psnr |
-| Rock064_NormalGL__bc5s | normal | 9139 | 41713 | 0.219 | 46.72 | 46.19 | +0.53 | rusty_faster | rusty_higher_psnr |
-| Rock064_Roughness__bc4u | mask | 5734 | 21235 | 0.270 | 47.05 | 46.20 | +0.86 | rusty_faster | rusty_higher_psnr |
-| Rock064_Roughness__bc4s | mask | 5434 | 23214 | 0.234 | 46.99 | 46.44 | +0.56 | rusty_faster | rusty_higher_psnr |
-| Wood095_Color__bc1 | albedo | 1820 | 12500 | 0.146 | 40.31 | 40.41 | -0.10 | rusty_faster | tie |
-| Wood095_Color__bc7 | albedo | 23347 | 4139260 | 0.006 | 48.99 | 48.56 | +0.43 | rusty_faster | rusty_higher_psnr |
-| Wood095_NormalGL__bc5u | normal | 2902 | 18788 | 0.154 | 53.61 | 52.02 | +1.59 | rusty_faster | rusty_higher_psnr |
-| Wood095_NormalGL__bc5s | normal | 3416 | 19434 | 0.176 | 52.18 | 52.69 | -0.51 | rusty_faster | directxtex_higher_psnr |
-| Wood095_Roughness__bc4u | mask | 2065 | 10633 | 0.194 | 54.53 | 52.63 | +1.89 | rusty_faster | rusty_higher_psnr |
-| Wood095_Roughness__bc4s | mask | 2035 | 11327 | 0.180 | 54.53 | 54.13 | +0.40 | rusty_faster | rusty_higher_psnr |
+| Bricks097_Color__bc1 | albedo | 53806 | 31496 | 1.708 | 34.57 | 34.28 | +0.29 | directxtex_faster | rusty_higher_psnr |
+| Bricks097_Color__bc7 | albedo | 134396 | 12183200 | 0.011 | 40.08 | 39.85 | +0.23 | rusty_faster | tie |
+| Bricks097_NormalGL__bc5u | normal | 1265969 | 70035 | 18.076 | 44.42 | 43.81 | +0.60 | directxtex_faster | rusty_higher_psnr |
+| Bricks097_NormalGL__bc5s | normal | 1094296 | 42806 | 25.564 | 44.37 | 43.92 | +0.45 | directxtex_faster | rusty_higher_psnr |
+| Bricks097_Roughness__bc4u | mask | 232121 | 19405 | 11.962 | 43.01 | 42.42 | +0.59 | directxtex_faster | rusty_higher_psnr |
+| Bricks097_Roughness__bc4s | mask | 318558 | 22690 | 14.040 | 43.05 | 42.54 | +0.51 | directxtex_faster | rusty_higher_psnr |
+| Metal063_Color__bc1 | albedo | 79774 | 76705 | 1.040 | 39.91 | 38.93 | +0.99 | speed_tie | rusty_higher_psnr |
+| Metal063_Color__bc7 | albedo | 103469 | 21318100 | 0.005 | 47.35 | 47.00 | +0.35 | rusty_faster | rusty_higher_psnr |
+| Metal063_NormalGL__bc5u | normal | 129685 | 56409 | 2.299 | ∞ | 99.04 | — | directxtex_faster | rusty_higher_psnr |
+| Metal063_NormalGL__bc5s | normal | 63094 | 55337 | 1.140 | 51.14 | 51.14 | -0.00 | directxtex_faster | tie |
+| Metal063_Roughness__bc4u | mask | 61560 | 46116 | 1.335 | 46.12 | 45.36 | +0.76 | directxtex_faster | rusty_higher_psnr |
+| Metal063_Roughness__bc4s | mask | 76739 | 41397 | 1.854 | 46.29 | 45.59 | +0.69 | directxtex_faster | rusty_higher_psnr |
+| Rock064_Color__bc1 | albedo | 22362 | 63182 | 0.354 | 33.78 | 32.81 | +0.97 | rusty_faster | rusty_higher_psnr |
+| Rock064_Color__bc7 | albedo | 89866 | 21612100 | 0.004 | 38.40 | 38.28 | +0.12 | rusty_faster | tie |
+| Rock064_NormalGL__bc5u | normal | 51233 | 79806 | 0.642 | 46.76 | 46.02 | +0.74 | rusty_faster | rusty_higher_psnr |
+| Rock064_NormalGL__bc5s | normal | 107205 | 94886 | 1.130 | 46.89 | 46.19 | +0.69 | directxtex_faster | rusty_higher_psnr |
+| Rock064_Roughness__bc4u | mask | 33297 | 45205 | 0.737 | 47.05 | 46.20 | +0.86 | rusty_faster | rusty_higher_psnr |
+| Rock064_Roughness__bc4s | mask | 58740 | 41773 | 1.406 | 47.16 | 46.44 | +0.72 | directxtex_faster | rusty_higher_psnr |
+| Wood095_Color__bc1 | albedo | 21097 | 28601 | 0.738 | 40.88 | 40.41 | +0.48 | rusty_faster | rusty_higher_psnr |
+| Wood095_Color__bc7 | albedo | 37556 | 8940760 | 0.004 | 48.99 | 48.56 | +0.43 | rusty_faster | rusty_higher_psnr |
+| Wood095_NormalGL__bc5u | normal | 54442 | 37654 | 1.446 | 53.61 | 52.02 | +1.59 | directxtex_faster | rusty_higher_psnr |
+| Wood095_NormalGL__bc5s | normal | 73093 | 36840 | 1.984 | 52.60 | 52.69 | -0.10 | directxtex_faster | tie |
+| Wood095_Roughness__bc4u | mask | 13002 | 20790 | 0.625 | 54.53 | 52.63 | +1.89 | rusty_faster | rusty_higher_psnr |
+| Wood095_Roughness__bc4s | mask | 29614 | 22325 | 1.326 | 55.14 | 54.13 | +1.01 | directxtex_faster | rusty_higher_psnr |

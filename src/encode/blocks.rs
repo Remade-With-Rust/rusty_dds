@@ -226,7 +226,9 @@ fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     if !(mx == max_c && mn == min_c) {
         consider_bc1(&pixels, mx, mn, &mut best, &mut best_err);
     }
-    if quality_is_fast() || best_err == 0 {
+    // Refine gate: a tiny residual can't repay PCA + LS (gain <= best_err).
+    // Smooth-map blocks skip the whole refine; busy blocks keep the quality.
+    if quality_is_fast() || best_err <= 16 {
         return best;
     }
     // PCA-axis extremes: luminance extrema mis-seed chroma-dominant blocks.
@@ -981,18 +983,35 @@ fn encode_alpha_block_signed(samples: [u8; 16]) -> [u8; 8] {
 fn signed_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
     let b0 = best[0] as i8 as i32;
     let b1 = best[1] as i8 as i32;
+    // Range lower bound (busy-block pruning): a sample above the pair's
+    // UNORM palette ceiling contributes at least (smax-phi)^2, and one below
+    // the floor at least (plo-smin)^2 — 6-lerp palettes lie inside their
+    // endpoints, so a pair whose bound reaches best_err provably cannot win
+    // and skipping it is byte-identical. (4-lerp pairs carry 0/255 sentinels
+    // and are never pruned.)
+    let mut smin = 255u8;
+    let mut smax = 0u8;
+    for &s in samples {
+        smin = smin.min(s);
+        smax = smax.max(s);
+    }
     for d0 in -4i32..=4 {
         for d1 in -4i32..=4 {
             if d0 == 0 && d1 == 0 {
                 continue;
             }
-            consider_alpha_s(
-                (b0 + d0).clamp(-127, 127),
-                (b1 + d1).clamp(-127, 127),
-                samples,
-                best,
-                best_err,
-            );
+            let a0 = (b0 + d0).clamp(-127, 127);
+            let a1 = (b1 + d1).clamp(-127, 127);
+            if a0 > a1 {
+                let phi = snorm_i32_to_unorm_u8(a0) as i32;
+                let plo = snorm_i32_to_unorm_u8(a1) as i32;
+                let over = (smax as i32 - phi).max(0);
+                let under = (plo - smin as i32).max(0);
+                if over * over + under * under >= *best_err {
+                    continue;
+                }
+            }
+            consider_alpha_s(a0, a1, samples, best, best_err);
             if *best_err == 0 {
                 return;
             }
