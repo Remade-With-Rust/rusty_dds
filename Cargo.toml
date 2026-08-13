@@ -29,11 +29,14 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["decode", "encode"]
+default = ["decode", "encode", "simd"]
 # CPU BCn/RGBA decode via bcdec_rs (pure Rust).
 decode = ["dep:bcdec_rs"]
 # CPU RGBA → DDS encode (pure Rust; no extra deps).
 encode = []
+# AVX2 twins of the hot encode kernels (runtime-detected, scalar fallback,
+# byte-identical output either way). Off => zero `unsafe` in the crate.
+simd = []
 
 [dependencies]
 bitflags = "2.4"

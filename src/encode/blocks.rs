@@ -12,6 +12,8 @@ use std::cell::Cell;
 use crate::error::Error;
 
 mod m1;
+#[cfg(feature = "simd")]
+mod simd;
 
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -338,69 +340,38 @@ fn bc1_fit_4color(
     colors: &[[u8; 3]; 4],
     err_limit: i32,
 ) -> Option<(u32, i32)> {
-    let hi = colors[0];
-    let lo = colors[1];
-    let axis = [
-        lo[0] as i32 - hi[0] as i32,
-        lo[1] as i32 - hi[1] as i32,
-        lo[2] as i32 - hi[2] as i32,
-    ];
-    let len2 = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::bc1_fit_4color_avx2(pixels, colors, err_limit);
+    }
+    bc1_fit_4color_scalar(pixels, colors, err_limit)
+}
+
+/// Scalar oracle/fallback: prefix early-abort and total-abort agree because
+/// squared errors are non-negative (prefix >= limit iff total >= limit for
+/// the acceptance decision).
+#[inline]
+fn bc1_fit_4color_scalar(
+    pixels: &[[u8; 4]; 16],
+    colors: &[[u8; 3]; 4],
+    err_limit: i32,
+) -> Option<(u32, i32)> {
     let mut table = 0u32;
     let mut err = 0i32;
-    // Projection fast path DISABLED after measurement: cutting a 4-entry
-    // scan to a dot + ±1-rank verify saved ~nothing (3 sqr evals vs 4) and
-    // cost up to 0.012 dB — reverted to the exact exhaustive fit.
-    if false && len2 >= 256 {
-        // Index order along t (from hi): 0 (t=0), 2 (1/3), 3 (2/3), 1 (1).
-        const ALONG: [usize; 4] = [0, 2, 3, 1];
-        for (i, p) in pixels.iter().enumerate() {
-            let dot = (p[0] as i32 - hi[0] as i32) * axis[0]
-                + (p[1] as i32 - hi[1] as i32) * axis[1]
-                + (p[2] as i32 - hi[2] as i32) * axis[2];
-            let d6 = dot * 6;
-            let rank = (d6 > len2) as usize + (d6 > 3 * len2) as usize + (d6 > 5 * len2) as usize;
-            // ±1 rank window absorbs interpolation rounding.
-            let mut best = ALONG[rank];
-            let mut best_d = sqr_rgb([p[0], p[1], p[2]], colors[best]);
-            if rank > 0 {
-                let j = ALONG[rank - 1];
-                let d = sqr_rgb([p[0], p[1], p[2]], colors[j]);
-                if d < best_d {
-                    best_d = d;
-                    best = j;
-                }
-            }
-            if rank < 3 {
-                let j = ALONG[rank + 1];
-                let d = sqr_rgb([p[0], p[1], p[2]], colors[j]);
-                if d < best_d {
-                    best_d = d;
-                    best = j;
-                }
-            }
-            table |= (best as u32) << (2 * i);
-            err += best_d;
-            if err >= err_limit {
-                return None;
+    for (i, p) in pixels.iter().enumerate() {
+        let mut best = 0usize;
+        let mut best_d = i32::MAX;
+        for (j, c) in colors.iter().enumerate() {
+            let d = sqr_rgb([p[0], p[1], p[2]], *c);
+            if d < best_d {
+                best_d = d;
+                best = j;
             }
         }
-    } else {
-        for (i, p) in pixels.iter().enumerate() {
-            let mut best = 0usize;
-            let mut best_d = i32::MAX;
-            for (j, c) in colors.iter().enumerate() {
-                let d = sqr_rgb([p[0], p[1], p[2]], *c);
-                if d < best_d {
-                    best_d = d;
-                    best = j;
-                }
-            }
-            table |= (best as u32) << (2 * i);
-            err += best_d;
-            if err >= err_limit {
-                return None;
-            }
+        table |= (best as u32) << (2 * i);
+        err += best_d;
+        if err >= err_limit {
+            return None;
         }
     }
     Some((table, err))
@@ -2544,63 +2515,17 @@ const W6M_NEAREST: [u8; 65] = {
 
 /// Index-fit a whole block against one palette; returns (indices, total SSE).
 ///
-/// Fast path: palette entries lie (rounded) on the c0→c1 line, so the SSE
-/// argmin sits at the projection of the pixel onto that line; evaluating a
-/// ±2 index window in ascending order reproduces the exhaustive scan's
-/// strict-`<` lowest-index-tie result (equal-SSE minima on a line can only
-/// straddle the projection, i.e. adjacent indices). Near-degenerate palettes
-/// (axis < 16 in every channel → entries may collide after rounding, where a
-/// distant equal-SSE entry could win the global tiebreak) take the
-/// exhaustive path. Twin test: `mode6_projection_matches_exhaustive`.
+/// Dispatcher: exact AVX2 kernel when available (`simd` feature, runtime
+/// detected), scalar exhaustive otherwise — SAME selection semantics on
+/// every CPU, so payloads are machine-independent. (An earlier projection
+/// heuristic is superseded: the SIMD kernel is exact AND faster.)
 #[inline]
 fn fit_indices_mode6(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
-    let c0 = pal[0];
-    let c1 = pal[15];
-    let mut axis = [0i32; 4];
-    let mut len2 = 0i64;
-    let mut mono = false;
-    for c in 0..4 {
-        axis[c] = c1[c] as i32 - c0[c] as i32;
-        len2 += (axis[c] * axis[c]) as i64;
-        if axis[c].abs() >= 16 {
-            mono = true;
-        }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::fit_indices_mode6_avx2(pixels, pal);
     }
-    if !mono {
-        return fit_indices_mode6_exhaustive(pixels, pal);
-    }
-    let mut indices = [0u8; 16];
-    let mut err = 0i64;
-    for (i, px) in pixels.iter().enumerate() {
-        let mut dot = 0i64;
-        for c in 0..4 {
-            dot += ((px[c] as i32 - c0[c] as i32) * axis[c]) as i64;
-        }
-        let t64 = if dot <= 0 {
-            0usize
-        } else {
-            (((dot * 64 + len2 / 2) / len2) as usize).min(64)
-        };
-        let k = W6M_NEAREST[t64] as i32;
-        let lo = (k - 2).max(0) as usize;
-        let hi = ((k + 2) as usize).min(15);
-        let mut bi = lo as u8;
-        let mut be = i32::MAX;
-        for (j, p) in pal.iter().enumerate().take(hi + 1).skip(lo) {
-            let mut e = 0i32;
-            for c in 0..4 {
-                let d = p[c] as i32 - px[c] as i32;
-                e += d * d;
-            }
-            if e < be {
-                be = e;
-                bi = j as u8;
-            }
-        }
-        indices[i] = bi;
-        err += be as i64;
-    }
-    (indices, err)
+    fit_indices_mode6_exhaustive(pixels, pal)
 }
 
 /// Exhaustive twin (oracle + fallback for near-degenerate palettes).
