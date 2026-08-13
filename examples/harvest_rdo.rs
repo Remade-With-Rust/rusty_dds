@@ -62,7 +62,12 @@ fn main() {
         per_map(&maps);
         return;
     }
-    let ladder = ["0", "10", "25", "50", "100", "200", "400"];
+    let content = match std::env::var("RUSTY_DDS_RDO_FMT").as_deref() {
+        Ok("bc7") => DecodeContent::Bc7,
+        _ => DecodeContent::Bc1,
+    };
+    println!("format: {}", content.name());
+    let ladder = ["0", "2", "4", "6", "10", "25", "50", "100", "200"];
     let mut base_size = 0usize;
     let mut base_psnr = 0.0f64;
     for lam in ladder {
@@ -72,7 +77,7 @@ fn main() {
         let mut sse = 0.0f64;
         let mut n = 0usize;
         for (_name, w, h, rgba) in &maps {
-            let layout = EncodeLayout::flat_2d(DecodeContent::Bc1, *w, *h);
+            let layout = EncodeLayout::flat_2d(content, *w, *h);
             let dds = Dds::encode_from_rgba8(rgba, layout).expect("encode");
             total_raw += dds.data.len();
             total_deflate +=
@@ -80,8 +85,9 @@ fn main() {
             let img = dds
                 .decode_rgba8(SubresourceId::mip_layer(0, 0))
                 .expect("decode");
+            let nch = if content == DecodeContent::Bc7 { 4 } else { 3 };
             for (a, b) in img.pixels.chunks_exact(4).zip(rgba.chunks_exact(4)) {
-                for c in 0..3 {
+                for c in 0..nch {
                     let d = a[c] as f64 - b[c] as f64;
                     sse += d * d;
                     n += 1;
@@ -147,15 +153,24 @@ fn load_tiff_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
 }
 
 fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
+    let content = match std::env::var("RUSTY_DDS_RDO_FMT").as_deref() {
+        Ok("bc7") => DecodeContent::Bc7,
+        _ => DecodeContent::Bc1,
+    };
+    let lams: [&str; 3] = if content == DecodeContent::Bc7 {
+        ["0", "4", "10"]
+    } else {
+        ["0", "50", "100"]
+    };
     println!(
         "{:<34} {:>9} {:>9} {:>8} | {:>9} {:>9} {:>8}",
         "map", "l50_size%", "l50_dDB", "", "l100_size%", "l100_dDB", ""
     );
     for (name, w, h, rgba) in maps {
         let mut res = Vec::new();
-        for lam in ["0", "50", "100"] {
+        for lam in lams {
             std::env::set_var("RUSTY_DDS_RDO_LAMBDA", lam);
-            let layout = EncodeLayout::flat_2d(DecodeContent::Bc1, *w, *h);
+            let layout = EncodeLayout::flat_2d(content, *w, *h);
             let dds = Dds::encode_from_rgba8(rgba, layout).unwrap();
             let z = miniz_oxide::deflate::compress_to_vec(&dds.data, 8).len();
             let img = dds.decode_rgba8(SubresourceId::mip_layer(0, 0)).unwrap();

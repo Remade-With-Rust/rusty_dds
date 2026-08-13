@@ -348,6 +348,13 @@ fn encode_slice(
         DecodeContent::Bc5UNorm => encode_bc5_surface(rgba, width, height, false, out),
         DecodeContent::Bc5SNorm => encode_bc5_surface(rgba, width, height, true, out),
         DecodeContent::Bc7 => {
+            #[cfg(feature = "decode")]
+            {
+                let lambda = rdo_lambda();
+                if lambda > 0.0 {
+                    return blocks::encode_image_bc7_rdo(rgba, width, height, lambda, out);
+                }
+            }
             blocks::encode_image(rgba, width, height, 16, blocks::encode_bc7_mode6, out)
         }
     }

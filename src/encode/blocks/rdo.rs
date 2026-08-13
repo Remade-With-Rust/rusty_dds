@@ -79,13 +79,28 @@ pub(crate) fn encode_image_bc1_rdo(
             let base = base_blocks[by * blocks_x + bx];
             let base_err = bc1_block_sse(&pixels, &base);
 
+            if base_err == 0 {
+                let oi = (by * blocks_x + bx) * 8;
+                out[oi..oi + 8].copy_from_slice(&base);
+                prev_block = base;
+                let slot = (by * blocks_x + bx) % WINDOW;
+                recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
+                recent_eps[slot] = (
+                    u16::from_le_bytes([base[0], base[1]]),
+                    u16::from_le_bytes([base[2], base[3]]),
+                );
+                filled += 1;
+                continue;
+            }
             let mut best = base;
             let mut best_j = base_err as f32;
             let mut best_class = Class::Base;
+            // Activity masking via allowance scaling (see the BC7 note).
+            let lam = lambda * (base_err as f32 / 192.0).min(1.0);
 
             if filled > 0 {
                 // 1. Whole previous block.
-                let lim = (best_j + lambda * SAVE_WHOLE).ceil() as i32;
+                let lim = (best_j + lam * SAVE_WHOLE).ceil() as i32;
                 if lim > 0 {
                     if let Some(err) = bc1_block_sse_limited(&pixels, &prev_block, lim) {
                         let j = err as f32 - lambda * SAVE_WHOLE;
@@ -101,11 +116,11 @@ pub(crate) fn encode_image_bc1_rdo(
                 for k in 0..n {
                     // 2. Reuse index table, LS-refit endpoints.
                     let table = recent_tables[k];
-                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                     if lim > 0 {
                         if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
                             if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
-                                let j = err as f32 - lambda * SAVE_PART;
+                                let j = err as f32 - lam * SAVE_PART;
                                 if j < best_j {
                                     best_j = j;
                                     best = cand;
@@ -116,12 +131,12 @@ pub(crate) fn encode_image_bc1_rdo(
                     }
                     // 3. Reuse endpoints, re-fit indices.
                     let (c0, c1) = recent_eps[k];
-                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                     if c0 > c1 && lim > 0 {
                         if let Some((blk, err)) =
                             pack_bc1_scored_565(&pixels, c0, c1, lim)
                         {
-                            let j = err as f32 - lambda * SAVE_PART;
+                            let j = err as f32 - lam * SAVE_PART;
                             if j < best_j {
                                 best_j = j;
                                 best = blk;
@@ -136,13 +151,13 @@ pub(crate) fn encode_image_bc1_rdo(
                     if recent_tables[..n].contains(&table) {
                         continue; // already tried via the window
                     }
-                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                     if lim <= 0 {
                         break;
                     }
                     if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
                         if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
-                            let j = err as f32 - lambda * SAVE_PART;
+                            let j = err as f32 - lam * SAVE_PART;
                             if j < best_j {
                                 best_j = j;
                                 best = cand;
@@ -343,6 +358,304 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
             }
         }
         if err >= prev {
+            break;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BC7 RDO (mode-6 structured reuse + any-mode whole-block reuse).
+//
+// Mode-6 bit layout (from pack_bc7_mode6): bits 0..6 mode, 7..62 endpoints
+// (r0 r1 g0 g1 b0 b1 a0 a1, 7 bits each), 63 p0, 64 p1, 65..127 indices
+// (anchor 3 bits + 15x4). Byte halves therefore split cleanly:
+//   head = bytes 0..8  = mode + endpoints + p0
+//   tail = bytes 8..16 = p1 + all index bits
+// Reusing a donor's tail keeps an 8-byte LZ match while our endpoints are
+// LS-refit under the donor's indices; reusing a head keeps the donor's
+// endpoints while our indices are refit (rejected if the anchor would force
+// an endpoint swap, which would rewrite the head).
+// ---------------------------------------------------------------------------
+
+const SAVE_WHOLE16: f32 = 14.0;
+const SAVE_HALF8: f32 = 6.0;
+const BC7_WINDOW: usize = 16;
+
+#[cfg(feature = "decode")]
+pub(crate) fn encode_image_bc7_rdo(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    lambda: f32,
+    out: &mut [u8],
+) -> Result<(), Error> {
+    let w = width as usize;
+    let h = height as usize;
+    if rgba.len() < w * h * 4 {
+        return Err(Error::TruncatedData);
+    }
+    let blocks_x = (w + 3) / 4;
+    let blocks_y = (h + 3) / 4;
+    let need = blocks_x
+        .checked_mul(blocks_y)
+        .and_then(|n| n.checked_mul(16))
+        .ok_or(Error::OutOfBounds)?;
+    if out.len() < need {
+        return Err(Error::TruncatedData);
+    }
+
+    let mut recent: [([u8; 16], bool); BC7_WINDOW] = [([0u8; 16], false); BC7_WINDOW];
+    let mut filled = 0usize;
+    let mut prev_block = [0u8; 16];
+
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let pixels = gather_block(rgba, w, h, bx, by);
+
+            let mut base = [0u8; 16];
+            encode_bc7_mode6(pixels, &mut base);
+            let base_err = bc7_block_sse(&pixels, &base);
+
+            // Exact blocks are untouchable: preservation is structural,
+            // not an emergent property of the acceptance math.
+            if base_err == 0 {
+                let oi = (by * blocks_x + bx) * 16;
+                out[oi..oi + 16].copy_from_slice(&base);
+                prev_block = base;
+                let slot = (by * blocks_x + bx) % BC7_WINDOW;
+                recent[slot] = (base, base[0] & 0x7F == 0x40);
+                filled += 1;
+                continue;
+            }
+            let mut best = base;
+            let mut best_j = base_err as f32;
+            // Activity masking done as ALLOWANCE SCALING: the Lagrangian
+            // budget a block may spend scales with the error it already
+            // carries (lambda_eff = lambda * min(1, base_err/T)). Pristine
+            // blocks get ~zero budget, so per-block nicks cannot compound
+            // into map-level dB loss on smooth content; busy blocks (where
+            // error hides) trade at full lambda.
+            let lam = lambda * (base_err as f32 / 256.0).min(1.0);
+
+            if filled > 0 {
+                // 1. Whole previous block (any mode; SSE via the decoder).
+                let err = bc7_block_sse(&pixels, &prev_block);
+                let j = err as f32 - lam * SAVE_WHOLE16;
+                if j < best_j {
+                    best_j = j;
+                    best = prev_block;
+                }
+
+                let n = filled.min(BC7_WINDOW);
+                for k in 0..n {
+                    let (donor, is_m6) = recent[k];
+                    if !is_m6 {
+                        continue;
+                    }
+                    let Some((dq0, dp0, dq1, dp1, didx)) = parse_mode6(&donor) else {
+                        continue;
+                    };
+                    // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
+                    if let Some((e0, e1)) = ls_endpoints_mode6(&pixels, &didx) {
+                        let q0 = quantize_7p_fixed(e0, dp0_choice(&pixels, e0));
+                        let q1 = quantize_7p_fixed(e1, dp1);
+                        // p0 is ours (head byte); try both cheaply via helper.
+                        let (mut q0a, p0a) = q0;
+                        let mut q1a = q1.0;
+                        // Endpoint polish with indices FIXED: the tail bytes
+                        // are the LZ match, head endpoint bytes are literals
+                        // either way — ±1 moves recover quality for free.
+                        let mut err = mode6_sse(&pixels, q0a, p0a, q1a, dp1, &didx);
+                        polish_mode6_endpoints(
+                            &pixels, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
+                        );
+                        let cand = pack_bc7_mode6(q0a, p0a, q1a, dp1, didx);
+                        debug_assert_eq!(&cand[8..16], &donor[8..16]);
+                        let j = err as f32 - lam * SAVE_HALF8;
+                        if j < best_j {
+                            best_j = j;
+                            best = cand;
+                        }
+                    }
+                    // 3. Head reuse: donor endpoints + p0, our p1 + indices.
+                    for p1 in 0..2u8 {
+                        let pal = palette_mode6(
+                            unquantize_7p(dq0, dp0),
+                            unquantize_7p(dq1, p1),
+                        );
+                        let (idx, errv) = fit_indices_mode6(&pixels, &pal);
+                        if idx[0] > 7 {
+                            continue; // swap would rewrite the head bytes
+                        }
+                        let cand = pack_bc7_mode6(dq0, dp0, dq1, p1, idx);
+                        debug_assert_eq!(&cand[0..8], &donor[0..8]);
+                        let j = errv as f32 - lam * SAVE_HALF8;
+                        if j < best_j {
+                            best_j = j;
+                            best = cand;
+                        }
+                    }
+                }
+            }
+
+            let oi = (by * blocks_x + bx) * 16;
+            out[oi..oi + 16].copy_from_slice(&best);
+            prev_block = best;
+            let slot = (by * blocks_x + bx) % BC7_WINDOW;
+            recent[slot] = (best, best[0] & 0x7F == 0x40);
+            filled += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Any-mode BC7 block SSE via the decode oracle (RGBA).
+#[cfg(feature = "decode")]
+fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
+    let mut dec = [0u8; 64];
+    bcdec_rs::bc7(block, &mut dec, 16);
+    let mut err = 0i64;
+    for i in 0..16 {
+        for c in 0..4 {
+            let d = dec[i * 4 + c] as i64 - pixels[i][c] as i64;
+            err += d * d;
+        }
+    }
+    err
+}
+
+/// Mode-6 SSE from quantized endpoints + fixed indices (native math).
+fn mode6_sse(
+    pixels: &[[u8; 4]; 16],
+    q0: [u8; 4],
+    p0: u8,
+    q1: [u8; 4],
+    p1: u8,
+    indices: &[u8; 16],
+) -> i64 {
+    let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
+    let mut err = 0i64;
+    for (i, px) in pixels.iter().enumerate() {
+        let p = pal[indices[i] as usize];
+        for c in 0..4 {
+            let d = p[c] as i64 - px[c] as i64;
+            err += d * d;
+        }
+    }
+    err
+}
+
+/// Per-channel best 7-bit quantization under a FIXED p-bit.
+fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
+    let mut q = [0u8; 4];
+    for i in 0..4 {
+        let base = c[i] >> 1;
+        let mut bq = base.min(127);
+        let mut be = i32::MAX;
+        for cand in base.saturating_sub(1)..=(base + 1).min(127) {
+            let recon = unquantize_7p_chan(cand, p);
+            let e = (recon as i32 - c[i] as i32).pow(2);
+            if e < be {
+                be = e;
+                bq = cand;
+            }
+        }
+        q[i] = bq;
+    }
+    (q, p)
+}
+
+/// Pick our own p0 for the tail-reuse candidate (endpoint 0 is free).
+fn dp0_choice(pixels: &[[u8; 4]; 16], e0: [u8; 4]) -> u8 {
+    let _ = pixels;
+    // Cheap: pick the p that reconstructs e0 best on average.
+    let mut errs = [0i32; 2];
+    for (p, e) in errs.iter_mut().enumerate() {
+        let (q, _) = quantize_7p_fixed(e0, p as u8);
+        let r = unquantize_7p(q, p as u8);
+        for c in 0..4 {
+            *e += (r[c] as i32 - e0[c] as i32).pow(2);
+        }
+    }
+    (errs[1] < errs[0]) as u8
+}
+
+/// Parse a mode-6 block back to (q0, p0, q1, p1, indices).
+fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])> {
+    if block[0] & 0x7F != 0x40 {
+        return None;
+    }
+    let low = u64::from_le_bytes(block[0..8].try_into().unwrap());
+    let high = u64::from_le_bytes(block[8..16].try_into().unwrap());
+    let bit = |i: u32| -> u64 {
+        if i < 64 {
+            (low >> i) & 1
+        } else {
+            (high >> (i - 64)) & 1
+        }
+    };
+    let bits = |start: u32, n: u32| -> u64 {
+        let mut v = 0u64;
+        for k in 0..n {
+            v |= bit(start + k) << k;
+        }
+        v
+    };
+    let mut q0 = [0u8; 4];
+    let mut q1 = [0u8; 4];
+    let mut pos = 7u32;
+    for c in 0..4 {
+        q0[c] = bits(pos, 7) as u8;
+        pos += 7;
+        q1[c] = bits(pos, 7) as u8;
+        pos += 7;
+    }
+    let p0 = bit(63) as u8;
+    let p1 = bit(64) as u8;
+    let mut indices = [0u8; 16];
+    indices[0] = bits(65, 3) as u8;
+    let mut ip = 68u32;
+    for v in indices.iter_mut().skip(1) {
+        *v = bits(ip, 4) as u8;
+        ip += 4;
+    }
+    Some((q0, p0, q1, p1, indices))
+}
+
+/// ±1 moves on the 7-bit mode-6 endpoint channels with p-bits and indices
+/// held fixed (the polish never touches the matched tail bytes).
+fn polish_mode6_endpoints(
+    pixels: &[[u8; 4]; 16],
+    q0: &mut [u8; 4],
+    p0: u8,
+    q1: &mut [u8; 4],
+    p1: u8,
+    indices: &[u8; 16],
+    err: &mut i64,
+) {
+    for _round in 0..2 {
+        let prev = *err;
+        for which in 0..2 {
+            for c in 0..4 {
+                for d in [-1i32, 1] {
+                    let mut t0 = *q0;
+                    let mut t1 = *q1;
+                    let target = if which == 0 { &mut t0 } else { &mut t1 };
+                    let nv = target[c] as i32 + d;
+                    if nv < 0 || nv > 127 {
+                        continue;
+                    }
+                    target[c] = nv as u8;
+                    let e = mode6_sse(pixels, t0, p0, t1, p1, indices);
+                    if e < *err {
+                        *err = e;
+                        *q0 = t0;
+                        *q1 = t1;
+                    }
+                }
+            }
+        }
+        if *err >= prev {
             break;
         }
     }

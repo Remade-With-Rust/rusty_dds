@@ -17,6 +17,8 @@ mod rdo;
 mod simd;
 
 pub(crate) use rdo::encode_image_bc1_rdo;
+#[cfg(feature = "decode")]
+pub(crate) use rdo::encode_image_bc7_rdo;
 
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
