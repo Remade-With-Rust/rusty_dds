@@ -18,7 +18,7 @@
 > 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: BC7 2×
 > faster byte-identical; BC1/BC3-alpha/BC4S/BC5S quality up 65/102 corpus cases
 > with zero regressions. Features: `decode` + `encode` (default on).
-> **Deferred:** BC6H encode (decode shipped). Catalog: [docs/formats.md](docs/formats.md).
+> BC6H: decode + UF16 mode-11 encode shipped (SF16 encode deferred). Catalog: [docs/formats.md](docs/formats.md).
 
 ---
 
@@ -146,7 +146,7 @@ cargo bench --bench decode_ab
 | GPU upload plan (API-agnostic) | ✅ |
 | LDR encode (same matrix) | ✅ |
 | Feature-gated `decode` / `encode` | ✅ Phase 5 |
-| BC6H / float HDR | ✅ decode (`decode_rgba_f32`) · ⏳ encode |
+| BC6H / float HDR | ✅ decode (`decode_rgba_f32`) · ✅ encode UF16 mode-11 (`encode_bc6h_uf16`) |
 
 ## Architecture
 
