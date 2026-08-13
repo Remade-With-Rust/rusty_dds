@@ -15,9 +15,9 @@
 
 > **Status — 0.1 / pre-1.0, Phase 6 (encoder speed+quality campaign, 2026-08).**
 > LDR decode/encode matrix green (BC1–BC5 U/S, BC7, RGBA/BGRA ×
-> 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: BC7 2×
-> faster byte-identical; BC1/BC3-alpha/BC4S/BC5S quality up 65/102 corpus cases
-> with zero regressions. Features: `decode` + `encode` (default on).
+> 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: **89 of 102
+> corpus cases higher PSNR, 0 regressed, ~1.17× less CPU** than 0.1.2, plus
+> opt-in RDO for smaller shipped payloads. Features: `decode` + `encode` (default on).
 > BC6H: decode + UF16 mode-11 encode shipped (SF16 encode deferred). Catalog: [docs/formats.md](docs/formats.md).
 
 ---
@@ -55,8 +55,8 @@ Notes on those numbers (2026-08 encoder campaign):
   than 0.1 (~300× vs DirectXTex-QUICK on this box).
 - Additional real-content gate in-tree: 16 CryTIF `.tif` (CRYTEK GameSDK) +
   10 USC-SIPI TIFFs via `bench_encode_corpus` — BC3 alpha search alone was
-  worth +1.8..+3.2 dB on the CryTIF set. 65 of 102 cases improved vs 0.1,
-  zero regressed, while whole-corpus encode CPU dropped ~1.2×.
+  worth +1.8..+3.2 dB on the CryTIF set. 89 of 102 cases improved vs 0.1.2,
+  zero regressed, while whole-corpus encode CPU dropped ~1.17×.
 - Proxy corpus is **not** a studio asset pack — drop in your maps for the real gate.
 
 ## Performance snapshot
@@ -239,7 +239,17 @@ FFmpeg remade in Rust for memory-safe encode/decode and the broader Remade media
 ## License
 
 MIT — [LICENSE-MIT](LICENSE-MIT). Upstream copyright (c) 2018 Michael Dilger and
-`ddsfile` contributors retained.
+`ddsfile` contributors retained. Attribution for included third-party work
+(notably the `bcdec_rs` BC7 partition table) and corpus provenance:
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+**MIT, permanently.** 100% of the shipping code path is MIT — every format,
+every optimization, every RDO mode. No paid tier, no feature held back, no
+future relicense, no CLA assigning us your copyright. Fork it, vendor it, ship
+it commercially, owe us nothing. Studios that want a λ calibrated on *their*
+corpus, an SLA, or integration work can buy that as a service — the model, and
+the things we commit to never selling, are written down in
+[docs/commercial-model.md](docs/commercial-model.md).
 
 ## Trademark
 
