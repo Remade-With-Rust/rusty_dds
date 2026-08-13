@@ -168,6 +168,7 @@ fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
     );
     for (name, w, h, rgba) in maps {
         let mut res = Vec::new();
+        let nch = if content == DecodeContent::Bc7 { 4 } else { 3 };
         for lam in lams {
             std::env::set_var("RUSTY_DDS_RDO_LAMBDA", lam);
             let layout = EncodeLayout::flat_2d(content, *w, *h);
@@ -177,7 +178,7 @@ fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
             let mut sse = 0.0f64;
             let mut n = 0usize;
             for (a, b) in img.pixels.chunks_exact(4).zip(rgba.chunks_exact(4)) {
-                for c in 0..3 {
+                for c in 0..nch {
                     let d = a[c] as f64 - b[c] as f64;
                     sse += d * d;
                     n += 1;

@@ -65,7 +65,13 @@ pub(crate) fn encode_image_bc1_rdo(
     // The baseline blocks are kept and reused by pass 2 (no re-encode).
     let (dict, base_blocks) = build_table_dict(rgba, w, h, blocks_x, blocks_y);
 
+    // Previous ROW of emitted blocks: vertical repetition is the dominant
+    // long-range structure in textures, and deflate's 32KB window covers a
+    // full block row at any sane width.
+    let mut prev_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
+    let mut cur_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
     // Ring buffers of recently emitted structures.
+    let mut recent_blocks: [[u8; 8]; WINDOW] = [[0u8; 8]; WINDOW];
     let mut recent_tables: [u32; WINDOW] = [0; WINDOW];
     let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
     let mut filled = 0usize;
@@ -83,7 +89,9 @@ pub(crate) fn encode_image_bc1_rdo(
                 let oi = (by * blocks_x + bx) * 8;
                 out[oi..oi + 8].copy_from_slice(&base);
                 prev_block = base;
+                cur_row[bx] = base;
                 let slot = (by * blocks_x + bx) % WINDOW;
+                recent_blocks[slot] = base;
                 recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
                 recent_eps[slot] = (
                     u16::from_le_bytes([base[0], base[1]]),
@@ -93,10 +101,25 @@ pub(crate) fn encode_image_bc1_rdo(
                 continue;
             }
             let mut best = base;
-            let mut best_j = base_err as f32;
-            let mut best_class = Class::Base;
+            // The baseline may ALREADY repeat naturally — credit it, or a
+            // substitution can book phantom savings while destroying real
+            // ones (computer_key: payload GREW 5% before this correction).
+            let n0 = filled.min(WINDOW);
+            let above: Option<&[u8; 8]> = if by > 0 { Some(&prev_row[bx]) } else { None };
+            let mut base_score = score_bc1(&base, &recent_blocks[..n0]);
+            if let Some(ab) = above {
+                if ab == &base {
+                    base_score = SAVE_WHOLE;
+                } else if (ab[4..8] == base[4..8] || ab[0..4] == base[0..4])
+                    && base_score < SAVE_PART
+                {
+                    base_score = SAVE_PART;
+                }
+            }
             // Activity masking via allowance scaling (see the BC7 note).
             let lam = lambda * (base_err as f32 / 192.0).min(1.0);
+            let mut best_j = base_err as f32 - lam * base_score;
+            let mut best_class = Class::Base;
 
             if filled > 0 {
                 // 1. Whole previous block.
@@ -179,7 +202,9 @@ pub(crate) fn encode_image_bc1_rdo(
             let oi = (by * blocks_x + bx) * 8;
             out[oi..oi + 8].copy_from_slice(&best);
             prev_block = best;
+            cur_row[bx] = best;
             let slot = (by * blocks_x + bx) % WINDOW;
+            recent_blocks[slot] = best;
             recent_tables[slot] =
                 u32::from_le_bytes([best[4], best[5], best[6], best[7]]);
             recent_eps[slot] = (
@@ -188,6 +213,7 @@ pub(crate) fn encode_image_bc1_rdo(
             );
             filled += 1;
         }
+        std::mem::swap(&mut prev_row, &mut cur_row);
     }
     Ok(())
 }
@@ -405,6 +431,8 @@ pub(crate) fn encode_image_bc7_rdo(
     }
 
     let mut recent: [([u8; 16], bool); BC7_WINDOW] = [([0u8; 16], false); BC7_WINDOW];
+    let mut prev_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
+    let mut cur_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
     let mut filled = 0usize;
     let mut prev_block = [0u8; 16];
 
@@ -422,13 +450,25 @@ pub(crate) fn encode_image_bc7_rdo(
                 let oi = (by * blocks_x + bx) * 16;
                 out[oi..oi + 16].copy_from_slice(&base);
                 prev_block = base;
+                cur_row[bx] = base;
                 let slot = (by * blocks_x + bx) % BC7_WINDOW;
                 recent[slot] = (base, base[0] & 0x7F == 0x40);
                 filled += 1;
                 continue;
             }
             let mut best = base;
-            let mut best_j = base_err as f32;
+            let n0 = filled.min(BC7_WINDOW);
+            let above: Option<&[u8; 16]> = if by > 0 { Some(&prev_row[bx]) } else { None };
+            let mut base_score = score_bc7(&base, &recent[..n0]);
+            if let Some(ab) = above {
+                if ab == &base {
+                    base_score = SAVE_WHOLE16;
+                } else if (ab[8..16] == base[8..16] || ab[0..8] == base[0..8])
+                    && base_score < SAVE_HALF8
+                {
+                    base_score = SAVE_HALF8;
+                }
+            }
             // Activity masking done as ALLOWANCE SCALING: the Lagrangian
             // budget a block may spend scales with the error it already
             // carries (lambda_eff = lambda * min(1, base_err/T)). Pristine
@@ -436,14 +476,21 @@ pub(crate) fn encode_image_bc7_rdo(
             // into map-level dB loss on smooth content; busy blocks (where
             // error hides) trade at full lambda.
             let lam = lambda * (base_err as f32 / 256.0).min(1.0);
+            let mut best_j = base_err as f32 - lam * base_score;
 
             if filled > 0 {
-                // 1. Whole previous block (any mode; SSE via the decoder).
-                let err = bc7_block_sse(&pixels, &prev_block);
-                let j = err as f32 - lam * SAVE_WHOLE16;
-                if j < best_j {
-                    best_j = j;
-                    best = prev_block;
+                // 1. Whole previous block + the block one ROW above.
+                let mut wholes: [Option<[u8; 16]>; 2] = [Some(prev_block), None];
+                if let Some(ab) = above {
+                    wholes[1] = Some(*ab);
+                }
+                for cand in wholes.into_iter().flatten() {
+                    let err = bc7_block_sse(&pixels, &cand);
+                    let j = err as f32 - lam * SAVE_WHOLE16;
+                    if j < best_j {
+                        best_j = j;
+                        best = cand;
+                    }
                 }
 
                 let n = filled.min(BC7_WINDOW);
@@ -501,10 +548,12 @@ pub(crate) fn encode_image_bc7_rdo(
             let oi = (by * blocks_x + bx) * 16;
             out[oi..oi + 16].copy_from_slice(&best);
             prev_block = best;
+            cur_row[bx] = best;
             let slot = (by * blocks_x + bx) % BC7_WINDOW;
             recent[slot] = (best, best[0] & 0x7F == 0x40);
             filled += 1;
         }
+        std::mem::swap(&mut prev_row, &mut cur_row);
     }
     Ok(())
 }
@@ -659,5 +708,35 @@ fn polish_mode6_endpoints(
             break;
         }
     }
+}
+
+/// LZ-match value the block ALREADY carries against the recent window:
+/// whole-block repeat, or a repeated 4-byte half (table / endpoints).
+fn score_bc1(block: &[u8; 8], recent: &[[u8; 8]]) -> f32 {
+    let mut best = 0f32;
+    for r in recent {
+        if r == block {
+            return SAVE_WHOLE;
+        }
+        if r[4..8] == block[4..8] || r[0..4] == block[0..4] {
+            best = SAVE_PART;
+        }
+    }
+    best
+}
+
+
+/// LZ-match value a BC7 block already carries vs the recent window.
+fn score_bc7(block: &[u8; 16], recent: &[([u8; 16], bool)]) -> f32 {
+    let mut best = 0f32;
+    for (r, _) in recent {
+        if r == block {
+            return SAVE_WHOLE16;
+        }
+        if r[8..16] == block[8..16] || r[0..8] == block[0..8] {
+            best = SAVE_HALF8;
+        }
+    }
+    best
 }
 

@@ -120,6 +120,10 @@ required-features = ["decode", "encode"]
 name = "harvest_rdo"
 required-features = ["decode", "encode"]
 
+[[example]]
+name = "probe_rdo_exact"
+required-features = ["decode", "encode"]
+
 [[test]]
 name = "decode_matrix"
 required-features = ["decode"]
