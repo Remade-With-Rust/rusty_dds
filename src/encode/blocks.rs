@@ -11,6 +11,8 @@ use std::cell::Cell;
 
 use crate::error::Error;
 
+mod m1;
+
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncodeQuality {
@@ -257,6 +259,18 @@ fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     best
 }
 
+
+/// Mode-1 trial gate (experiment knob; default 0 = trial whenever imperfect).
+fn bc7_m1_min_err() -> i64 {
+    use std::sync::OnceLock;
+    static T: OnceLock<i64> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("RUSTY_DDS_BC7_M1_T")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    })
+}
 
 fn unsigned_window_enabled() -> bool {
     use std::sync::OnceLock;
@@ -1891,6 +1905,21 @@ pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
                     best_err = err4;
                     best_bits = bits4;
                 }
+            }
+        }
+    }
+    // Mode 1 (2-subset, opaque): partition-edge blocks where any single
+    // subset fits poorly. Gate: fully-opaque alpha AND residual in (4, 1024]
+    // — the T-sweep showed every mode-1 win lives there (smooth/UI blocks
+    // taken to near-zero; textured blocks with big residuals never win
+    // against mode 6's 4-bit indices, so they skip the 64-shape ranking
+    // entirely). Inside, the ranking's 2-cluster bound must still PROMISE
+    // a >=2x reduction before a full fit runs.
+    if best_err > bc7_m1_min_err().max(4) && best_err <= 1024 && a_lo == 255 {
+        if let Some((bits1, err1)) = m1::try_bc7_mode1(&pixels, best_err) {
+            if err1 < best_err {
+                best_err = err1;
+                best_bits = bits1;
             }
         }
     }

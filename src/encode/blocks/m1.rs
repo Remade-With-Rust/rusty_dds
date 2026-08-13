@@ -76,11 +76,25 @@ const P2: [[[u8; 4]; 4]; 64] = [
     [[128, 1, 0, 0], [0, 1, 0, 0], [0, 1, 1, 1], [0, 1, 1, 129]],
 ];
 
+/// Harvest-chosen shape shortlist (357k wins over the bc7 corpus): shape 2
+/// alone carries 83.2% of the total mode-1 gain and these eight carry 95%.
+/// Trying a fixed shortlist replaces the 64-shape ranking entirely.
+const SHORTLIST: [u8; 8] = [2, 10, 13, 16, 0, 23, 15, 14];
+
 pub(super) fn try_bc7_mode1(pixels: &[[u8; 4]; 16], err_limit: i64) -> Option<([u8; 16], i64)> {
-    const RANK_K: usize = 3;
-    // --- rank partitions by SSE to per-subset mean (1-color bound) ---
-    let mut ranked: [(i64, u8); RANK_K] = [(i64::MAX, 0); RANK_K];
-    for part in 0..64u8 {
+    // NOTE: a color-space 2-cluster pre-gate was tried and REVERTED — the
+    // biggest winners (startscreen +13.5 dB) are GRADIENT blocks where a
+    // spatial split lets two shorter LINES fit; point-cluster bounds are
+    // blind to that structure and killed 100% of those gains.
+    let mut sq = 0i64;
+    for p in pixels {
+        for c in 0..3 {
+            sq += (p[c] as i64) * (p[c] as i64);
+        }
+    }
+    let mut best: Option<([u8; 16], i64)> = None;
+    let mut best_err = err_limit;
+    for &part in &SHORTLIST {
         let tbl = &P2[part as usize];
         let mut sum = [[0i64; 3]; 2];
         let mut cnt = [0i64; 2];
@@ -91,27 +105,19 @@ pub(super) fn try_bc7_mode1(pixels: &[[u8; 4]; 16], err_limit: i64) -> Option<([
             }
             cnt[s] += 1;
         }
-        let mut est = 0i64;
-        for (i, p) in pixels.iter().enumerate() {
-            let s = (tbl[i / 4][i % 4] & 0x7F) as usize;
+        let mut term = 0i64;
+        for s in 0..2 {
             for c in 0..3 {
-                let d = p[c] as i64 * cnt[s] - sum[s][c];
-                est += d * d / (cnt[s] * cnt[s]);
+                term += sum[s][c] * sum[s][c] / cnt[s];
             }
         }
-        if est < ranked[RANK_K - 1].0 {
-            ranked[RANK_K - 1] = (est, part);
-            ranked.sort_unstable();
-        }
-    }
-
-    let mut best: Option<([u8; 16], i64)> = None;
-    let mut best_err = err_limit;
-    for &(est, part) in &ranked {
-        if est == i64::MAX || est >= best_err {
+        // Promise gate: the 2-cluster bound must project a >=2x reduction —
+        // a marginal promise never survives quantization + 3-bit indices.
+        let est = sq - term;
+        if est * 2 >= best_err {
             continue;
         }
-        if let Some((bits, err)) = fit_partition(pixels, part) {
+        if let Some((bits, err)) = fit_partition(pixels, part, best_err) {
             if err < best_err {
                 best_err = err;
                 best = Some((bits, err));
@@ -121,7 +127,7 @@ pub(super) fn try_bc7_mode1(pixels: &[[u8; 4]; 16], err_limit: i64) -> Option<([
     best
 }
 
-fn fit_partition(pixels: &[[u8; 4]; 16], part: u8) -> Option<([u8; 16], i64)> {
+fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u8; 16], i64)> {
     let tbl = &P2[part as usize];
     let mut members: [([usize; 16], usize); 2] = [([0; 16], 0); 2];
     let mut anchor1 = 0usize;
@@ -160,13 +166,21 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8) -> Option<([u8; 16], i64)> {
                 e1 = [p[0], p[1], p[2]];
             }
         }
-        let (bq, bp, bidx, berr) = fit_subset(pixels, &idxs[..n], e0, e1);
+        // Abort budget: whatever the other subset hasn't spent yet.
+        let budget = (err_limit - total_err).clamp(0, i32::MAX as i64) as i32;
+        let (bq, bp, bidx, berr) = fit_subset(pixels, &idxs[..n], e0, e1, budget);
+        if berr == i32::MAX {
+            return None; // no p/seed combination stayed under the budget
+        }
         q[s] = bq;
         pbits[s] = bp;
         for (k, &i) in idxs[..n].iter().enumerate() {
             indices[i] = bidx[k];
         }
         total_err += berr as i64;
+        if total_err >= err_limit {
+            return None;
+        }
     }
 
     // Anchor constraints: pixel 0 (subset 0) and anchor1 (subset 1) need
@@ -191,6 +205,7 @@ fn fit_subset(
     idxs: &[usize],
     e0: [u8; 3],
     e1: [u8; 3],
+    budget: i32,
 ) -> ([[u8; 3]; 2], u8, [u8; 16], i32) {
     let mut best_q = [[0u8; 3]; 2];
     let mut best_p = 0u8;
@@ -210,6 +225,7 @@ fn fit_subset(
                     pal[k][c] = (((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64) as u8;
                 }
             }
+            let limit = best_err.min(budget.saturating_add(1));
             let mut idx = [0u8; 16];
             let mut err = 0i32;
             for (k, &i) in idxs.iter().enumerate() {
@@ -225,6 +241,10 @@ fn fit_subset(
                 }
                 idx[k] = bi;
                 err += be;
+                if err >= limit {
+                    err = i32::MAX;
+                    break;
+                }
             }
             if err < best_err {
                 best_err = err;
@@ -234,6 +254,9 @@ fn fit_subset(
             }
         }
         if pass == 0 {
+            if best_err == i32::MAX {
+                break; // both p-bits blew the budget; LS has nothing to refine
+            }
             if let Some((r0, r1)) = ls_endpoints(pixels, idxs, &best_idx) {
                 seeds[1] = (r0, r1);
             } else {
