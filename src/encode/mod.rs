@@ -3,6 +3,7 @@
 //! Round-trip gate: `decode(encode(rgba))` — bit-exact for RGBA/BGRA; PSNR /
 //! max-abs for lossy BCn (see `tests/encode_matrix.rs`).
 
+mod bc6h;
 mod blocks;
 mod harvest;
 mod mips;
@@ -209,6 +210,41 @@ impl Dds {
             }
         }
 
+        Ok(dds)
+    }
+}
+
+impl Dds {
+    /// Encode tightly packed RGBA `f32` pixels (alpha ignored) as a 2D
+    /// BC6H_UF16 DDS (mode 11: single subset, 10-bit endpoints, 4-bit
+    /// indices). Negative / NaN inputs clamp to 0, values above the half
+    /// range clamp to 65504. Round-trips through [`Dds::decode_rgba_f32`].
+    pub fn encode_bc6h_uf16(pixels: &[f32], width: u32, height: u32) -> Result<Dds, Error> {
+        let need = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?;
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidField("zero image dimension".into()));
+        }
+        if pixels.len() < need {
+            return Err(Error::TruncatedData);
+        }
+        let mut dds = Dds::new_dxgi(NewDxgiParams {
+            height,
+            width,
+            depth: None,
+            format: DxgiFormat::BC6H_UF16,
+            mipmap_levels: None,
+            array_layers: None,
+            caps2: None,
+            is_cubemap: false,
+            resource_dimension: D3D10ResourceDimension::Texture2D,
+            alpha_mode: AlphaMode::Opaque,
+        })?;
+        let mut data = std::mem::take(&mut dds.data);
+        bc6h::encode_slice_uf16(pixels, width, height, &mut data)?;
+        dds.data = data;
         Ok(dds)
     }
 }

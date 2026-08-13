@@ -11,3 +11,5 @@ corpus/raw/
 docs/artifacts/bc45-refine-skip-harvest.csv
 corpus/raw_crytif/
 corpus/raw_tif/
+bench/preserved/
+corpus/raw_hdr/

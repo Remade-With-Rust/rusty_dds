@@ -123,5 +123,9 @@ name = "bc6h_decode"
 required-features = ["decode", "encode"]
 
 [[test]]
+name = "bc6h_encode"
+required-features = ["decode", "encode"]
+
+[[test]]
 name = "encode_matrix"
 required-features = ["encode", "decode"]
