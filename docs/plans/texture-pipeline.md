@@ -247,9 +247,15 @@ UNORM-lattice search near the incumbent).
 | Brick | Type | Result |
 |---|---|---|
 | BC7 projection-window index fit (±2 around the pixel's axis projection; exhaustive fallback for near-degenerate palettes) | speed, quality-gated | BC7 total 1122→935 ms pinned (**1.20×**); 0/102 corpus cases move at 0.0001 dB; contract oracle over 400k adversarial cases |
-| Unsigned BC4/BC5 ±4 window (same gate + prune as signed) | quality, monotone | 14 cases +0.15..+0.45 dB, 0 down; campaign cumulative **72/102 up, 0 down**; CPU margin vs 0.1.2 thins 1.21×→1.09× (ABBA 5/5) |
+| Unsigned BC4/BC5 ±4 window (same gate + prune as signed) | quality → **demoted to opt-in** (`RUSTY_DDS_BC45U_WINDOW=1`) | +0.15..0.45 dB × 14 already-winning cases for ~3.2s corpus CPU — traded out to fund the lattice + mode 5 (2–20× the gain/s) |
 | err>16 tight unsigned gate | REVERTED | kept only 10–45% of smooth-map gains (they live at err 5..16) |
-| BC1 565-lattice endpoint window | OPEN (not attempted) | expected +0.05..0.2 dB at ~2.7× BC1 cost — would spend the bc1 board margin for marginal gain |
+| **BC1 565-lattice contract refine** | quality, monotone | My "marginal EV" estimate was WRONG (user called it): full ±1 window = +0.05..+1.04 dB × 45 cases. Harvest (1.3M wins): ~82% of gain is INTERVAL CONTRACTION — ships contract-only ≤3 hill-climb rounds keeping 78–118% at half cost. Wood bc1 +0.82, Bricks +0.34 |
+| **BC7 mode 5** (rotation 0, decoupled color/alpha indices) | quality, monotone | Alpha-gradient CryTIF: PC_OnFoot **+9.63 dB**, PC_Vehicle +9.04, HardLeft +6.34; trialed on alpha-varying blocks, picked by same RGBA SSE |
+| Alpha threshold selector (static per-mode sorted order → 7 threshold compares) | speed, byte-identical **proven by exhaustion** (all 16.7M endpoint×sample combos) | CPU-neutral in situ (early-aborts pay the build); kept for exactness + future wider windows |
+| BC1 projection index fit (4-color) | tried, DISABLED in place | 4→3 SSE evals saved ~nothing, cost ≤0.012 dB — the BC7 win (16→5) doesn't scale down |
+
+**Final Phase 6 state vs 0.1.2:** 72/102 corpus cases better PSNR / 0 worse;
+CPU 6/6 ABBA pairs ~1.15× less machine (min-of-N wall 1.12×).
 
 **Board status:** `corpus-vs-directxtex` was regenerated clean earlier in the
 campaign (sanity gate: byte-identical bc4u/bc5u read their known 0.33–0.40
