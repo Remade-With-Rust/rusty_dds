@@ -34,6 +34,12 @@
 //! for loaders / WASM that never encode.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The memory-safety claim is compiler-enforced, not asserted: without the
+// `simd` feature the crate cannot contain a single `unsafe` block. With it,
+// `unsafe` is confined to the `#[target_feature]` AVX2 kernels in
+// `encode::blocks::simd`, each proven bit-exact against its scalar twin and
+// reachable only behind a runtime CPU check.
+#![cfg_attr(not(feature = "simd"), forbid(unsafe_code))]
 
 #[macro_use]
 extern crate bitflags;

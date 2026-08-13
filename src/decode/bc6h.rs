@@ -29,7 +29,7 @@ pub fn decode_bc6h(
     let h = height as usize;
 
     let mut rgb = vec![0f32; w * h * 3];
-    if width.is_multiple_of(4) && height.is_multiple_of(4) {
+    if width % 4 == 0 && height % 4 == 0 {
         let pitch = w * 3; // pitch in floats
         for by in 0..blocks_y {
             for bx in 0..blocks_x {

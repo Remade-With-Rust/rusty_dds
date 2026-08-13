@@ -90,7 +90,7 @@ pub fn decode_bc7(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
     let out_h = height as usize;
     let mut out = vec![0u8; out_w * out_h * 4];
 
-    let aligned = width.is_multiple_of(4) && height.is_multiple_of(4);
+    let aligned = width % 4 == 0 && height % 4 == 0;
     let parallel = aligned
         && blocks_y >= 2
         && blocks_x.saturating_mul(blocks_y) >= BC7_PARALLEL_MIN_BLOCKS;
@@ -121,7 +121,7 @@ fn decode_rgba_blocks(
     let mut out = vec![0u8; out_w * out_h * 4];
     let pitch = out_w * 4;
 
-    if width.is_multiple_of(4) && height.is_multiple_of(4) {
+    if width % 4 == 0 && height % 4 == 0 {
         for by in 0..blocks_y {
             for bx in 0..blocks_x {
                 let bi = (by * blocks_x + bx) * block_bytes;

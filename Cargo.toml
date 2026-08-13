@@ -1,16 +1,16 @@
 [package]
 name = "rusty_dds"
-version = "0.1.2"
+version = "0.2.0"
 authors = [
     "Mike Dilger <mike@optcomp.nz>",
     "Remade With Rust / Mata Network",
 ]
-description = "Memory-safe DDS texture toolkit — container, decode, encode, GPU upload plans (Remade With Rust)"
+description = "Memory-safe DDS texture toolkit — container, decode, encode (BC1-BC7, BC6H HDR), rate-distortion optimization, GPU upload plans (Remade With Rust)"
 repository = "https://github.com/Remade-With-Rust/rusty_dds"
 homepage = "https://github.com/Remade-With-Rust/rusty_dds"
 documentation = "https://docs.rs/rusty_dds"
 license = "MIT"
-keywords = ["dds", "texture", "directx", "bc7", "gpu"]
+keywords = ["dds", "texture", "directx", "bc7", "compression"]
 categories = ["encoding", "graphics", "parsing"]
 readme = "README.md"
 edition = "2021"
@@ -19,7 +19,11 @@ exclude = [
     "third_party/*",
     "tools/*",
     "corpus/raw/*",
+    "corpus/raw_crytif/*",
+    "corpus/raw_tif/*",
+    "corpus/raw_hdr/*",
     "corpus/manifest.json",
+    "bench/preserved/*",
     "docs/artifacts/*.json",
     "target/*",
 ]

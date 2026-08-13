@@ -31,7 +31,7 @@ pub enum EncodeQuality {
 }
 
 thread_local! {
-    static QUALITY: Cell<EncodeQuality> = const { Cell::new(EncodeQuality::Quality) };
+    static QUALITY: Cell<EncodeQuality> = Cell::new(EncodeQuality::Quality);
 }
 
 pub(crate) fn with_quality<R>(q: EncodeQuality, f: impl FnOnce() -> R) -> R {
@@ -2496,27 +2496,10 @@ fn best_index_pal(px: &[u8; 4], pal: &[[u8; 4]; 16]) -> (u8, i32) {
     (best_i, best_e)
 }
 
-/// t64 (0..=64) → nearest mode-6 weight index, ties toward the lower index.
-const W6M_NEAREST: [u8; 65] = {
-    let mut lut = [0u8; 65];
-    let mut t = 0;
-    while t <= 64 {
-        let mut best = 0usize;
-        let mut best_d = 255i32;
-        let mut k = 0usize;
-        while k < 16 {
-            let d = (W6M[k] as i32 - t as i32).abs();
-            if d < best_d {
-                best_d = d;
-                best = k;
-            }
-            k += 1;
-        }
-        lut[t] = best as u8;
-        t += 1;
-    }
-    lut
-};
+// NOTE: a projection-window index fit (a t64→index LUT, ±2 candidates around
+// the pixel's projection onto the endpoint axis) lived here and was retired
+// when the AVX2 kernel landed: the SIMD twin is both EXACT and faster, so the
+// approximation had nothing left to buy. See `simd::fit_indices_mode6_avx2`.
 
 /// Index-fit a whole block against one palette; returns (indices, total SSE).
 ///

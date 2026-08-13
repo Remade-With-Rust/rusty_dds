@@ -13,7 +13,7 @@
 > asset pipelines that need DDS without a C/C++ DirectXTex stack. Container
 > lineage: MIT [ddsfile](https://github.com/PistonDevelopers/ddsfile).
 
-> **Status — 0.1 / pre-1.0, Phase 6 (encoder speed+quality campaign, 2026-08).**
+> **Status — 0.2 / pre-1.0, Phase 6 complete (encoder speed+quality campaign, 2026-08).**
 > LDR decode/encode matrix green (BC1–BC5 U/S, BC7, RGBA/BGRA ×
 > 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: **89 of 102
 > corpus cases higher PSNR, 0 regressed, ~1.17× less CPU** than 0.1.2, plus
@@ -103,7 +103,7 @@ carries, and exact blocks are never touched.
 
 | Dimension | Conventional DDS stacks | **rusty_dds (Rust)** |
 |---|:---:|:---:|
-| Memory-safety (core path) | C/C++ tools historically CVE-prone | **safe Rust** |
+| Memory-safety (core path) | C/C++ tools historically CVE-prone | **safe Rust** — `forbid(unsafe_code)` without `simd`; with it, `unsafe` is confined to oracle-gated AVX2 kernels |
 | Role | container + decode + GPU glue | **container + decode + encode + upload plan** |
 | Pure Rust default | often C DirectXTex / vendor SDK | **yes** (`bcdec_rs` decode; in-house encode; no `*-sys`) |
 | GPU | API-tied helpers | **API-agnostic** `UploadPlan` + DXGI / wgpu / Vulkan names |
@@ -114,20 +114,21 @@ carries, and exact blocks are never touched.
 ## Install
 
 ```toml
-rusty_dds = "0.1"
-# decode-only (e.g. WASM loaders):
-# rusty_dds = { version = "0.1", default-features = false, features = ["decode"] }
+rusty_dds = "0.2"
+# decode-only, zero unsafe (e.g. WASM loaders):
+# rusty_dds = { version = "0.2", default-features = false, features = ["decode"] }
 ```
 
 | Feature | Default | Provides |
 |---------|---------|----------|
-| `decode` | yes | `decode_rgba8`, `bcdec_rs` |
-| `encode` | yes | `encode_from_rgba8`, `EncodeLayout`, `EncodeQuality` |
+| `decode` | yes | `decode_rgba8`, `decode_rgba_f32` (BC6H), `bcdec_rs` |
+| `encode` | yes | `encode_from_rgba8`, `encode_bc6h_uf16`, `EncodeLayout`, `EncodeQuality`, opt-in RDO |
+| `simd` | yes | AVX2 encode kernels — runtime-detected, scalar fallback, **byte-identical output**. Turn it off for a build the compiler proves contains no `unsafe`. |
 
 Always on: container R/W, `SubresourceId` / `surface()`, `decode_content()`,
 `UploadPlan` / `GpuFormat`.
 
-MSRV: **1.73**. Migrating from `ddsfile`: [docs/migration-ddsfile.md](docs/migration-ddsfile.md).
+MSRV: **1.73**, verified by building against that toolchain. Changes: [CHANGELOG.md](CHANGELOG.md). Migrating from `ddsfile`: [docs/migration-ddsfile.md](docs/migration-ddsfile.md).
 
 ## Quick start
 
