@@ -12,8 +12,11 @@ use std::cell::Cell;
 use crate::error::Error;
 
 mod m1;
+mod rdo;
 #[cfg(feature = "simd")]
 mod simd;
+
+pub(crate) use rdo::encode_image_bc1_rdo;
 
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

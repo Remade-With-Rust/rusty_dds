@@ -327,7 +327,15 @@ fn encode_slice(
             Ok(())
         }
         DecodeContent::Bc1 => {
-            blocks::encode_image(rgba, width, height, 8, blocks::encode_bc1, out)
+            // Opt-in RDO (RUSTY_DDS_RDO_LAMBDA > 0): trade a lambda-bounded
+            // amount of SSE for LZ-friendlier blocks (the payload ships
+            // inside a deflate archive). 0/unset = byte-identical path.
+            let lambda = rdo_lambda();
+            if lambda > 0.0 {
+                blocks::encode_image_bc1_rdo(rgba, width, height, lambda, out)
+            } else {
+                blocks::encode_image(rgba, width, height, 8, blocks::encode_bc1, out)
+            }
         }
         DecodeContent::Bc2 => {
             blocks::encode_image(rgba, width, height, 16, blocks::encode_bc2, out)
@@ -403,6 +411,15 @@ fn encode_bc5_surface(
             out,
         )
     }
+}
+
+/// RDO strength knob (experiment surface; read per encode call so ladders
+/// can sweep it in-process). 0 = off.
+fn rdo_lambda() -> f32 {
+    std::env::var("RUSTY_DDS_RDO_LAMBDA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
 }
 
 /// Peak signal-to-noise ratio for two equal-length RGBA8 buffers (dB).

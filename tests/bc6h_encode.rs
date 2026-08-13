@@ -268,3 +268,33 @@ fn real_hdri_corpus_roundtrip_floor() {
     }
     assert!(tested >= 4, "expected the 4 fetched HDRIs, found {tested}");
 }
+
+/// Speed probe for the report (run explicitly, pinned externally).
+#[test]
+#[ignore]
+fn bc6h_encode_speed_probe() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus/raw_hdr");
+    if !root.exists() {
+        return;
+    }
+    for entry in std::fs::read_dir(&root).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("hdr") {
+            continue;
+        }
+        let (w, h, px) = read_radiance_hdr(&path).unwrap();
+        let mut best = u128::MAX;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let dds = Dds::encode_bc6h_uf16(&px, w as u32, h as u32).unwrap();
+            std::hint::black_box(&dds.data);
+            best = best.min(t.elapsed().as_nanos());
+        }
+        let mpxs = (w * h) as f64 / (best as f64 / 1e9) / 1e6;
+        eprintln!(
+            "{}: {}x{} encode best {} ms  ({:.1} Mpx/s)",
+            path.file_name().unwrap().to_string_lossy(),
+            w, h, best / 1_000_000, mpxs
+        );
+    }
+}
