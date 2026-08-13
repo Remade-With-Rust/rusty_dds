@@ -30,6 +30,14 @@ const WINDOW: usize = 16;
 const SAVE_WHOLE: f32 = 7.0;
 const SAVE_PART: f32 = 2.5;
 
+#[derive(PartialEq, Clone, Copy)]
+enum Class {
+    Base,
+    Whole,
+    Table,
+    Endpoints,
+}
+
 pub(crate) fn encode_image_bc1_rdo(
     rgba: &[u8],
     width: u32,
@@ -52,6 +60,11 @@ pub(crate) fn encode_image_bc1_rdo(
         return Err(Error::TruncatedData);
     }
 
+    // Pass 1 - global dictionary: encode every block normally, histogram
+    // the index tables, keep the most popular DICT_N as global candidates.
+    // The baseline blocks are kept and reused by pass 2 (no re-encode).
+    let (dict, base_blocks) = build_table_dict(rgba, w, h, blocks_x, blocks_y);
+
     // Ring buffers of recently emitted structures.
     let mut recent_tables: [u32; WINDOW] = [0; WINDOW];
     let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
@@ -62,49 +75,91 @@ pub(crate) fn encode_image_bc1_rdo(
         for bx in 0..blocks_x {
             let pixels = gather_block(rgba, w, h, bx, by);
 
-            // Baseline: the normal quality path.
-            let base = encode_bc1_bytes(pixels);
+            // Baseline: the normal quality path (from pass 1).
+            let base = base_blocks[by * blocks_x + bx];
             let base_err = bc1_block_sse(&pixels, &base);
 
             let mut best = base;
             let mut best_j = base_err as f32;
+            let mut best_class = Class::Base;
 
             if filled > 0 {
                 // 1. Whole previous block.
-                let err = bc1_block_sse(&pixels, &prev_block);
-                let j = err as f32 - lambda * SAVE_WHOLE;
-                if j < best_j {
-                    best_j = j;
-                    best = prev_block;
+                let lim = (best_j + lambda * SAVE_WHOLE).ceil() as i32;
+                if lim > 0 {
+                    if let Some(err) = bc1_block_sse_limited(&pixels, &prev_block, lim) {
+                        let j = err as f32 - lambda * SAVE_WHOLE;
+                        if j < best_j {
+                            best_j = j;
+                            best = prev_block;
+                            best_class = Class::Whole;
+                        }
+                    }
                 }
 
                 let n = filled.min(WINDOW);
                 for k in 0..n {
                     // 2. Reuse index table, LS-refit endpoints.
                     let table = recent_tables[k];
-                    if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
-                        let err = bc1_block_sse(&pixels, &cand);
-                        let j = err as f32 - lambda * SAVE_PART;
-                        if j < best_j {
-                            best_j = j;
-                            best = cand;
+                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    if lim > 0 {
+                        if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
+                            if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
+                                let j = err as f32 - lambda * SAVE_PART;
+                                if j < best_j {
+                                    best_j = j;
+                                    best = cand;
+                                    best_class = Class::Table;
+                                }
+                            }
                         }
                     }
                     // 3. Reuse endpoints, re-fit indices.
                     let (c0, c1) = recent_eps[k];
-                    if c0 > c1 {
+                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    if c0 > c1 && lim > 0 {
                         if let Some((blk, err)) =
-                            pack_bc1_scored_565(&pixels, c0, c1, i32::MAX)
+                            pack_bc1_scored_565(&pixels, c0, c1, lim)
                         {
                             let j = err as f32 - lambda * SAVE_PART;
                             if j < best_j {
                                 best_j = j;
                                 best = blk;
+                                best_class = Class::Endpoints;
+                            }
+                        }
+                    }
+                }
+                // 4. Global popular tables (two-pass dictionary): the whole
+                // image converges on the same few 4-byte index strings.
+                for &table in dict.iter() {
+                    if recent_tables[..n].contains(&table) {
+                        continue; // already tried via the window
+                    }
+                    let lim = (best_j + lambda * SAVE_PART).ceil() as i32;
+                    if lim <= 0 {
+                        break;
+                    }
+                    if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
+                        if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
+                            let j = err as f32 - lambda * SAVE_PART;
+                            if j < best_j {
+                                best_j = j;
+                                best = cand;
+                                best_class = Class::Table;
                             }
                         }
                     }
                 }
             }
+
+            // Endpoint polish for table-reuse winners: the 4 index bytes must
+            // stay matched, but the endpoint bytes are literals anyway - the
+            // 565 contract lattice recovers quality at ZERO rate cost.
+            if best_class == Class::Table {
+                polish_endpoints_fixed_table(&pixels, &mut best);
+            }
+            let _ = best_class;
 
             let oi = (by * blocks_x + bx) * 8;
             out[oi..oi + 8].copy_from_slice(&best);
@@ -120,6 +175,30 @@ pub(crate) fn encode_image_bc1_rdo(
         }
     }
     Ok(())
+}
+
+/// Like `bc1_block_sse` but aborts once the partial sum reaches `limit`
+/// (a candidate at or past the limit can never be accepted).
+fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) -> Option<i32> {
+    let c0 = u16::from_le_bytes([block[0], block[1]]);
+    let c1 = u16::from_le_bytes([block[2], block[3]]);
+    let a = from_565(c0);
+    let b = from_565(c1);
+    let colors = if c0 > c1 {
+        [a, b, lerp_rgb(a, b, 2, 1), lerp_rgb(a, b, 1, 2)]
+    } else {
+        [a, b, lerp_rgb(a, b, 1, 1), [0, 0, 0]]
+    };
+    let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    let mut err = 0i32;
+    for (i, p) in pixels.iter().enumerate() {
+        let idx = ((table >> (2 * i)) & 3) as usize;
+        err += sqr_rgb([p[0], p[1], p[2]], colors[idx]);
+        if err >= limit {
+            return None;
+        }
+    }
+    Some(err)
 }
 
 /// Decode-true SSE of an arbitrary BC1 block against source pixels
@@ -188,3 +267,84 @@ fn refit_endpoints_for_table(pixels: &[[u8; 4]; 16], table: u32) -> Option<[u8; 
     out[4..8].copy_from_slice(&table.to_le_bytes());
     Some(out)
 }
+
+const DICT_N: usize = 24;
+
+/// Pass 1: histogram the baseline encoder index tables, return the most
+/// popular DICT_N (the global match dictionary for pass 2).
+fn build_table_dict(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    blocks_x: usize,
+    blocks_y: usize,
+) -> (Vec<u32>, Vec<[u8; 8]>) {
+    use std::collections::HashMap;
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    let mut blocks = Vec::with_capacity(blocks_x * blocks_y);
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let pixels = gather_block(rgba, w, h, bx, by);
+            let blk = encode_bc1_bytes(pixels);
+            let c0 = u16::from_le_bytes([blk[0], blk[1]]);
+            let c1 = u16::from_le_bytes([blk[2], blk[3]]);
+            if c0 > c1 {
+                let t = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
+                *counts.entry(t).or_insert(0) += 1;
+            }
+            blocks.push(blk);
+        }
+    }
+    let mut v: Vec<(u32, u32)> = counts.into_iter().collect();
+    v.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let dict = v
+        .into_iter()
+        .take(DICT_N)
+        .filter(|&(_, n)| n >= 2)
+        .map(|(t, _)| t)
+        .collect();
+    (dict, blocks)
+}
+
+/// +-1 contract moves on the 565 endpoints with the index table HELD FIXED
+/// (the table bytes are the LZ match; endpoints are literals either way).
+fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
+    let mut err = bc1_block_sse(pixels, block);
+    for _round in 0..2 {
+        let c0 = u16::from_le_bytes([block[0], block[1]]);
+        let c1 = u16::from_le_bytes([block[2], block[3]]);
+        if c0 <= c1 {
+            return;
+        }
+        let prev = err;
+        for (base_is_c0, d) in [(true, -1i32), (false, 1i32)] {
+            for (shift, maxv) in [(11u16, 31u16), (5, 63), (0, 31)] {
+                let c0n = u16::from_le_bytes([block[0], block[1]]);
+                let c1n = u16::from_le_bytes([block[2], block[3]]);
+                let base = if base_is_c0 { c0n } else { c1n };
+                let cur = (base >> shift) & maxv;
+                let nv = cur as i32 + d;
+                if nv < 0 || nv > maxv as i32 {
+                    continue;
+                }
+                let cand = (base & !(maxv << shift)) | ((nv as u16) << shift);
+                let (n0, n1) = if base_is_c0 { (cand, c1n) } else { (c0n, cand) };
+                if n0 <= n1 {
+                    continue; // must stay 4-color or the table reinterprets
+                }
+                let mut trial = *block;
+                trial[0..2].copy_from_slice(&n0.to_le_bytes());
+                trial[2..4].copy_from_slice(&n1.to_le_bytes());
+                let e = bc1_block_sse(pixels, &trial);
+                if e < err {
+                    err = e;
+                    *block = trial;
+                }
+            }
+        }
+        if err >= prev {
+            break;
+        }
+    }
+}
+
