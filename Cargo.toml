@@ -51,6 +51,8 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 ddsfile = "0.5.2"
 serde_json = "1"
 tiff = { version = "0.9", default-features = true }
+# BC6H decode-oracle for tests (same crate/version the decode feature uses).
+bcdec_rs = "0.2"
 png = "0.17"
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.15"
@@ -115,6 +117,10 @@ required-features = ["decode", "encode"]
 [[test]]
 name = "decode_matrix"
 required-features = ["decode"]
+
+[[test]]
+name = "bc6h_decode"
+required-features = ["decode", "encode"]
 
 [[test]]
 name = "encode_matrix"

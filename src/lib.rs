@@ -54,7 +54,7 @@ mod surface;
 pub use surface::{CubemapFace, SubresourceId, SurfaceView, SurfaceViewMut};
 
 mod content;
-pub use content::{DecodeContent, ImageRgba8};
+pub use content::{DecodeContent, HdrDecodeContent, ImageRgba8, ImageRgbaF32};
 
 #[cfg(feature = "decode")]
 mod decode;

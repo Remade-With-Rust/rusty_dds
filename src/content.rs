@@ -17,6 +17,38 @@ pub struct ImageRgba8 {
     pub pixels: Vec<u8>,
 }
 
+/// Tightly packed RGBA f32 pixels (HDR decode output).
+///
+/// For volumes (`depth > 1`), slices are stacked in order `z = 0 .. depth-1`,
+/// each `width * height * 4` floats. BC6H carries no alpha; A is `1.0`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageRgbaF32 {
+    pub width: u32,
+    pub height: u32,
+    /// Always ≥ 1. `1` for 2D / cubemap faces / array layers.
+    pub depth: u32,
+    pub pixels: Vec<f32>,
+}
+
+/// HDR (float-output) content set — separate from [`DecodeContent`] so the
+/// LDR matrix (`ALL_LDR`, `decode_rgba8`, encode) is untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HdrDecodeContent {
+    /// BC6H unsigned half-float (`DXGI_FORMAT_BC6H_UF16` / `_Typeless`).
+    Bc6hUf16,
+    /// BC6H signed half-float (`DXGI_FORMAT_BC6H_SF16`).
+    Bc6hSf16,
+}
+
+impl HdrDecodeContent {
+    pub fn name(self) -> &'static str {
+        match self {
+            HdrDecodeContent::Bc6hUf16 => "bc6h_uf16",
+            HdrDecodeContent::Bc6hSf16 => "bc6h_sf16",
+        }
+    }
+}
+
 impl ImageRgba8 {
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         self.pixel3(x, y, 0)
@@ -112,6 +144,17 @@ impl Dds {
             return d3d_decode_content(d3d);
         }
         Err(Error::UnsupportedFormat)
+    }
+
+    /// Classify this DDS for HDR float decode ([`crate::Dds::decode_rgba_f32`]).
+    pub fn hdr_decode_content(&self) -> Result<HdrDecodeContent, Error> {
+        match self.get_dxgi_format() {
+            Some(DxgiFormat::BC6H_Typeless) | Some(DxgiFormat::BC6H_UF16) => {
+                Ok(HdrDecodeContent::Bc6hUf16)
+            }
+            Some(DxgiFormat::BC6H_SF16) => Ok(HdrDecodeContent::Bc6hSf16),
+            _ => Err(Error::UnsupportedFormat),
+        }
     }
 }
 

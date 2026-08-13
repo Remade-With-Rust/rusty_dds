@@ -7,11 +7,14 @@
 //! the same decompression core as `image_dds`. Uncompressed layouts are handled
 //! in-house.
 
+mod bc6h;
 mod bcn;
 mod uncompressed;
 pub mod reference;
 
-use crate::content::{slice_payload_bytes, DecodeContent, ImageRgba8};
+use crate::content::{
+    slice_payload_bytes, DecodeContent, HdrDecodeContent, ImageRgba8, ImageRgbaF32,
+};
 use crate::error::Error;
 use crate::surface::SubresourceId;
 use crate::Dds;
@@ -27,6 +30,52 @@ impl Dds {
         let kind = self.decode_content()?;
         let pixels = decode_surface_pixels(kind, surf.data, surf.width, surf.height, surf.depth)?;
         Ok(ImageRgba8 {
+            width: surf.width,
+            height: surf.height,
+            depth: surf.depth,
+            pixels,
+        })
+    }
+}
+
+impl Dds {
+    /// Decode one HDR subresource (BC6H) to tightly packed RGBA `f32`
+    /// (`A = 1.0`). Volumes decode every depth slice, stacked. LDR content
+    /// stays on [`Dds::decode_rgba8`]; each API fails closed on the other's
+    /// formats.
+    pub fn decode_rgba_f32(&self, id: SubresourceId) -> Result<ImageRgbaF32, Error> {
+        let kind = self.hdr_decode_content()?;
+        let signed = kind == HdrDecodeContent::Bc6hSf16;
+        let surf = self.surface(id)?;
+        let slice_bytes = {
+            let bx = (surf.width as usize + 3) / 4;
+            let by = (surf.height as usize + 3) / 4;
+            bx.checked_mul(by)
+                .and_then(|n| n.checked_mul(16))
+                .ok_or(Error::OutOfBounds)?
+        };
+        let need = slice_bytes
+            .checked_mul(surf.depth as usize)
+            .ok_or(Error::OutOfBounds)?;
+        if surf.data.len() < need {
+            return Err(Error::TruncatedData);
+        }
+        let mut pixels = Vec::with_capacity(
+            (surf.width as usize)
+                .saturating_mul(surf.height as usize)
+                .saturating_mul(surf.depth as usize)
+                .saturating_mul(4),
+        );
+        for z in 0..surf.depth as usize {
+            let start = z * slice_bytes;
+            pixels.extend(bc6h::decode_bc6h(
+                &surf.data[start..start + slice_bytes],
+                surf.width,
+                surf.height,
+                signed,
+            )?);
+        }
+        Ok(ImageRgbaF32 {
             width: surf.width,
             height: surf.height,
             depth: surf.depth,
