@@ -1872,20 +1872,64 @@ pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
         a_lo = a_lo.min(p[3]);
         a_hi = a_hi.max(p[3]);
     }
-    // Alpha-flat blocks: mode 6's 4-bit shared index dominates; skip mode 5.
+    // Alpha-flat blocks: mode 6's 4-bit shared index dominates; skip mode 5/4.
+    let mut best_bits = bits6;
+    let mut best_err = err6;
     if err6 > 0 && a_hi - a_lo > 2 {
-        if let Some((bits5, err5)) = try_bc7_mode5(&pixels) {
-            if err5 < err6 {
-                out[..16].copy_from_slice(&bits5);
-                return;
+        if let Some((bits5, err5)) = try_bc7_mode5(&pixels, 0) {
+            if err5 < best_err {
+                best_err = err5;
+                best_bits = bits5;
+            }
+        }
+        // Mode 4 (isb 0): 3-bit alpha indices + 6-bit alpha endpoints trade
+        // color precision (5-bit) for finer alpha — wins when the alpha
+        // gradient needs more steps than mode 5's 2-bit set offers.
+        if best_err > 0 {
+            if let Some((bits4, err4)) = try_bc7_mode4(&pixels) {
+                if err4 < best_err {
+                    best_err = err4;
+                    best_bits = bits4;
+                }
             }
         }
     }
-    out[..16].copy_from_slice(&bits6);
+    // Rotations 1..3 move a COLOR channel into the decoupled-index slot —
+    // for blocks where R/G/B is the gradient that disagrees with the rest.
+    // Trial a rotation only when that channel's span exceeds the span of
+    // the remaining three (otherwise mode 6 / rot 0 already fit).
+    if best_err > 0 {
+        let (mx, mn) = channel_minmax_rgba(&pixels);
+        let spans: [i32; 4] = [
+            (mx[0] - mn[0]) as i32,
+            (mx[1] - mn[1]) as i32,
+            (mx[2] - mn[2]) as i32,
+            (mx[3] - mn[3]) as i32,
+        ];
+        for rot in 1u8..=3 {
+            let c = rot as usize - 1; // rot 1↔R, 2↔G, 3↔B
+            let rest = spans[3].max(spans[(c + 1) % 3]).max(spans[(c + 2) % 3]);
+            if spans[c] > 2 && spans[c] > rest {
+                let mut rotated = pixels;
+                for p in rotated.iter_mut() {
+                    p.swap(c, 3);
+                }
+                if let Some((bits5, err5)) = try_bc7_mode5(&rotated, rot) {
+                    if err5 < best_err {
+                        best_err = err5;
+                        best_bits = bits5;
+                    }
+                }
+            }
+        }
+    }
+    out[..16].copy_from_slice(&best_bits);
 }
 
 /// 2-bit BC7 interpolation weights (symmetric: W2[3-i] == 64 - W2[i]).
 const W2: [u32; 4] = [0, 21, 43, 64];
+/// 3-bit BC7 interpolation weights (symmetric: W3[7-i] == 64 - W3[i]).
+const W3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
 
 /// 7-bit color endpoint dequant (no p-bit): v' = (v<<1) | (v>>6).
 #[inline]
@@ -1893,7 +1937,7 @@ fn unquant7(v: u8) -> u8 {
     (v << 1) | (v >> 6)
 }
 
-fn try_bc7_mode5(pixels: &[[u8; 4]; 16]) -> Option<([u8; 16], i64)> {
+fn try_bc7_mode5(pixels: &[[u8; 4]; 16], rotation: u8) -> Option<([u8; 16], i64)> {
     // --- alpha half: 8-bit endpoints, 4-entry palette, own index set ---
     let alpha: [u8; 16] = pixels.map(|p| p[3]);
     let mut a0 = 255u8;
@@ -1935,7 +1979,192 @@ fn try_bc7_mode5(pixels: &[[u8; 4]; 16]) -> Option<([u8; 16], i64)> {
     let (c_ep0, c_ep1, c_idx) = best_c;
 
     let err = c_err as i64 + a_err as i64;
-    Some((pack_bc7_mode5(c_ep0, c_ep1, a_ep0, a_ep1, &c_idx, &a_idx), err))
+    Some((
+        pack_bc7_mode5(rotation, c_ep0, c_ep1, a_ep0, a_ep1, &c_idx, &a_idx),
+        err,
+    ))
+}
+
+/// Mode 4, isb 0: 5-bit color endpoints + 2-bit color indices, 6-bit alpha
+/// endpoints + 3-bit alpha indices, rotation 0.
+fn try_bc7_mode4(pixels: &[[u8; 4]; 16]) -> Option<([u8; 16], i64)> {
+    // Color half (5-bit endpoints, W2): same seed set as mode 5.
+    let (mut best_c, mut c_err) = {
+        let (mx, mn) = extrema_opaque(pixels);
+        fit_color_mode4(pixels, mx, mn)
+    };
+    {
+        let (mx, mn) = channel_minmax_rgb(pixels);
+        let cand = fit_color_mode4(pixels, mx, mn);
+        if cand.1 < c_err {
+            c_err = cand.1;
+            best_c = cand.0;
+        }
+        if let Some((pa, pb)) = pca_extremes_rgb(pixels) {
+            let cand = fit_color_mode4(pixels, pa, pb);
+            if cand.1 < c_err {
+                c_err = cand.1;
+                best_c = cand.0;
+            }
+        }
+        if let Some((e0, e1)) = ls_endpoints_mode5(pixels, &best_c.2) {
+            let cand = fit_color_mode4(pixels, e0, e1);
+            if cand.1 < c_err {
+                c_err = cand.1;
+                best_c = cand.0;
+            }
+        }
+    }
+    let (c_ep0, c_ep1, c_idx) = best_c;
+
+    // Alpha half: 6-bit endpoints, 8-entry W3 palette, ±2 lattice window.
+    let alpha: [u8; 16] = pixels.map(|p| p[3]);
+    let mut lo = 255u8;
+    let mut hi = 0u8;
+    for &a in &alpha {
+        lo = lo.min(a);
+        hi = hi.max(a);
+    }
+    let (mut a_ep0, mut a_ep1, mut a_idx, mut a_err) = score_alpha_mode4(&alpha, hi >> 2, lo >> 2);
+    if a_err > 0 {
+        for d0 in -2i32..=2 {
+            for d1 in -2i32..=2 {
+                if d0 == 0 && d1 == 0 {
+                    continue;
+                }
+                let q0 = ((hi >> 2) as i32 + d0).clamp(0, 63) as u8;
+                let q1 = ((lo >> 2) as i32 + d1).clamp(0, 63) as u8;
+                let cand = score_alpha_mode4(&alpha, q0, q1);
+                if cand.3 < a_err {
+                    (a_ep0, a_ep1, a_idx, a_err) = cand;
+                }
+            }
+        }
+    }
+
+    let err = c_err as i64 + a_err as i64;
+    Some((pack_bc7_mode4(c_ep0, c_ep1, a_ep0, a_ep1, &c_idx, &a_idx), err))
+}
+
+#[inline]
+fn unquant5(v: u8) -> u8 {
+    (v << 3) | (v >> 2)
+}
+
+#[inline]
+fn unquant6(v: u8) -> u8 {
+    (v << 2) | (v >> 4)
+}
+
+#[allow(clippy::type_complexity)]
+fn fit_color_mode4(
+    pixels: &[[u8; 4]; 16],
+    e0: [u8; 3],
+    e1: [u8; 3],
+) -> (([u8; 3], [u8; 3], [u8; 16]), i32) {
+    let mut q0 = [0u8; 3];
+    let mut q1 = [0u8; 3];
+    for c in 0..3 {
+        q0[c] = e0[c] >> 3;
+        q1[c] = e1[c] >> 3;
+    }
+    let c0 = [unquant5(q0[0]), unquant5(q0[1]), unquant5(q0[2])];
+    let c1 = [unquant5(q1[0]), unquant5(q1[1]), unquant5(q1[2])];
+    let mut pal = [[0u8; 3]; 4];
+    for (k, &w) in W2.iter().enumerate() {
+        for c in 0..3 {
+            pal[k][c] = (((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64) as u8;
+        }
+    }
+    let mut idx = [0u8; 16];
+    let mut err = 0i32;
+    for (i, p) in pixels.iter().enumerate() {
+        let mut bi = 0u8;
+        let mut be = i32::MAX;
+        for (j, pc) in pal.iter().enumerate() {
+            let e = sqr_rgb([p[0], p[1], p[2]], *pc);
+            if e < be {
+                be = e;
+                bi = j as u8;
+            }
+        }
+        idx[i] = bi;
+        err += be;
+    }
+    if idx[0] >= 2 {
+        std::mem::swap(&mut q0, &mut q1);
+        for v in idx.iter_mut() {
+            *v = 3 - *v;
+        }
+    }
+    ((q0, q1, idx), err)
+}
+
+/// Score one 6-bit alpha endpoint pair with the 8-entry W3 palette; anchor
+/// constraint applied (W3 symmetry keeps recon identical under swap+invert).
+fn score_alpha_mode4(alpha: &[u8; 16], q0: u8, q1: u8) -> (u8, u8, [u8; 16], i32) {
+    let c0 = unquant6(q0);
+    let c1 = unquant6(q1);
+    let mut pal = [0u8; 8];
+    for (k, &w) in W3.iter().enumerate() {
+        pal[k] = (((64 - w) * c0 as u32 + w * c1 as u32 + 32) / 64) as u8;
+    }
+    let mut idx = [0u8; 16];
+    let mut err = 0i32;
+    for (i, &a) in alpha.iter().enumerate() {
+        let mut bi = 0u8;
+        let mut be = i32::MAX;
+        for (j, &p) in pal.iter().enumerate() {
+            let d = (p as i32 - a as i32).pow(2);
+            if d < be {
+                be = d;
+                bi = j as u8;
+            }
+        }
+        idx[i] = bi;
+        err += be;
+    }
+    let (mut r0, mut r1) = (q0, q1);
+    if idx[0] >= 4 {
+        std::mem::swap(&mut r0, &mut r1);
+        for v in idx.iter_mut() {
+            *v = 7 - *v;
+        }
+    }
+    (r0, r1, idx, err)
+}
+
+fn pack_bc7_mode4(
+    c0: [u8; 3],
+    c1: [u8; 3],
+    a0: u8,
+    a1: u8,
+    c_idx: &[u8; 16],
+    a_idx: &[u8; 16],
+) -> [u8; 16] {
+    let mut bw = BitWriter::default();
+    // Mode 4: four 0 bits then a 1.
+    for _ in 0..4 {
+        bw.write_bits(0, 1);
+    }
+    bw.write_bits(1, 1);
+    bw.write_bits(0, 2); // rotation 0
+    bw.write_bits(0, 1); // isb 0: 2-bit color, 3-bit alpha
+    for c in 0..3 {
+        bw.write_bits(c0[c] as u32, 5);
+        bw.write_bits(c1[c] as u32, 5);
+    }
+    bw.write_bits(a0 as u32, 6);
+    bw.write_bits(a1 as u32, 6);
+    bw.write_bits(c_idx[0] as u32, 1);
+    for &v in &c_idx[1..] {
+        bw.write_bits(v as u32, 2);
+    }
+    bw.write_bits(a_idx[0] as u32, 2);
+    for &v in &a_idx[1..] {
+        bw.write_bits(v as u32, 3);
+    }
+    bw.into_array()
 }
 
 /// Fit the mode-5 color half for one endpoint seed; returns
@@ -2077,6 +2306,7 @@ fn score_alpha_mode5(alpha: &[u8; 16], c0: u8, c1: u8) -> (u8, u8, [u8; 16], i32
 }
 
 fn pack_bc7_mode5(
+    rotation: u8,
     c0: [u8; 3],
     c1: [u8; 3],
     a0: u8,
@@ -2090,7 +2320,7 @@ fn pack_bc7_mode5(
         bw.write_bits(0, 1);
     }
     bw.write_bits(1, 1);
-    bw.write_bits(0, 2); // rotation 0
+    bw.write_bits(rotation as u32, 2);
     for c in 0..3 {
         bw.write_bits(c0[c] as u32, 7);
         bw.write_bits(c1[c] as u32, 7);
