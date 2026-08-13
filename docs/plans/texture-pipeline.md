@@ -254,8 +254,19 @@ UNORM-lattice search near the incumbent).
 | Alpha threshold selector (static per-mode sorted order → 7 threshold compares) | speed, byte-identical **proven by exhaustion** (all 16.7M endpoint×sample combos) | CPU-neutral in situ (early-aborts pay the build); kept for exactness + future wider windows |
 | BC1 projection index fit (4-color) | tried, DISABLED in place | 4→3 SSE evals saved ~nothing, cost ≤0.012 dB — the BC7 win (16→5) doesn't scale down |
 
-**Final Phase 6 state vs 0.1.2:** 72/102 corpus cases better PSNR / 0 worse;
-CPU 6/6 ABBA pairs ~1.15× less machine (min-of-N wall 1.12×).
+**Phase 6c — "win all 4" round (user-directed):**
+
+| Brick | Result |
+|---|---|
+| BC7 mode 5 rotations 1–3 | all 20 bc7 cases up (+0.2..+1.3 dB — surprise winner on OPAQUE content: the odd-gradient color channel earns its own index set) |
+| BC7 mode 4 (3-bit alpha idx) | HardLeft +1.42, computer_key +0.90 on top of mode 5 |
+| BC7 mode 1 (2-subset, 8-shape harvest shortlist) | startscreen **+13.53 dB**, bumpSign +2.67; three refuted gates recorded (err floors kill the smooth-block wins; shape 2 = 83% of all gain) |
+| AVX2 fit kernels (`simd` feature) | exact vs scalar (200k-case oracles), identical bytes on every CPU; whole stack **1.17× less CPU than 0.1.2** with everything on |
+| BC6H decode | `decode_rgba_f32` + `ImageRgbaF32`, full context matrix vs bcdec oracle; encode remains the one deferred item |
+
+**Final Phase 6 state vs 0.1.2:** 89/102 corpus cases better PSNR / 0 worse;
+CPU 6/6 ABBA pairs ~1.17× less machine — with two-subset + decoupled-alpha
+BC7, the BC1 lattice, the signed window, and BC6H decode all shipped.
 
 **Board status:** `corpus-vs-directxtex` was regenerated clean earlier in the
 campaign (sanity gate: byte-identical bc4u/bc5u read their known 0.33–0.40
