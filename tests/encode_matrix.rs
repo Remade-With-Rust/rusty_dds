@@ -206,6 +206,9 @@ fn psnr_floor(content: DecodeContent) -> f64 {
         DecodeContent::Bc2 | DecodeContent::Bc3 => 18.0,
         DecodeContent::Bc4UNorm | DecodeContent::Bc4SNorm => 28.0,
         DecodeContent::Bc5UNorm | DecodeContent::Bc5SNorm => 28.0,
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 

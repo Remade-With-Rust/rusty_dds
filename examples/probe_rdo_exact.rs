@@ -17,12 +17,16 @@ fn main() {
     };
     assert_eq!(rgba.len(), (w * h * 4) as usize);
 
-    std::env::set_var("RUSTY_DDS_RDO_LAMBDA", "0");
-    let base = Dds::encode_from_rgba8(&rgba, EncodeLayout::flat_2d(DecodeContent::Bc7, w, h))
-        .unwrap();
-    std::env::set_var("RUSTY_DDS_RDO_LAMBDA", "4");
-    let rdo = Dds::encode_from_rgba8(&rgba, EncodeLayout::flat_2d(DecodeContent::Bc7, w, h))
-        .unwrap();
+    let base = Dds::encode_from_rgba8(
+        &rgba,
+        EncodeLayout::flat_2d(DecodeContent::Bc7, w, h).with_rdo(Rdo::Off),
+    )
+    .unwrap();
+    let rdo = Dds::encode_from_rgba8(
+        &rgba,
+        EncodeLayout::flat_2d(DecodeContent::Bc7, w, h).with_rdo(Rdo::lambda(4.0)),
+    )
+    .unwrap();
 
     let bw = (w as usize + 3) / 4;
     let mut diff = 0;

@@ -13,6 +13,7 @@ use crate::Dds;
 
 /// Recommended GPU texture format name (stringly typed — no graphics API crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct GpuFormat {
     /// DXGI enum name, e.g. `"BC7_UNorm_sRGB"`.
     pub dxgi_name: &'static str,
@@ -31,6 +32,7 @@ pub struct GpuFormat {
 
 /// How to feed one subresource to a GPU copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UploadPath {
     /// Keep DDS payload bytes; GPU samples BCn / native format.
     Compressed,
@@ -40,6 +42,7 @@ pub enum UploadPath {
 
 /// One mip/layer/face ready for `write_texture` / buffer→image copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UploadPlan {
     pub id: SubresourceId,
     pub path: UploadPath,

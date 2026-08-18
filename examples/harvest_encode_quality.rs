@@ -75,16 +75,8 @@ fn main() {
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
-            let layout = EncodeLayout {
-                content,
-                width: ctx.width,
-                height: ctx.height,
-                depth: ctx.depth,
-                mipmap_levels: 1,
-                array_layers: 1,
-                is_cubemap: false,
-        quality: EncodeQuality::Quality,
-            };
+            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
+                .with_depth(ctx.depth);
             let floor = psnr_floor(content);
             let channels = channels_for(content);
 
@@ -193,6 +185,9 @@ fn psnr_floor(content: DecodeContent) -> f64 {
         | DecodeContent::Bc4SNorm
         | DecodeContent::Bc5UNorm
         | DecodeContent::Bc5SNorm => 28.0,
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 

@@ -7,6 +7,7 @@ mod bc6h;
 mod blocks;
 mod harvest;
 mod mips;
+mod tuning;
 
 pub use blocks::EncodeQuality;
 
@@ -18,8 +19,69 @@ use crate::header10::{AlphaMode, D3D10ResourceDimension};
 use crate::surface::SubresourceId;
 use crate::{Dds, NewDxgiParams};
 
+/// Rate-distortion optimization strength for the BC1 and BC7 encoders.
+///
+/// BCn payloads ship inside an LZ archive, so a block's real rate is not its
+/// fixed 8/16 bytes but how well those bytes match earlier ones. RDO re-chooses
+/// blocks among LZ-friendlier candidates under `J = SSE - lambda * bytes_saved`.
+/// Candidates are always legal BCn by construction, so decodability is never at
+/// risk — only the rate/quality point moves.
+///
+/// Cost is roughly 3.5x encode time on the affected formats, and RDO encodes
+/// serially for determinism, so it is a cook-time setting.
+///
+/// ```
+/// use rusty_dds::{DecodeContent, EncodeLayout, Rdo};
+///
+/// // Smaller payload inside the shipping archive at parity quality.
+/// let layout = EncodeLayout::flat_2d(DecodeContent::Bc7, 256, 256).with_rdo(Rdo::lambda(4.0));
+/// assert_eq!(layout.rdo, Rdo::lambda(4.0));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub enum Rdo {
+    /// No rate-distortion pass. Byte-identical to the plain encoder.
+    #[default]
+    Off,
+    /// Lagrangian strength. Higher trades more distortion for a smaller
+    /// compressed payload; `0.0` behaves exactly like [`Rdo::Off`].
+    ///
+    /// Measured on the 102-case corpus (payloads deflated at level 8):
+    /// BC1 `25` = -7.1% at +0.17 dB, BC1 `50` = -10.4% at +0.11 dB,
+    /// BC7 `4` = -2.3% at +0.03 dB, BC7 `10` = -3.9% at +0.02 dB.
+    Lambda(f32),
+}
+
+impl Rdo {
+    /// [`Rdo::Lambda`] with the value as given.
+    pub const fn lambda(lambda: f32) -> Self {
+        Rdo::Lambda(lambda)
+    }
+
+    /// Effective lambda; `0.0` means the pass is skipped.
+    pub fn strength(self) -> f32 {
+        match self {
+            Rdo::Off => 0.0,
+            Rdo::Lambda(l) => l,
+        }
+    }
+
+    fn validate(self) -> Result<(), Error> {
+        match self {
+            Rdo::Off => Ok(()),
+            Rdo::Lambda(l) if l.is_finite() && l >= 0.0 => Ok(()),
+            Rdo::Lambda(_) => Err(Error::InvalidField(
+                "rdo lambda must be finite and >= 0".into(),
+            )),
+        }
+    }
+}
+
 /// How to lay out encoded subresources — mirrors decode matrix contexts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: [`Self::rdo`] carries an `f32`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct EncodeLayout {
     pub content: DecodeContent,
     pub width: u32,
@@ -32,6 +94,9 @@ pub struct EncodeLayout {
     pub is_cubemap: bool,
     /// BC4/5 search effort. Default [`EncodeQuality::Quality`].
     pub quality: blocks::EncodeQuality,
+    /// Rate-distortion optimization for BC1 / BC7. Default [`Rdo::Off`],
+    /// which is byte-identical to the plain encoder.
+    pub rdo: Rdo,
 }
 
 impl EncodeLayout {
@@ -45,6 +110,7 @@ impl EncodeLayout {
             array_layers: 1,
             is_cubemap: false,
             quality: blocks::EncodeQuality::Quality,
+            rdo: Rdo::Off,
         }
     }
 
@@ -65,6 +131,12 @@ impl EncodeLayout {
 
     pub fn with_quality(mut self, quality: blocks::EncodeQuality) -> Self {
         self.quality = quality;
+        self
+    }
+
+    /// Set rate-distortion optimization. See [`Rdo`].
+    pub fn with_rdo(mut self, rdo: Rdo) -> Self {
+        self.rdo = rdo;
         self
     }
 
@@ -92,6 +164,7 @@ impl EncodeLayout {
     }
 
     fn validate(&self) -> Result<(), Error> {
+        self.rdo.validate()?;
         if self.width == 0 || self.height == 0 || self.depth == 0 {
             return Err(Error::InvalidField("zero image dimension".into()));
         }
@@ -195,6 +268,7 @@ impl Dds {
                 encode_surface(
                     layout.content,
                     layout.quality,
+                    layout.rdo,
                     &mip_rgba,
                     mw,
                     mh,
@@ -261,14 +335,17 @@ impl ImageRgba8 {
             array_layers: 1,
             is_cubemap: false,
             quality: blocks::EncodeQuality::Quality,
+            rdo: Rdo::Off,
         };
         Dds::encode_from_rgba8(&self.pixels, layout)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_surface(
     content: DecodeContent,
     quality: blocks::EncodeQuality,
+    rdo: Rdo,
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -293,6 +370,7 @@ fn encode_surface(
         for z in 0..depth as usize {
             encode_slice(
                 content,
+                rdo,
                 &rgba[z * slice_rgba..(z + 1) * slice_rgba],
                 width,
                 height,
@@ -305,6 +383,7 @@ fn encode_surface(
 
 fn encode_slice(
     content: DecodeContent,
+    rdo: Rdo,
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -327,10 +406,10 @@ fn encode_slice(
             Ok(())
         }
         DecodeContent::Bc1 => {
-            // Opt-in RDO (RUSTY_DDS_RDO_LAMBDA > 0): trade a lambda-bounded
-            // amount of SSE for LZ-friendlier blocks (the payload ships
-            // inside a deflate archive). 0/unset = byte-identical path.
-            let lambda = rdo_lambda();
+            // Opt-in RDO: trade a lambda-bounded amount of SSE for
+            // LZ-friendlier blocks (the payload ships inside a deflate
+            // archive). Rdo::Off / lambda 0 = byte-identical path.
+            let lambda = rdo.strength();
             if lambda > 0.0 {
                 blocks::encode_image_bc1_rdo(rgba, width, height, lambda, out)
             } else {
@@ -350,7 +429,7 @@ fn encode_slice(
         DecodeContent::Bc7 => {
             #[cfg(feature = "decode")]
             {
-                let lambda = rdo_lambda();
+                let lambda = rdo.strength();
                 if lambda > 0.0 {
                     return blocks::encode_image_bc7_rdo(rgba, width, height, lambda, out);
                 }
@@ -418,15 +497,6 @@ fn encode_bc5_surface(
             out,
         )
     }
-}
-
-/// RDO strength knob (experiment surface; read per encode call so ladders
-/// can sweep it in-process). 0 = off.
-fn rdo_lambda() -> f32 {
-    std::env::var("RUSTY_DDS_RDO_LAMBDA")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0)
 }
 
 /// Peak signal-to-noise ratio for two equal-length RGBA8 buffers (dB).

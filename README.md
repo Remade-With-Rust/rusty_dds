@@ -124,11 +124,41 @@ rusty_dds = "0.2"
 | `decode` | yes | `decode_rgba8`, `decode_rgba_f32` (BC6H), `bcdec_rs` |
 | `encode` | yes | `encode_from_rgba8`, `encode_bc6h_uf16`, `EncodeLayout`, `EncodeQuality`, opt-in RDO |
 | `simd` | yes | AVX2 encode kernels — runtime-detected, scalar fallback, **byte-identical output**. Turn it off for a build the compiler proves contains no `unsafe`. |
+| `tuning` | **no** | Development only. Re-opens the frozen encoder constants to `RUSTY_DDS_*` environment overrides for campaign sweeps. Never ship with it on — output would stop being a pure function of its inputs. |
 
 Always on: container R/W, `SubresourceId` / `surface()`, `decode_content()`,
 `UploadPlan` / `GpuFormat`.
 
+**Determinism is part of the contract.** A payload is a pure function of
+(source bytes, crate version, `EncodeLayout`) — no environment variable, no CPU
+feature, no thread count changes it. `tests/encode_determinism.rs` freezes that
+as payload hashes across every format, both quality tiers and RDO.
+
 MSRV: **1.73**, verified by building against that toolchain. Changes: [CHANGELOG.md](CHANGELOG.md). Migrating from `ddsfile`: [docs/migration-ddsfile.md](docs/migration-ddsfile.md).
+
+## Untrusted input
+
+`Dds::read` reads to end-of-stream with no cap — correct for a file on disk,
+wrong for bytes off a network or out of a mod archive. For those:
+
+```rust
+use rusty_dds::{Dds, Error};
+
+match Dds::read_limited(reader, 64 * 1024 * 1024) {
+    Err(Error::SizeLimitExceeded { limit, .. }) => { /* refuse, nothing buffered past the budget */ }
+    other => { let _ = other?; }
+}
+# Ok::<(), Error>(())
+```
+
+Every size computation downstream of the header uses checked arithmetic, so a
+header whose declared geometry cannot exist fails closed instead of wrapping
+into a size that would then slice the payload. Two harnesses hold that line:
+`tests/parser_robustness.rs` (pure Rust, stable, deterministic, runs on every
+`cargo test`) and [`fuzz/`](fuzz/README.md) (cargo-fuzz, opt-in, excluded from
+the published package so no C toolchain enters the shipped graph). Both drive
+the same `tests/common/driver.rs`. Anything either one finds is pinned in
+`tests/fixtures/regressions/` and replayed forever.
 
 ## Quick start
 
@@ -179,8 +209,10 @@ cargo bench --bench decode_ab
 - **Surfaces** — Typed `SubresourceId`, fail-closed ranges, cubemap helpers.
 - **Decode** — LDR matrix → `ImageRgba8` (sRGB = stored bytes). Oracle: `bcdec_rs`.
 - **Encode** — Same matrix in; mips via box filter; BC7 modes 1/4/5/6; `EncodeQuality::{Quality,Fast}`.
-- **RDO** — Opt-in rate-distortion optimization for BC1/BC7 (`RUSTY_DDS_RDO_LAMBDA`):
-  smaller *compressed* payloads at parity-or-better quality; `λ=0` is byte-identical.
+- **RDO** — Opt-in rate-distortion optimization for BC1/BC7, set per encode call
+  via `EncodeLayout::with_rdo(Rdo::lambda(λ))`: smaller *compressed* payloads at
+  parity-or-better quality. `Rdo::Off` (the default) is byte-identical to the
+  plain encoder, gated by payload hash in `tests/encode_determinism.rs`.
 - **HDR** — BC6H decode (`decode_rgba_f32`) + UF16 mode-11 encode (`encode_bc6h_uf16`).
   Notes: [docs/artifacts/encode-quality.md](docs/artifacts/encode-quality.md).
 - **GPU plans** — `upload_plan_compressed` / `upload_plan_decoded_rgba8` (Vulkan / wgpu / DXGI

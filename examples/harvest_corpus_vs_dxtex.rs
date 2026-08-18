@@ -236,16 +236,7 @@ fn time_rusty_encode(
     h: u32,
     iters: u32,
 ) -> Option<f64> {
-    let layout = EncodeLayout {
-        content,
-        width: w,
-        height: h,
-        depth: 1,
-        mipmap_levels: 1,
-        array_layers: 1,
-        is_cubemap: false,
-        quality: EncodeQuality::Quality,
-    };
+    let layout = EncodeLayout::flat_2d(content, w, h);
     // Warmup
     let _ = Dds::encode_from_rgba8(pixels, layout);
     let mut best = f64::INFINITY;
@@ -266,16 +257,7 @@ fn rusty_roundtrip(
     h: u32,
     channels: &[usize],
 ) -> Result<PeerResult, String> {
-    let layout = EncodeLayout {
-        content,
-        width: w,
-        height: h,
-        depth: 1,
-        mipmap_levels: 1,
-        array_layers: 1,
-        is_cubemap: false,
-        quality: EncodeQuality::Quality,
-    };
+    let layout = EncodeLayout::flat_2d(content, w, h);
     let dds = Dds::encode_from_rgba8(pixels, layout).map_err(|e| e.to_string())?;
     let img = dds
         .decode_rgba8(SubresourceId::mip_layer(0, 0))
@@ -568,6 +550,9 @@ fn dxgi_name(content: DecodeContent) -> &'static str {
         DecodeContent::Bc7 => "BC7_UNORM",
         DecodeContent::Rgba8 => "R8G8B8A8_UNORM",
         DecodeContent::Bgra8 => "B8G8R8A8_UNORM",
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 

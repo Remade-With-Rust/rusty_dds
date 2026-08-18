@@ -23,6 +23,7 @@
 use std::fmt;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Fmt(fmt::Error),
     Io(std::io::Error),
@@ -34,6 +35,10 @@ pub enum Error {
     OutOfBounds,
     /// Payload is shorter than the layout implied by the headers.
     TruncatedData,
+    /// A caller-supplied byte budget was exceeded while reading
+    /// (see [`crate::Dds::read_limited`]). `at_least` is a lower bound: the
+    /// read stops at the budget rather than measuring the whole stream.
+    SizeLimitExceeded { limit: usize, at_least: usize },
 }
 
 impl fmt::Display for Error {
@@ -52,6 +57,10 @@ impl fmt::Display for Error {
             Error::TruncatedData => {
                 write!(f, "Payload is truncated relative to header layout")
             }
+            Error::SizeLimitExceeded { limit, at_least } => write!(
+                f,
+                "Payload exceeds the {limit}-byte read limit (at least {at_least} bytes)"
+            ),
         }
     }
 }

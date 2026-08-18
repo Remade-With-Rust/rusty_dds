@@ -104,6 +104,7 @@ impl SubresourceId {
 
 /// Borrowed view of one subresource's bytes and mip dimensions.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SurfaceView<'a> {
     pub id: SubresourceId,
     pub width: u32,
@@ -287,6 +288,7 @@ impl Dds {
 
 /// Mutable borrowed view of one subresource.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SurfaceViewMut<'a> {
     pub id: SubresourceId,
     pub width: u32,

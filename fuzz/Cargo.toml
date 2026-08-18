@@ -1,0 +1,52 @@
+# Opt-in fuzzing crate. Deliberately NOT a member of anything the library
+# builds: `cargo build`, `cargo test` and `cargo package` in the parent never
+# see it, so `libfuzzer-sys` (which links an LLVM C++ runtime) can never end up
+# in a shipped dependency graph. The always-on, pure-Rust, stable-toolchain
+# half of the story is `tests/parser_robustness.rs`; both halves drive the same
+# `tests/common/driver.rs`.
+#
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run parse
+#
+# See README.md in this directory.
+[package]
+name = "rusty_dds-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: keeps the nightly-only, C++-linking dependency graph
+# entirely out of the parent package's resolution.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.rusty_dds]
+path = ".."
+features = ["decode", "encode"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "read_limited"
+path = "fuzz_targets/read_limited.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false

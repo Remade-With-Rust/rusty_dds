@@ -121,6 +121,9 @@ fn dxgi_name(content: DecodeContent) -> &'static str {
         DecodeContent::Bc7 => "BC7_UNORM",
         DecodeContent::Rgba8 => "R8G8B8A8_UNORM",
         DecodeContent::Bgra8 => "B8G8R8A8_UNORM",
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 
@@ -207,16 +210,8 @@ fn build_decode_cases(dir: &Path) -> Vec<DecodeCase> {
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let path = dir.join(format!("{id}.dds"));
-            let layout = EncodeLayout {
-                content,
-                width: ctx.width,
-                height: ctx.height,
-                depth: ctx.depth,
-                mipmap_levels: 1,
-                array_layers: 1,
-                is_cubemap: false,
-        quality: EncodeQuality::Quality,
-            };
+            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
+                .with_depth(ctx.depth);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
             let dds = Dds::encode_from_rgba8(&pixels, layout).expect("encode fixture");
             write_dds(&path, &dds);
@@ -247,16 +242,8 @@ fn run_encode_baselines(root: &Path, cases_dir: &Path, artifacts: &Path) -> serd
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
-            let layout = EncodeLayout {
-                content,
-                width: ctx.width,
-                height: ctx.height,
-                depth: ctx.depth,
-                mipmap_levels: 1,
-                array_layers: 1,
-                is_cubemap: false,
-        quality: EncodeQuality::Quality,
-            };
+            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
+                .with_depth(ctx.depth);
 
             // Case files for DirectXTex harness
             fs::write(cases_dir.join(format!("{id}.rgba")), &pixels).unwrap();

@@ -52,16 +52,7 @@ fn main() {
                 None => continue,
             };
             let id = format!("{entry_id}__{tname}");
-            let layout = EncodeLayout {
-                content,
-                width: w,
-                height: h,
-                depth: 1,
-                mipmap_levels: 1,
-                array_layers: 1,
-                is_cubemap: false,
-        quality: EncodeQuality::Quality,
-            };
+            let layout = EncodeLayout::flat_2d(content, w, h);
             let dds = match Dds::encode_from_rgba8(&rgba, layout) {
                 Ok(d) => d,
                 Err(e) => {

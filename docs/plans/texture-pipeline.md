@@ -1,6 +1,13 @@
 # Plan: Texture pipeline beyond the DDS container
 
-Status: Phase 5 complete (productization); **Phase 6 encoder campaign (2026-08) in flight** — see §Phase 6; post-1.0 = BC6H / publish / quality RDO  
+Status: **Phase 6 complete** — encoder speed+quality campaign shipped in 0.2.0
+(BC6H decode + UF16 encode, BC7 modes 1/4/5/6, opt-in RDO, AVX2 kernels).
+**Phase 7 in flight (API + hardening):** typed `Rdo` API replacing the
+environment knobs, `Dds::read_limited`, checked header arithmetic, the
+`tests/parser_robustness.rs` + `fuzz/` harnesses, the
+`tests/encode_determinism.rs` byte-identical gate, and `#[non_exhaustive]` on
+the crate-produced types ahead of 1.0.
+Remaining before 1.0: CI, BC6H SF16 encode, a refreshed speed board on a quiet machine.  
 Scope: turn `rusty_dds` from a container envelope parser into a rendering-ready DDS texture stack  
 Baseline: fork of [PistonDevelopers/ddsfile](https://github.com/PistonDevelopers/ddsfile) (container parse/compose only)
 

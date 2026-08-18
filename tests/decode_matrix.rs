@@ -34,6 +34,9 @@ fn dxgi_for(content: DecodeContent) -> DxgiFormat {
         DecodeContent::Bc7 => DxgiFormat::BC7_UNorm,
         DecodeContent::Rgba8 => DxgiFormat::R8G8B8A8_UNorm,
         DecodeContent::Bgra8 => DxgiFormat::B8G8R8A8_UNorm,
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 
@@ -79,6 +82,9 @@ fn fill_deterministic(data: &mut [u8], content: DecodeContent) {
                 *b = (i % 251) as u8;
             }
         }
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 

@@ -33,6 +33,7 @@ pub struct ImageRgbaF32 {
 /// HDR (float-output) content set — separate from [`DecodeContent`] so the
 /// LDR matrix (`ALL_LDR`, `decode_rgba8`, encode) is untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HdrDecodeContent {
     /// BC6H unsigned half-float (`DXGI_FORMAT_BC6H_UF16` / `_Typeless`).
     Bc6hUf16,
@@ -71,6 +72,7 @@ impl ImageRgba8 {
 
 /// Public LDR format classification (decode + encode matrix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DecodeContent {
     Bc1,
     Bc2,

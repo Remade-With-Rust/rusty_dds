@@ -16,6 +16,7 @@ readme = "README.md"
 edition = "2021"
 rust-version = "1.73"
 exclude = [
+    "fuzz/*",
     "third_party/*",
     "tools/*",
     "corpus/raw/*",
@@ -41,6 +42,12 @@ encode = []
 # AVX2 twins of the hot encode kernels (runtime-detected, scalar fallback,
 # byte-identical output either way). Off => zero `unsafe` in the crate.
 simd = []
+# DEVELOPMENT ONLY. Re-opens the frozen encoder tuning constants
+# (src/encode/tuning.rs) and the BC4/5 refine harvest to `RUSTY_DDS_*`
+# environment overrides so the campaign harnesses can sweep them. A shipped
+# build must never enable this: encoder output would stop being a pure
+# function of (source bytes, crate version, EncodeLayout).
+tuning = []
 
 [dependencies]
 bitflags = "2.4"

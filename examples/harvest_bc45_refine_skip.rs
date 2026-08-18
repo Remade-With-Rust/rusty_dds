@@ -44,16 +44,7 @@ fn main() {
                 "bc5s" => DecodeContent::Bc5SNorm,
                 _ => continue,
             };
-            let layout = EncodeLayout {
-                content,
-                width: w,
-                height: h,
-                depth: 1,
-                mipmap_levels: 1,
-                array_layers: 1,
-                is_cubemap: false,
-        quality: EncodeQuality::Quality,
-            };
+            let layout = EncodeLayout::flat_2d(content, w, h);
             let _ = Dds::encode_from_rgba8(&rgba, layout).expect("encode");
             eprintln!("harvested {id} ({label})");
         }
