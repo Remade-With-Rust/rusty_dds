@@ -2082,3 +2082,64 @@ alternative: **neutral against scalar**, so the win genuinely depends on fast
   work.
 - BC2 and BC3 still have no real-content measurement; our packs contain neither.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §31 — The same stall, one line away
+
+§30 found a store-forwarding stall in the BC5 index unpack — sixteen narrow
+stores to a `[u8; 16]` feeding one wide vector load — and fixed it with `pdep`,
+worth +13 points over the array version.
+
+**The identical stall was still there, one line down.** `bc4_palette` returned a
+`[u8; 8]`, built by eight narrow stores to the stack, and the gather read it back
+with `_mm_loadl_epi64`. Building it into a `u64` and moving it across with `movq`:
+**508.7 → 572.5 Mpx/s, +12.5%**, eight samples per arm.
+
+Against DirectXTex: **BC5U 11.54x**, up from 10.66x. 7.65x across formats.
+
+### Why it was missed
+
+The two are the same defect with different names — "the index bytes" and "the
+palette" — and I had just written the fix for one of them. What separated them
+was that the index unpack was *code I was editing* and the palette was *a
+function I was calling*. The stall lives at the boundary, in neither function's
+body: `bc4_palette` is perfectly reasonable in isolation, and so is
+`_mm_loadl_epi64`.
+
+**A store-forwarding stall is invisible in any single function.** It only exists
+in the pairing, so it will never be found by reading either side. After fixing
+one, grep for every other array-to-vector handoff in the same kernel.
+
+### The refuted-but-kept case
+
+BC4's weight pairs sum to exactly 65536, so the palette interpolation collapses
+to `e0 + ((W[k] * (e1 - e0) + 32768) >> 16)` — one multiply instead of two, the
+same identity §25 found in BC7.
+
+**Measured neutral.** Six multiplies saved against a ~90-cycle block is under the
+noise floor. It is kept, and that is a deliberate exception to this file's
+revert-what-does-not-prove-itself rule: the change is strictly *less* work and
+shares a documented form with BC7, so keeping it costs nothing and removing it
+would be churn. The rule targets complexity added for no gain, not simplification
+that happens to be invisible.
+
+### Where BC5 ended up
+
+| version | Mpx/s | change |
+|---|---:|---|
+| 0.3.12 | 291 | in-house decode |
+| 0.3.13 | 378 | row stores |
+| 0.3.14 | 490 | `pshufb` gather + `pdep` unpack |
+| 0.3.15 | 572 | palette in a register |
+
+**~2x over four rounds**, and 11.54x the reference implementation.
+
+### Still open
+
+- The ceiling probe that motivated this thread measured ~789 Mpx/s with the
+  gather removed entirely; it has not been re-run against the SIMD kernel, so the
+  remaining gap is no longer a trustworthy number. Re-measure before another
+  round on BC5.
+- BC2 and BC3 still have no real-content measurement; our packs contain neither.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.

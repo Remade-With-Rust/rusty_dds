@@ -208,8 +208,8 @@ fn has_fast_pdep() -> bool {
 ///
 /// `out` must span the four block rows, i.e. at least `3 * pitch + 16` bytes.
 pub(super) fn bc5_gather(
-    pr: &[u8; 8],
-    pg: &[u8; 8],
+    pr: u64,
+    pg: u64,
     ir: u64,
     ig: u64,
     out: &mut [u8],
@@ -230,8 +230,8 @@ pub(super) fn bc5_gather(
 
 #[target_feature(enable = "ssse3,bmi2")]
 unsafe fn bc5_gather_ssse3(
-    pr: &[u8; 8],
-    pg: &[u8; 8],
+    pr: u64,
+    pg: u64,
     ir: u64,
     ig: u64,
     out: &mut [u8],
@@ -256,8 +256,9 @@ unsafe fn bc5_gather_ssse3(
         )
     };
 
-    let pal_r = _mm_loadl_epi64(pr.as_ptr() as *const __m128i);
-    let pal_g = _mm_loadl_epi64(pg.as_ptr() as *const __m128i);
+    // `movq` from a register, not a load from a stack array — see the caller.
+    let pal_r = core::arch::x86_64::_mm_cvtsi64_si128(pr as i64);
+    let pal_g = core::arch::x86_64::_mm_cvtsi64_si128(pg as i64);
     let rv = _mm_shuffle_epi8(pal_r, idx_vec(ir));
     let gv = _mm_shuffle_epi8(pal_g, idx_vec(ig));
 
@@ -376,7 +377,8 @@ mod tests {
 
             let pitch = 16;
             let mut got = [0u8; 64];
-            assert!(bc5_gather(&pr, &pg, ir, ig, &mut got, pitch));
+            let (prp, pgp) = (u64::from_le_bytes(pr), u64::from_le_bytes(pg));
+            assert!(bc5_gather(prp, pgp, ir, ig, &mut got, pitch));
 
             let mut want = [0u8; 64];
             for p in 0..16usize {

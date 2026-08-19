@@ -367,7 +367,7 @@ mod bc1_tests {
 /// The endpoint order selects six interpolants or four plus the two extremes.
 /// Signed blocks clamp `-128` to `-127` and use `-127`/`127` as the extremes.
 #[inline(always)]
-fn bc4_palette(a0: u8, a1: u8, is_signed: bool) -> [u8; 8] {
+fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
     const W4: [i32; 4] = [13107, 26215, 39321, 52429];
     const W6: [i32; 6] = [9363, 18724, 28086, 37450, 46812, 56173];
 
@@ -377,24 +377,49 @@ fn bc4_palette(a0: u8, a1: u8, is_signed: bool) -> [u8; 8] {
         (a0 as i32, a1 as i32)
     };
 
+    // The weight pairs sum to exactly 65536 — W6[5-k] + W6[k] == 65536, and
+    // likewise for W4 — so
+    //
+    //     (W[n-k]*e0 + W[k]*e1 + 32768) >> 16
+    //       ==  e0 + ((W[k]*(e1 - e0) + 32768) >> 16)
+    //
+    // because 65536*e0 has sixteen zero low bits and an arithmetic shift right
+    // is a floor division. One multiply per entry instead of two, and `delta` is
+    // shared across all of them. Same identity as the BC7 interpolation in
+    // `bc7_bd3`; the oracle tests cover both endpoint orderings and signedness.
+    let delta = e1 - e0;
     let mut p = [0i32; 8];
     p[0] = e0;
     p[1] = e1;
     if e0 > e1 {
         for k in 0..6 {
-            p[2 + k] = (W6[5 - k] * e0 + W6[k] * e1 + 32768) >> 16;
+            p[2 + k] = e0 + ((W6[k] * delta + 32768) >> 16);
         }
     } else {
         for k in 0..4 {
-            p[2 + k] = (W4[3 - k] * e0 + W4[k] * e1 + 32768) >> 16;
+            p[2 + k] = e0 + ((W4[k] * delta + 32768) >> 16);
         }
         p[6] = if is_signed { -127 } else { 0 };
         p[7] = if is_signed { 127 } else { 255 };
     }
-    [
-        p[0] as u8, p[1] as u8, p[2] as u8, p[3] as u8, p[4] as u8, p[5] as u8, p[6] as u8,
-        p[7] as u8,
-    ]
+    // Packed into one `u64` rather than returned as `[u8; 8]`. The array form
+    // is built by eight narrow stores to the stack, and the SIMD path then reads
+    // it back with one wide load — a store-forwarding stall, the same one that
+    // cost 13 points on the index unpack. A `u64` stays in a register and reaches
+    // the vector unit through `movq`.
+    let mut packed = 0u64;
+    for (k, v) in p.iter().enumerate() {
+        packed |= ((*v as u8) as u64) << (8 * k);
+    }
+    packed
+}
+
+/// [`bc4_palette_packed`] unpacked for the scalar path, which indexes it as an
+/// array — measured faster than shifting a register (an L1-resident table
+/// pipelines better than a dependent multiply-then-shift chain).
+#[inline(always)]
+fn bc4_palette(a0: u8, a1: u8, is_signed: bool) -> [u8; 8] {
+    bc4_palette_packed(a0, a1, is_signed).to_le_bytes()
 }
 
 /// The sixteen 3-bit indices of a BC4 block, as one immutable word.
@@ -435,8 +460,8 @@ fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
 /// green, zero in blue, opaque alpha.
 #[inline]
 fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
-    let pr = bc4_palette(blk[0], blk[1], is_signed);
-    let pg = bc4_palette(blk[8], blk[9], is_signed);
+    let pr_packed = bc4_palette_packed(blk[0], blk[1], is_signed);
+    let pg_packed = bc4_palette_packed(blk[8], blk[9], is_signed);
     let ir = bc4_indices(&blk[..8]);
     let ig = bc4_indices(&blk[8..16]);
 
@@ -444,10 +469,11 @@ fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
     // SSSE3, so it is detected and the scalar path below stays as the twin.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if out.len() >= 3 * pitch + 16
-        && crate::decode::simd::bc5_gather(&pr, &pg, ir, ig, out, pitch)
+        && crate::decode::simd::bc5_gather(pr_packed, pg_packed, ir, ig, out, pitch)
     {
         return;
     }
+    let (pr, pg) = (pr_packed.to_le_bytes(), pg_packed.to_le_bytes());
     // A whole block row per store. Four separate four-byte `copy_from_slice`
     // calls carry four slice range-checks; building the row and writing it once
     // carries one, and the row is contiguous in the destination by construction.

@@ -3,6 +3,44 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.15 - 2026-08-19
+
+**BC4/BC5 palettes are built in a register.** 0.3.14 found a store-forwarding
+stall in the BC5 index unpack and fixed it. The same stall was still present one
+line away: `bc4_palette` returned a `[u8; 8]` built by eight narrow stores to the
+stack, and the SIMD gather read it back with one wide load.
+
+Building the palette into a `u64` and moving it to the vector unit with `movq`
+removes the round trip. Eight samples per arm, alternating order: **508.7 ->
+572.5 Mpx/s, +12.5%.**
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC5U 816.8 vs 70.8 Mpx/s
+- 11.54x**, up from 10.66x; **7.65x** across all formats.
+
+### Also
+
+The BC4 interpolation weight pairs sum to exactly 65536 (`W6[5-k] + W6[k]`, and
+likewise `W4`), so
+
+```text
+(W[n-k]*e0 + W[k]*e1 + 32768) >> 16  ==  e0 + ((W[k]*(e1 - e0) + 32768) >> 16)
+```
+
+- one multiply per palette entry instead of two, the same identity as the BC7
+interpolation. **Measured neutral** at this block size: six multiplies saved
+against a ~90-cycle block is below the noise floor. Kept because it is strictly
+less work and shares the documented BC7 form, not counted as a win.
+
+### Notes
+
+- Decode output is unchanged, bit for bit; the BC4/BC5 oracles (30 000 blocks
+  each, signed and unsigned) pass unchanged.
+- The scalar path still unpacks the palette to an array and indexes it, because
+  0.3.14 measured that as *faster* than shifting a register - an L1-resident
+  table pipelines better than a dependent multiply-then-shift chain. Both forms
+  now come from one packed builder.
+- SIMD path 94 tests, scalar fallback 88 (`--no-default-features`).
+
 ## 0.3.14 - 2026-08-19
 
 **Vectorised palette gather for BC5.** An 8-entry palette looked up sixteen
