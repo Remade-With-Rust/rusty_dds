@@ -1261,3 +1261,71 @@ effect and reverted**. The bottleneck moved, and the benchmark did not follow it
   and worth roughly a ninth of what mode 6 was.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §21 — Mode 5: implemented, verified, refuted
+
+§20 closed by naming mode 5 as the next increment — 9.4% of blocks, taking
+single-subset coverage from 88% to 97%, "worth roughly a ninth of what mode 6
+was." It was written, and it is not worth anything measurable.
+
+### It was correct
+
+Mode 5 is the harder single-subset shape: RGB 7.7.7 with separate 8-bit alpha, no
+p-bits, **two independent 2-bit index regions** at fixed offsets, and a rotation
+that swaps alpha with one colour channel.
+
+The first implementation applied the rotation by permuting the *endpoints* before
+interpolating, which looks equivalent and is not: the two weights are assigned
+**positionally** — the first three channels take the colour index, the fourth
+takes the alpha index — so moving an endpoint does not move the weight that
+applies to it. The oracle test caught it on the first run, at rotation 1, case 2.
+
+Fixed, it matched the general decoder bit for bit across **all four rotations ×
+10 000 randomised blocks**.
+
+### It was not faster
+
+Whole-surface, ABBA, warm samples only:
+
+| | mode 5 path | general |
+|---|---:|---:|
+| 256² | 226.9 Mpx/s | 226.8 |
+| 128² | 228.8 | 238.5 |
+| 64² | 236.2 | 238.2 |
+
+That could be dilution — 9.4% share × a 20% per-block win is ~1.9%, under the
+noise. So the path was measured **in isolation**, on a synthetic surface where
+every block is mode 5, rotations cycled so no branch predictor gets a free ride:
+
+| all-mode-5 surface | mode 5 path | general |
+|---|---:|---:|
+| 128² (serial) | 157.2 Mpx/s | 158.9 |
+| 256² (serial) | 158.9 | 164.3 |
+
+Four ABBA samples each. **Neutral per block, not merely diluted.** Reverted, with
+the measurement in a comment at the site.
+
+### Why this matters more than the code
+
+The obvious read of §20 was "specialising BC7 modes is a win, do more of them."
+That generalisation is now **false as stated**. Mode 6's ~20% did not come from
+specialisation as such; it came from something specific to mode 6 — most likely
+that its 4-bit indices and single interpolation weight collapse to a handful of
+shifts, where mode 5 still carries two index streams, a channel permutation and a
+7→8-bit expansion that the general decoder was not paying much for anyway.
+
+The separation of the two experiments is the point. The whole-surface number
+alone would have been dismissed as "too small a share to see" — which is a story,
+not a measurement, and it happens to be the wrong one. Isolating the path turned
+an untestable excuse into a fact.
+
+**Do not assume modes 1 or 3 will pay without measuring them the same way**: in
+isolation first, share second.
+
+### Still open
+
+- Modes 1 (2.9%) and 3 — measure in isolation before writing anything.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.

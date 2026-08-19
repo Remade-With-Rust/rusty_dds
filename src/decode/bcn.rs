@@ -418,6 +418,15 @@ fn blit_rg_to_rgba(
 
 // --------------------------------------------------------------- BC7 mode 6
 
+// A mode-5 fast path was written, verified bit-identical to the general decoder
+// across all four rotations x 10 000 randomised blocks, and REFUTED on speed:
+// neutral at every size, even on a synthetic surface where 100% of blocks are
+// mode 5 (128^2: 157.2 vs 158.9 Mpx/s; 256^2: 158.9 vs 164.3, four ABBA samples
+// each). Mode 5 is only ~9% of real blocks, so it could never have shown in a
+// whole-surface measurement either. Whatever mode 6 gains below, it is not
+// "specialisation" in general — do not assume modes 1/3 will pay without
+// measuring them the same way.
+
 /// BC7 interpolation weights for 4-bit indices.
 const BC7_WEIGHTS4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
