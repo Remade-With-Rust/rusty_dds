@@ -70,7 +70,7 @@ pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 
 pub fn decode_bc1_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
     decode_rgba_blocks_into(data, width, height, 8, out, |block, dst, pitch| {
-        bcdec_rs::bc1(block, dst, pitch);
+        bc1_color_block(block, dst, pitch, false);
     })
 }
 
@@ -82,7 +82,7 @@ pub fn decode_bc2(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 
 pub fn decode_bc2_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
-        bcdec_rs::bc2(block, dst, pitch);
+        bc2_block_rgba(block, dst, pitch);
     })
 }
 
@@ -94,7 +94,7 @@ pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 
 pub fn decode_bc3_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
-        bcdec_rs::bc3(block, dst, pitch);
+        bc3_block_rgba(block, dst, pitch);
     })
 }
 
@@ -123,13 +123,22 @@ pub fn decode_bc4_into(
     let out_w = width as usize;
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
-    let mut block_r = [0u8; 16];
+    let aligned = width % 4 == 0 && height % 4 == 0;
+    let pitch = out_w * 4;
+    let mut scratch = [0u8; 64];
 
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 8;
-            bcdec_rs::bc4(&data[bi..bi + 8], &mut block_r, 4, is_signed);
-            blit_r_to_rgba(&block_r, out, out_w, out_h, bx * 4, by * 4);
+            let blk = &data[bi..bi + 8];
+            if aligned {
+                // Straight into the destination: one pass, packed word stores.
+                let offset = (by * 4 * out_w + bx * 4) * 4;
+                bc4_block_rgba(blk, &mut out[offset..], pitch, is_signed);
+            } else {
+                bc4_block_rgba(blk, &mut scratch, 16, is_signed);
+                blit_rgba4(&scratch, out, out_w, out_h, bx * 4, by * 4);
+            }
         }
     }
     Ok(())
@@ -160,13 +169,21 @@ pub fn decode_bc5_into(
     let out_w = width as usize;
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
-    let mut block_rg = [0u8; 32];
+    let aligned = width % 4 == 0 && height % 4 == 0;
+    let pitch = out_w * 4;
+    let mut scratch = [0u8; 64];
 
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
-            bcdec_rs::bc5(&data[bi..bi + 16], &mut block_rg, 8, is_signed);
-            blit_rg_to_rgba(&block_rg, out, out_w, out_h, bx * 4, by * 4);
+            let blk = &data[bi..bi + 16];
+            if aligned {
+                let offset = (by * 4 * out_w + bx * 4) * 4;
+                bc5_block_rgba(blk, &mut out[offset..], pitch, is_signed);
+            } else {
+                bc5_block_rgba(blk, &mut scratch, 16, is_signed);
+                blit_rgba4(&scratch, out, out_w, out_h, bx * 4, by * 4);
+            }
         }
     }
     Ok(())
@@ -214,6 +231,413 @@ fn check_out_len(out: &[u8], out_w: usize, out_h: usize) -> Result<(), Error> {
         return Err(Error::OutOfBounds);
     }
     Ok(())
+}
+
+/// Decode one BC1 colour block to RGBA8.
+///
+/// `opaque` forces the four-colour interpretation regardless of endpoint order,
+/// which is what BC2 and BC3 colour blocks require.
+///
+/// Two things the general decoder does that this does not. It walks the index
+/// word with `indices >>= 2` after every pixel, which is a **sixteen-deep serial
+/// dependency chain** — the same shape that dominated BC7 before 0.3.6 — and it
+/// copies each pixel with a bounds-checked four-byte `copy_from_slice`. Reading
+/// each index by computed offset from an immutable `u32` makes all sixteen
+/// independent, and building the palette as four `u32`s turns the copy into a
+/// single word store.
+///
+/// The 565-to-888 expansion constants are the reference implementation's, and
+/// the oracle test asserts bit-identical output across random blocks and both
+/// endpoint orderings.
+#[inline]
+fn bc1_color_block(blk: &[u8], out: &mut [u8], pitch: usize, opaque: bool) {
+    let c0 = u16::from_le_bytes([blk[0], blk[1]]) as u32;
+    let c1 = u16::from_le_bytes([blk[2], blk[3]]) as u32;
+    let (r0, g0, b0) = ((c0 >> 11) & 0x1f, (c0 >> 5) & 0x3f, c0 & 0x1f);
+    let (r1, g1, b1) = ((c1 >> 11) & 0x1f, (c1 >> 5) & 0x3f, c1 & 0x1f);
+
+    // RGBA in memory order, packed little-endian so a store is one word.
+    let px = |r: u32, g: u32, b: u32, a: u32| r | (g << 8) | (b << 16) | (a << 24);
+
+    let mut pal = [0u32; 4];
+    pal[0] = px(
+        (r0 * 527 + 23) >> 6,
+        (g0 * 259 + 33) >> 6,
+        (b0 * 527 + 23) >> 6,
+        255,
+    );
+    pal[1] = px(
+        (r1 * 527 + 23) >> 6,
+        (g1 * 259 + 33) >> 6,
+        (b1 * 527 + 23) >> 6,
+        255,
+    );
+    if c0 > c1 || opaque {
+        // Four-colour block: two interpolants at 1/3 and 2/3.
+        pal[2] = px(
+            ((2 * r0 + r1) * 351 + 61) >> 7,
+            ((2 * g0 + g1) * 2763 + 1039) >> 11,
+            ((2 * b0 + b1) * 351 + 61) >> 7,
+            255,
+        );
+        pal[3] = px(
+            ((r0 + r1 * 2) * 351 + 61) >> 7,
+            ((g0 + g1 * 2) * 2763 + 1039) >> 11,
+            ((b0 + b1 * 2) * 351 + 61) >> 7,
+            255,
+        );
+    } else {
+        // Three-colour block: one midpoint, and index 3 is transparent black.
+        pal[2] = px(
+            ((r0 + r1) * 1053 + 125) >> 8,
+            ((g0 + g1) * 4145 + 1019) >> 11,
+            ((b0 + b1) * 1053 + 125) >> 8,
+            255,
+        );
+        pal[3] = 0;
+    }
+
+    let idx = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
+    for p in 0..16usize {
+        let e = pal[((idx >> (2 * p)) & 0x3) as usize];
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o..o + 4].copy_from_slice(&e.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod bc1_tests {
+    use super::bc1_color_block;
+
+    /// Bit-identical to the reference across random blocks, both endpoint
+    /// orderings, and the degenerate `c0 == c1` case where the three-colour
+    /// branch is taken and index 3 must come out fully transparent.
+    #[test]
+    fn bc1_color_block_matches_the_general_decoder() {
+        let mut state = 0x5eed_1234_9876_fedcu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..40_000 {
+            let mut blk = [0u8; 8];
+            match case {
+                0 => {}
+                1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                2 => blk[..4].copy_from_slice(&[0x34, 0x12, 0x34, 0x12]), // c0 == c1
+                _ => blk.copy_from_slice(&next().to_le_bytes()),
+            }
+
+            // BC1 proper: the endpoint order selects the mode.
+            let mut ours = [0u8; 64];
+            bc1_color_block(&blk, &mut ours, 16, false);
+            let mut theirs = [0u8; 64];
+            bcdec_rs::bc1(&blk, &mut theirs, 16);
+            assert_eq!(ours, theirs, "case {case}: BC1 diverged, block {blk:02x?}");
+
+            // Opaque mode, as BC2 and BC3 colour blocks use. bcdec reaches it
+            // through bc2 with a zeroed alpha block, so compare colour only.
+            let mut opaque = [0u8; 64];
+            bc1_color_block(&blk, &mut opaque, 16, true);
+            let mut wrapped = [0u8; 16];
+            wrapped[8..].copy_from_slice(&blk);
+            let mut theirs2 = [0u8; 64];
+            bcdec_rs::bc2(&wrapped, &mut theirs2, 16);
+            for p in 0..16 {
+                assert_eq!(
+                    opaque[p * 4..p * 4 + 3],
+                    theirs2[p * 4..p * 4 + 3],
+                    "case {case}: opaque-mode colour diverged at pixel {p}"
+                );
+            }
+        }
+    }
+}
+
+/// Build the eight-entry palette of a BC4 block, as the reference does.
+///
+/// The endpoint order selects six interpolants or four plus the two extremes.
+/// Signed blocks clamp `-128` to `-127` and use `-127`/`127` as the extremes.
+#[inline(always)]
+fn bc4_palette(a0: u8, a1: u8, is_signed: bool) -> [u8; 8] {
+    const W4: [i32; 4] = [13107, 26215, 39321, 52429];
+    const W6: [i32; 6] = [9363, 18724, 28086, 37450, 46812, 56173];
+
+    let (e0, e1) = if is_signed {
+        ((a0 as i8 as i32).max(-127), (a1 as i8 as i32).max(-127))
+    } else {
+        (a0 as i32, a1 as i32)
+    };
+
+    let mut p = [0i32; 8];
+    p[0] = e0;
+    p[1] = e1;
+    if e0 > e1 {
+        for k in 0..6 {
+            p[2 + k] = (W6[5 - k] * e0 + W6[k] * e1 + 32768) >> 16;
+        }
+    } else {
+        for k in 0..4 {
+            p[2 + k] = (W4[3 - k] * e0 + W4[k] * e1 + 32768) >> 16;
+        }
+        p[6] = if is_signed { -127 } else { 0 };
+        p[7] = if is_signed { 127 } else { 255 };
+    }
+    [
+        p[0] as u8, p[1] as u8, p[2] as u8, p[3] as u8, p[4] as u8, p[5] as u8, p[6] as u8,
+        p[7] as u8,
+    ]
+}
+
+/// The sixteen 3-bit indices of a BC4 block, as one immutable word.
+///
+/// The reference walks these with `indices >>= 3` after every pixel, a
+/// sixteen-deep serial dependency chain. Returning the word lets each index be
+/// read by computed offset instead, so all sixteen are independent.
+#[inline(always)]
+fn bc4_indices(blk: &[u8]) -> u64 {
+    u64::from_le_bytes([blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7]]) >> 16
+}
+
+/// Decode a BC4 block straight to RGBA8: value in red, zero in green and blue,
+/// opaque alpha.
+///
+/// The general path decodes sixteen single-channel bytes and then expands them
+/// to RGBA in a second pass over the block. Writing packed words directly fuses
+/// the two.
+#[inline]
+fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
+    let pal = bc4_palette(blk[0], blk[1], is_signed);
+    let idx = bc4_indices(blk);
+    for p in 0..16usize {
+        let v = pal[((idx >> (3 * p)) & 0x7) as usize] as u32;
+        let word = v | (255 << 24);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o..o + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// Decode a BC5 block pair straight to RGBA8: first channel in red, second in
+/// green, zero in blue, opaque alpha.
+#[inline]
+fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
+    let pr = bc4_palette(blk[0], blk[1], is_signed);
+    let pg = bc4_palette(blk[8], blk[9], is_signed);
+    let ir = bc4_indices(&blk[..8]);
+    let ig = bc4_indices(&blk[8..16]);
+    for p in 0..16usize {
+        let sh = 3 * p;
+        let r = pr[((ir >> sh) & 0x7) as usize] as u32;
+        let g = pg[((ig >> sh) & 0x7) as usize] as u32;
+        let word = r | (g << 8) | (255 << 24);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o..o + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod bc45_tests {
+    use super::{bc4_block_rgba, bc5_block_rgba};
+
+    fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    /// Both endpoint orderings and both signednesses, against the reference.
+    /// The `a0 == a1` and `-128` cases are pinned because they select the
+    /// four-interpolant branch and the signed clamp respectively.
+    #[test]
+    fn bc4_matches_the_general_decoder() {
+        for &is_signed in &[false, true] {
+            let mut next = rng(0xabcd_1234_5678_9012 ^ is_signed as u64);
+            for case in 0..30_000 {
+                let mut blk = [0u8; 8];
+                match case {
+                    0 => {}
+                    1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                    2 => blk[..2].copy_from_slice(&[0x80, 0x80]), // -128 clamp, a0 == a1
+                    3 => blk[..2].copy_from_slice(&[0x10, 0x90]), // a0 < a1
+                    _ => blk.copy_from_slice(&next().to_le_bytes()),
+                }
+                let mut ours = [0u8; 64];
+                bc4_block_rgba(&blk, &mut ours, 16, is_signed);
+
+                // The reference writes one channel; expand it the same way the
+                // old two-pass path did.
+                let mut single = [0u8; 16];
+                bcdec_rs::bc4(&blk, &mut single, 4, is_signed);
+                for p in 0..16 {
+                    let want = [single[p], 0, 0, 255];
+                    assert_eq!(
+                        ours[p * 4..p * 4 + 4],
+                        want,
+                        "signed={is_signed} case {case} pixel {p}, block {blk:02x?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bc5_matches_the_general_decoder() {
+        for &is_signed in &[false, true] {
+            let mut next = rng(0x1357_9bdf_2468_ace0 ^ is_signed as u64);
+            for case in 0..30_000 {
+                let mut blk = [0u8; 16];
+                match case {
+                    0 => {}
+                    1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                    _ => {
+                        blk[..8].copy_from_slice(&next().to_le_bytes());
+                        blk[8..].copy_from_slice(&next().to_le_bytes());
+                    }
+                }
+                let mut ours = [0u8; 64];
+                bc5_block_rgba(&blk, &mut ours, 16, is_signed);
+
+                let mut pair = [0u8; 32];
+                bcdec_rs::bc5(&blk, &mut pair, 8, is_signed);
+                for p in 0..16 {
+                    let want = [pair[p * 2], pair[p * 2 + 1], 0, 255];
+                    assert_eq!(
+                        ours[p * 4..p * 4 + 4],
+                        want,
+                        "signed={is_signed} case {case} pixel {p}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// BC3's alpha palette, which is **not** BC4's.
+///
+/// BC4 interpolates with fixed-point weights (`a_weights6` / `a_weights4`,
+/// `>> 16`); BC3's alpha block uses integer division by 7 and 5. Those disagree:
+/// for `a0 = 60, a1 = 133` the four-interpolant entry is 74 by division and 75
+/// by weights. The reference implementation makes the same distinction, so
+/// matching it bit-for-bit means keeping both forms. The oracle test caught this
+/// immediately when BC3 was first wired to `bc4_palette`.
+#[inline(always)]
+fn bc3_alpha_palette(a0: u8, a1: u8) -> [u8; 8] {
+    let (a0, a1) = (a0 as u32, a1 as u32);
+    let mut p = [0u32; 8];
+    p[0] = a0;
+    p[1] = a1;
+    if a0 > a1 {
+        for k in 0..6u32 {
+            p[2 + k as usize] = ((6 - k) * a0 + (k + 1) * a1 + 1) / 7;
+        }
+    } else {
+        for k in 0..4u32 {
+            p[2 + k as usize] = ((4 - k) * a0 + (k + 1) * a1 + 1) / 5;
+        }
+        p[6] = 0;
+        p[7] = 255;
+    }
+    [
+        p[0] as u8, p[1] as u8, p[2] as u8, p[3] as u8, p[4] as u8, p[5] as u8, p[6] as u8,
+        p[7] as u8,
+    ]
+}
+
+/// Decode one BC2 block to RGBA8: explicit 4-bit alpha, then an opaque-mode
+/// colour block.
+#[inline]
+fn bc2_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
+    // Colour first — it writes an opaque alpha that the loop below replaces.
+    bc1_color_block(&blk[8..16], out, pitch, true);
+    for row in 0..4usize {
+        let a = u16::from_le_bytes([blk[row * 2], blk[row * 2 + 1]]);
+        for col in 0..4usize {
+            // 4-bit alpha scaled to 8 bits by the reference's factor of 17,
+            // which is exactly 0x0F -> 0xFF.
+            out[row * pitch + col * 4 + 3] = (((a >> (4 * col)) & 0x0f) as u8) * 17;
+        }
+    }
+}
+
+/// Decode one BC3 block to RGBA8: a BC4-style interpolated alpha block, then an
+/// opaque-mode colour block.
+///
+/// The alpha half is literally a BC4 block, so it reuses [`bc4_palette`] and
+/// [`bc4_indices`] — including their independent index reads.
+#[inline]
+fn bc3_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
+    bc1_color_block(&blk[8..16], out, pitch, true);
+    let pal = bc3_alpha_palette(blk[0], blk[1]);
+    let idx = bc4_indices(&blk[..8]);
+    for p in 0..16usize {
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o + 3] = pal[((idx >> (3 * p)) & 0x7) as usize];
+    }
+}
+
+#[cfg(test)]
+mod bc23_tests {
+    use super::{bc2_block_rgba, bc3_block_rgba};
+
+    fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    #[test]
+    fn bc2_matches_the_general_decoder() {
+        let mut next = rng(0x2222_3333_4444_5555);
+        for case in 0..30_000 {
+            let mut blk = [0u8; 16];
+            match case {
+                0 => {}
+                1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                _ => {
+                    blk[..8].copy_from_slice(&next().to_le_bytes());
+                    blk[8..].copy_from_slice(&next().to_le_bytes());
+                }
+            }
+            let mut ours = [0u8; 64];
+            bc2_block_rgba(&blk, &mut ours, 16);
+            let mut theirs = [0u8; 64];
+            bcdec_rs::bc2(&blk, &mut theirs, 16);
+            assert_eq!(ours, theirs, "case {case}: BC2 diverged, block {blk:02x?}");
+        }
+    }
+
+    #[test]
+    fn bc3_matches_the_general_decoder() {
+        let mut next = rng(0x6666_7777_8888_9999);
+        for case in 0..30_000 {
+            let mut blk = [0u8; 16];
+            match case {
+                0 => {}
+                1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                // a0 == a1 selects the four-interpolant alpha branch.
+                2 => blk[..2].copy_from_slice(&[0x40, 0x40]),
+                _ => {
+                    blk[..8].copy_from_slice(&next().to_le_bytes());
+                    blk[8..].copy_from_slice(&next().to_le_bytes());
+                }
+            }
+            let mut ours = [0u8; 64];
+            bc3_block_rgba(&blk, &mut ours, 16);
+            let mut theirs = [0u8; 64];
+            bcdec_rs::bc3(&blk, &mut theirs, 16);
+            assert_eq!(ours, theirs, "case {case}: BC3 diverged, block {blk:02x?}");
+        }
+    }
 }
 
 fn decode_rgba_blocks_into(
@@ -377,44 +801,7 @@ fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px
     }
 }
 
-#[inline]
-fn blit_r_to_rgba(block_r: &[u8; 16], out: &mut [u8], out_w: usize, out_h: usize, px0: usize, py0: usize) {
-    let copy_w = 4.min(out_w - px0);
-    let copy_h = 4.min(out_h - py0);
-    for row in 0..copy_h {
-        for col in 0..copy_w {
-            let v = block_r[row * 4 + col];
-            let dst = ((py0 + row) * out_w + px0 + col) * 4;
-            out[dst] = v;
-            out[dst + 1] = 0;
-            out[dst + 2] = 0;
-            out[dst + 3] = 255;
-        }
-    }
-}
 
-#[inline]
-fn blit_rg_to_rgba(
-    block_rg: &[u8; 32],
-    out: &mut [u8],
-    out_w: usize,
-    out_h: usize,
-    px0: usize,
-    py0: usize,
-) {
-    let copy_w = 4.min(out_w - px0);
-    let copy_h = 4.min(out_h - py0);
-    for row in 0..copy_h {
-        for col in 0..copy_w {
-            let src = row * 8 + col * 2;
-            let dst = ((py0 + row) * out_w + px0 + col) * 4;
-            out[dst] = block_rg[src];
-            out[dst + 1] = block_rg[src + 1];
-            out[dst + 2] = 0;
-            out[dst + 3] = 255;
-        }
-    }
-}
 
 // --------------------------------------------------------------- BC7 mode 6
 

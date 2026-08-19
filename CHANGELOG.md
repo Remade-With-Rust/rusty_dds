@@ -3,6 +3,64 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.12 - 2026-08-19
+
+**BC1 through BC5 now decode in-house.** The same serial dependency chain that
+dominated BC7 before 0.3.6 was in these formats too: the reference walks the
+index word with `indices >>= 2` (BC1/BC2) or `>>= 3` (BC3/BC4/BC5) after every
+pixel, so sixteen index reads cannot overlap. Reading each by computed offset
+from an immutable word makes all sixteen independent.
+
+BC4 and BC5 additionally decoded in **two passes** - sixteen single-channel bytes
+first, then a second pass expanding them to RGBA. That is now one pass of packed
+word stores.
+
+### Ceiling first
+
+Following 0.3.11, the headroom was measured before anything was written, by
+stubbing the block decoders out entirely:
+
+| format | before | ceiling | block decode share |
+|---|---:|---:|---:|
+| BC1 | 621.6 Mpx/s | 1216.1 | 49% |
+| BC5U | 404.4 | 671.9 | 40% |
+| BC4U | 498.1 | 683.8 | 27% |
+
+Unlike BC7 mode 6, where the equivalent measurement showed 2.5%, there was real
+room here.
+
+### Performance
+
+Six samples per arm, alternating order:
+
+| format | before | after | |
+|---|---:|---:|---|
+| **BC4U** | 441.4 Mpx/s | **669.3** | **+51.6%** (no overlap) |
+| **BC1** | 554.3 | **660.6** | **+19.2%** (no overlap) |
+| BC5U | 335.4 | 341.3 | +1.8%, neutral |
+
+BC5 does not move. Its change is kept because it removes a pass and shares one
+implementation with BC4 rather than because it is faster - stated here rather
+than counted as a win.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC4U 842.6 vs 102.0
+Mpx/s (8.26x)**, up from 5.34x; 6.69x across all formats.
+
+### Notes
+
+- **BC3 alpha is not BC4 alpha.** BC4 interpolates with fixed-point weights
+  (`>> 16`); BC3 alpha uses integer division by 7 and 5. They disagree - for
+  `a0 = 60, a1 = 133` the four-interpolant entry is 74 by division and 75 by
+  weights. The reference makes the same distinction, so both forms are kept. The
+  oracle test caught this the moment BC3 was wired to the wrong one.
+- Verified bit-identical to the general decoder: 40 000 BC1 blocks across both
+  endpoint orderings and opaque mode, 30 000 each for BC2 and BC3, and 30 000
+  each for BC4 and BC5 in both signed and unsigned form, plus the all-zero,
+  all-ones, `c0 == c1`, `a0 == a1` and `-128`-clamp cases.
+- BC2 and BC3 share the fixed colour block, and BC3 the independent index reads,
+  but neither appears in our packs so neither has a real-content measurement.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.11 - 2026-08-19
 
 **Index fields read as `u64` instead of `u128`.** Every BC7 index region is at

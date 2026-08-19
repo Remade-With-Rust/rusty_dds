@@ -1852,3 +1852,89 @@ made both look promising.
 - BC1-BC5 have never been examined for either the index-chain or the
   interpolation win. BC1 runs at 684 Mpx/s and nothing has profiled why.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §28 — BC1 through BC5, and the ceiling that said go
+
+§27 ended with a rule earned the hard way: **measure the ceiling before building
+the optimisation.** This round applied it first, and for once the answer was
+"yes, build it."
+
+### Ceiling first
+
+Stubbing the block decoders out entirely, so only the loop and addressing remain:
+
+| format | current | ceiling | block decode share |
+|---|---:|---:|---:|
+| BC1 | 621.6 Mpx/s | 1216.1 | **49%** |
+| BC5U | 404.4 | 671.9 | 40% |
+| BC4U | 498.1 | 683.8 | 27% |
+
+Against mode 6's 2.5%, this is a different world. Two minutes of stubbing turned
+"BC1-BC5 have never been examined" into a ranked work list.
+
+### The same chain, again
+
+The cause was the one §22 identified in BC7:
+
+```rust
+let idx = color_indices & 0x03;
+...
+color_indices >>= 2;      // sixteen dependent shifts
+```
+
+BC1 and BC2 shift by two, BC3/BC4/BC5 by three, and every read mutates the
+cursor. Reading each index by computed offset from an immutable word makes all
+sixteen independent — the identical fix, in a format family nobody had connected
+to the BC7 work because they share no code.
+
+BC4 and BC5 carried a second cost: they decoded sixteen single-channel bytes and
+then made a **second pass** over the block to expand them to RGBA. Packed word
+stores fuse the two.
+
+### The result
+
+Six samples per arm, alternating order:
+
+| format | before | after | |
+|---|---:|---:|---|
+| **BC4U** | 441.4 Mpx/s | **669.3** | **+51.6%**, no overlap |
+| **BC1** | 554.3 | **660.6** | **+19.2%**, no overlap |
+| BC5U | 335.4 | 341.3 | +1.8%, neutral |
+
+Against DirectXTex: **BC4U 842.6 vs 102.0 Mpx/s — 8.26x**, up from 5.34x. 6.69x
+across all formats.
+
+BC5 is kept despite being neutral, because the change *removes* code — one pass
+instead of two, one implementation shared with BC4 — rather than adding any. That
+is a different case from §21's mode 5, which added a hundred lines for nothing.
+
+### BC3 alpha is not BC4 alpha
+
+Wiring BC3 to `bc4_palette` failed the oracle immediately. BC4 interpolates with
+fixed-point weights and `>> 16`; **BC3 alpha uses integer division by 7 and 5**,
+and they disagree — for `a0 = 60, a1 = 133`, 74 by division against 75 by
+weights. The reference draws the same distinction.
+
+Worth recording as a hazard: the two look interchangeable, they are described
+identically in most summaries of the formats, and only a bit-exact oracle
+separates them. A visual check would never have found a one-level difference in
+an alpha ramp.
+
+### The lesson worth keeping
+
+**A fix found in one place is a hypothesis about every place with the same
+shape.** The serial index chain was diagnosed in BC7 in §22, and it sat unfixed
+in five other formats for six sections — not because anyone rejected the idea,
+but because BC1-BC5 share no code with BC7 and nothing connected them. The
+connection was structural, not textual, and grep does not find that.
+
+### Still open
+
+- BC5 has 40% of its call in block decode by the ceiling measurement, and this
+  round did not capture it. Two channels of independent palette lookups appear to
+  saturate something the single-channel BC4 path does not; it has not been
+  diagnosed.
+- BC2 and BC3 have no real-content measurement — our packs contain neither.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
