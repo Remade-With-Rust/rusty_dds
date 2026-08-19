@@ -3,6 +3,77 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.7.0 - 2026-08-19
+
+**The performance release.** 0.3.20 is the last version on crates.io; everything
+from 0.3.21 to 0.3.38 landed but was never published, so this consolidates
+eighteen increments into one release. Each is still documented separately below
+with its own measurement, and every one of them is **byte-identical** — no
+decoded pixel or encoded payload changes anywhere in this release.
+
+### Decode: every BCn format vectorised
+
+512^2, process-pinned, **process CPU time**, paired samples with the leading arm
+alternated. Measured against 0.3.27 except BC6H, measured across 0.3.30 + 0.3.36.
+
+| format | improvement |
+|---|---|
+| BC1 | **+39.2%** |
+| BC2 | **+58.7%** |
+| BC3 | **+44.5%** |
+| BC4 | **+40.4%** |
+| BC5 | **+22.0%** |
+| BC6H | **+29.2%**, then a further **+25.4%** |
+
+Every BCn decoder now dispatches its SIMD once per **surface** rather than once
+per block — a distinction that turned out to decide the *sign* of the result, not
+just its size (see 0.3.28).
+
+### Encode
+
+| target | improvement |
+|---|---|
+| BC7, mode-4/5-heavy content | **2.70x** |
+| BC7, general content | **1.47x** |
+| BC7 mode 1 (opaque textures) | **+8.0%** |
+| BC6H encode | **2.0x** |
+| Mid-sized surfaces (512-4096 blocks) | up to **+44.9%** |
+
+### The three lessons worth carrying out of this release
+
+**Where a `#[target_feature]` dispatch sits can invert the result.** The BC1
+gather measured **47.8% slower** as a per-block call and **+38.7% faster** hoisted
+to surface scope — the same kernel, byte for byte. A `#[target_feature]` function
+cannot be inlined into a caller that lacks the feature, so a per-block dispatch
+pays a real call every block. 100% of that loss was harness, 0% was kernel.
+
+**Six store-forwarding stalls.** Vector code writing an array that scalar code
+reads back, found and removed six times across BC1, BC5, the BC7 mode-6 fit, the
+BC1 encode fit, the BC4/BC5 alpha fit, and BC6H's f32 conversion.
+
+**A fixture that never enters the code cannot measure a change to it.** Call
+counters found BC7 mode 4 running **zero times** in 16 384 blocks, and mode 1
+likewise — their gates need alpha the test content never had. Both were
+"verified byte-identical" by fixtures that never executed them. The probes now
+carry three fixtures (varying alpha, structured alpha, fully opaque) because the
+mode gates partition on exactly that.
+
+### What did not ship
+
+Two changes were built, oracle-tested and byte-identical, then **reverted for
+failing to measure**: a batched BC7 seed fit (+2.6% at n=14, **-0.6% at n=30**)
+and the `base + k*delta` identity applied to BC3's alpha palette (**-7.0%**,
+0/16 — the original already has full instruction-level parallelism, and factoring
+serialises it). Both refutations are recorded in the source so they are not
+retried.
+
+### Note on versioning
+
+This jumps from 0.3.x to 0.7.0. The public API is unchanged — every change here
+is internal and byte-identical — so the jump signals the scale of the
+performance work rather than a breaking change. 0.4, 0.5 and 0.6 were never
+published.
+
 ## 0.3.38 - 2026-08-19
 
 **BC7 mode 1 ranking: +8.0% on opaque textures — the third fixture gap.**
