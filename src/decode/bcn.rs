@@ -587,15 +587,44 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // are per endpoint pair, so both subsets are prepared up front.
     let bd = bc7_bd3(&e, 2);
 
-    for p in 0..16usize {
+    let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 3);
-        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
-        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
-        out[o + 3] = 0xff;
+        BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize]
+    };
+
+    // Two pixels per store; `p` is even, so both lie in one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let bdp = crate::decode::simd::pack_bd3(&bd, 2);
+        for p in (0..16usize).step_by(2) {
+            let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
+            let q = p + 1;
+            let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2(
+                b0,
+                d0,
+                b1,
+                d1,
+                weight_of(p) as i16,
+                weight_of(q) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
+    }
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let weight = weight_of(p) as i32;
+            let (base, delta) = &bd[((subsets >> p) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+            out[o + 3] = 0xff;
+        }
     }
     true
 }
@@ -634,15 +663,44 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 2);
 
-    for p in 0..16usize {
+    let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
-        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
-        out[o + 3] = 0xff;
+        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+    };
+
+    // Two pixels per store; `p` is even, so both lie in one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let bdp = crate::decode::simd::pack_bd3(&bd, 2);
+        for p in (0..16usize).step_by(2) {
+            let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
+            let q = p + 1;
+            let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2(
+                b0,
+                d0,
+                b1,
+                d1,
+                weight_of(p) as i16,
+                weight_of(q) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
+    }
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let weight = weight_of(p) as i32;
+            let (base, delta) = &bd[((subsets >> p) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+            out[o + 3] = 0xff;
+        }
     }
     true
 }
@@ -691,15 +749,44 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd4(&e, 2);
 
-    for p in 0..16usize {
+    let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
-        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
-        out[o + 3] = ((base[3] + weight * delta[3]) >> 6) as u8;
+        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+    };
+
+    // Two pixels per store; `p` is even, so both lie in one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let bdp = crate::decode::simd::pack_bd4(&bd, 2);
+        for p in (0..16usize).step_by(2) {
+            let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
+            let q = p + 1;
+            let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2(
+                b0,
+                d0,
+                b1,
+                d1,
+                weight_of(p) as i16,
+                weight_of(q) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
+    }
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let weight = weight_of(p) as i32;
+            let (base, delta) = &bd[((subsets >> p) & 1) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+            out[o + 3] = ((base[3] + weight * delta[3]) >> 6) as u8;
+        }
     }
     true
 }
@@ -840,23 +927,62 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         e1[3] as i32 - e0[3] as i32,
     ];
 
-    for p in 0..16usize {
+    let weights = |p: usize| {
         let (o2, w2) = bc7_p1_index_at(p, 2);
         let (o3, w3) = bc7_p1_index_at(p, 3);
         let wa = BC7_WEIGHTS2[((i2 >> o2) & ((1u128 << w2) - 1)) as usize];
         let wb = BC7_WEIGHTS3[((i3 >> o3) & ((1u128 << w3) - 1)) as usize];
         // The index-selection bit decides which set drives colour and which
         // drives alpha; it does not change what the sets are.
-        let (wc, walpha) = if isb { (wb, wa) } else { (wa, wb) };
-        let (wc, walpha) = (wc as i32, walpha as i32);
+        if isb {
+            (wb, wa)
+        } else {
+            (wa, wb)
+        }
+    };
 
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
-        out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
-        out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
-        out[o + map[3]] = ((base[3] + walpha * delta[3]) >> 6) as u8;
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let (mut bo, mut dobj) = ([0i32; 4], [0i32; 4]);
+        for k in 0..4 {
+            bo[map[k]] = base[k];
+            dobj[map[k]] = delta[k];
+        }
+        let (bp, dp) = (
+            crate::decode::simd::pack4(bo),
+            crate::decode::simd::pack4(dobj),
+        );
+        for p in (0..16usize).step_by(2) {
+            let (c0, a0) = weights(p);
+            let (c1, a1) = weights(p + 1);
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2_split(
+                bp,
+                dp,
+                bp,
+                dp,
+                (c0 as i16, c1 as i16),
+                (a0 as i16, a1 as i16),
+                map[3],
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
     }
-    true
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let (wc, walpha) = weights(p);
+            let (wc, walpha) = (wc as i32, walpha as i32);
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
+            out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
+            out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
+            out[o + map[3]] = ((base[3] + walpha * delta[3]) >> 6) as u8;
+        }
+        return true;
+    }
 }
 
 #[cfg(test)]
@@ -1023,15 +1149,44 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 3);
 
-    for p in 0..16usize {
+    let weight_of = |p: usize| {
         let (off, w) = bc7_p3_index_at(p, anchors, 3);
-        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
-        let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
-        out[o + 3] = 0xff;
+        BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize]
+    };
+
+    // Two pixels per store; `p` is even, so both lie in one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let bdp = crate::decode::simd::pack_bd3(&bd, 3);
+        for p in (0..16usize).step_by(2) {
+            let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
+            let q = p + 1;
+            let (b1, d1) = bdp[((subsets >> (2 * q)) & 0x3) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2(
+                b0,
+                d0,
+                b1,
+                d1,
+                weight_of(p) as i16,
+                weight_of(q) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
+    }
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let weight = weight_of(p) as i32;
+            let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+            out[o + 3] = 0xff;
+        }
     }
     true
 }
@@ -1073,15 +1228,44 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 3);
 
-    for p in 0..16usize {
+    let weight_of = |p: usize| {
         let (off, w) = bc7_p3_index_at(p, anchors, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
-        let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
-        out[o + 3] = 0xff;
+        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+    };
+
+    // Two pixels per store; `p` is even, so both lie in one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let bdp = crate::decode::simd::pack_bd3(&bd, 3);
+        for p in (0..16usize).step_by(2) {
+            let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
+            let q = p + 1;
+            let (b1, d1) = bdp[((subsets >> (2 * q)) & 0x3) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2(
+                b0,
+                d0,
+                b1,
+                d1,
+                weight_of(p) as i16,
+                weight_of(q) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
+    }
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let weight = weight_of(p) as i32;
+            let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+            out[o + 3] = 0xff;
+        }
     }
     true
 }
@@ -1238,18 +1422,59 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         e1[3] as i32 - e0[3] as i32,
     ];
 
-    for p in 0..16usize {
+    let weights = |p: usize| {
         let (off, w) = bc7_p1_index_at(p, 2);
         let mask = (1u128 << w) - 1;
-        let wc = BC7_WEIGHTS2[((ci >> off) & mask) as usize] as i32;
-        let wa = BC7_WEIGHTS2[((ai >> off) & mask) as usize] as i32;
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
-        out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
-        out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
-        out[o + map[3]] = ((base[3] + wa * delta[3]) >> 6) as u8;
+        (
+            BC7_WEIGHTS2[((ci >> off) & mask) as usize],
+            BC7_WEIGHTS2[((ai >> off) & mask) as usize],
+        )
+    };
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        // Permute base/delta into output order so the rotation is resolved
+        // before the vector op, leaving only the alpha lane to name.
+        let (mut bo, mut dobj) = ([0i32; 4], [0i32; 4]);
+        for k in 0..4 {
+            bo[map[k]] = base[k];
+            dobj[map[k]] = delta[k];
+        }
+        let (bp, dp) = (
+            crate::decode::simd::pack4(bo),
+            crate::decode::simd::pack4(dobj),
+        );
+        for p in (0..16usize).step_by(2) {
+            let (c0, a0) = weights(p);
+            let (c1, a1) = weights(p + 1);
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            crate::decode::simd::write2_split(
+                bp,
+                dp,
+                bp,
+                dp,
+                (c0 as i16, c1 as i16),
+                (a0 as i16, a1 as i16),
+                map[3],
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
     }
-    true
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for p in 0..16usize {
+            let (wc, wa) = weights(p);
+            let (wc, wa) = (wc as i32, wa as i32);
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
+            out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
+            out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
+            out[o + map[3]] = ((base[3] + wa * delta[3]) >> 6) as u8;
+        }
+        return true;
+    }
 }
 
 #[cfg(test)]
@@ -1484,19 +1709,46 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // Indices occupy bits 65..128. The first is the fix-up index and carries one
     // less bit, its high bit being implicitly zero.
     let idx = b >> 65;
-    for i in 0..16usize {
-        let w = if i == 0 {
+    let weight = |i: usize| {
+        if i == 0 {
             BC7_WEIGHTS4[(idx & 0x7) as usize]
         } else {
             BC7_WEIGHTS4[((idx >> (3 + (i - 1) * 4)) & 0xf) as usize]
-        } as i32;
-        let o = (i / 4) * pitch + (i % 4) * 4;
-        out[o] = ((base[0] + w * delta[0]) >> 6) as u8;
-        out[o + 1] = ((base[1] + w * delta[1]) >> 6) as u8;
-        out[o + 2] = ((base[2] + w * delta[2]) >> 6) as u8;
-        out[o + 3] = ((base[3] + w * delta[3]) >> 6) as u8;
+        }
+    };
+
+    // Two pixels per store: sixteen-bit lanes hold eight channels, and `i` is
+    // even so pixels `i` and `i + 1` are always adjacent within one block row.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let (bp, dp) = (crate::decode::simd::pack4(base), crate::decode::simd::pack4(delta));
+        for i in (0..16usize).step_by(2) {
+            let o = (i / 4) * pitch + (i % 4) * 4;
+            crate::decode::simd::write2(
+                bp,
+                dp,
+                bp,
+                dp,
+                weight(i) as i16,
+                weight(i + 1) as i16,
+                &mut out[o..o + 8],
+            );
+        }
+        return true;
     }
-    true
+
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    {
+        for i in 0..16usize {
+            let w = weight(i) as i32;
+            let o = (i / 4) * pitch + (i % 4) * 4;
+            out[o] = ((base[0] + w * delta[0]) >> 6) as u8;
+            out[o + 1] = ((base[1] + w * delta[1]) >> 6) as u8;
+            out[o + 2] = ((base[2] + w * delta[2]) >> 6) as u8;
+            out[o + 3] = ((base[3] + w * delta[3]) >> 6) as u8;
+        }
+        return true;
+    }
 }
 
 #[cfg(test)]

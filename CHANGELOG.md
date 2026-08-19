@@ -3,6 +3,72 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.10 - 2026-08-19
+
+**SIMD across the four channels.** Every BC7 mode now interpolates two pixels per
+vector operation.
+
+### Why 16-bit lanes, and why SSE2
+
+0.3.9 rearranged interpolation to `base + w * delta`. That did more than halve
+the multiply count - it also bounded every intermediate:
+
+| term | range | fits `i16` |
+|---|---|---|
+| `base` = `e0 * 64 + 32` | `32 ..= 16_352` | yes |
+| `delta` = `e1 - e0` | `-255 ..= 255` | yes |
+| `w * delta` | `-16_320 ..= 16_320` | yes, so `mullo` is exact |
+| `base + w * delta` | `32 ..= 16_352` | yes |
+
+Sixteen-bit lanes therefore hold **eight channels per register** - two whole
+pixels - instead of four. The same rearrangement that halved the multiplies also
+doubled the lane count.
+
+The kernel is **SSE2**, which is baseline on x86_64: no runtime detection, no
+second code path, and the path that ships is the path that is tested. (The
+encoder AVX2 kernels are runtime-detected because AVX2 is not guaranteed;
+nothing here needs that.)
+
+### Performance
+
+Per mode, 256^2 serial:
+
+| mode | 0.3.9 | 0.3.10 | |
+|---|---:|---:|---|
+| 5 | 356.7 Mpx/s | **688.5** | +93% |
+| 0 | 218.8 | **387.1** | +77% |
+| 2 | 220.2 | **387.3** | +76% |
+| 4 | 312.0 | **541.6** | +74% |
+| 3 | 349.7 | **541.7** | +55% |
+| 7 | 313.9 | **488.1** | +55% |
+| 1 | 347.1 | **526.5** | +52% |
+| 6 | 280.9 | 336.9 | +20% |
+
+**On a real 192-texture pack**, four ABBA samples per arm with no overlap between
+arms: **256^2 254.3 -> 324.6 Mpx/s (+27.6%)** and **128^2 251.2 -> 315.8
+(+25.7%)**.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC7 735.6 vs 70.6 Mpx/s -
+10.42x**, and 6.21x across all formats.
+
+### Notes
+
+- Modes 4 and 5 carry two index sets, so colour and alpha take different weights.
+  Their kernel builds the weight vector with the alpha-weighted value in the lane
+  the rotation names, and the rotation itself is resolved into the packed
+  base/delta before the vector op rather than per pixel.
+- Mode 6 gains least. It is the only mode with 4-bit indices, so sixteen wider
+  weight extractions now dominate what is left.
+- **This corrects 0.3.9.** Modes 0 and 2 were described there as
+  partition-lookup bound, on the evidence that two optimisations had failed to
+  move them. They gained 77% and 76% here, so they were interpolation bound all
+  along - the scalar work simply had not moved enough throughput to show it.
+- Decode output is unchanged, bit for bit. The vector kernel is checked against
+  the scalar expression across the full endpoint and weight domain, and every
+  per-mode oracle test against the general decoder passed unchanged.
+- Non-x86_64 targets keep the scalar path, which is compiled and tested via
+  `--no-default-features`.
+
 ## 0.3.9 - 2026-08-19
 
 **One multiply per channel instead of two.** The BC7 spec writes interpolation

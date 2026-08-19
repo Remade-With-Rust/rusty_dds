@@ -1676,3 +1676,96 @@ for unambiguity, and factoring your inner loop is not their job.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - BC1-BC5 run through the same `bcdec_rs` bitstream and have never been examined
   for either the index-chain or the interpolation win.
+
+---
+
+## §26 — SIMD, and a correction to §25
+
+§25 closed by naming SIMD across the four channels as the obvious structural step.
+It was, and it was larger than expected — because §25 had already done the hard
+part without noticing.
+
+### The rearrangement was the enabler
+
+Rewriting interpolation as `base + w * delta` halved the multiply count. It also
+**bounded every intermediate**:
+
+| term | range | fits `i16` |
+|---|---|---|
+| `base` = `e0 * 64 + 32` | `32 ..= 16_352` | yes |
+| `delta` = `e1 - e0` | `-255 ..= 255` | yes |
+| `w * delta` | `-16_320 ..= 16_320` | yes, so `mullo` is exact |
+| `base + w * delta` | `32 ..= 16_352` | yes |
+
+The spec form `e0 * (64 - w) + e1 * w + 32` has the same final range, but its
+*intermediates* are two products that must each be held before summing. The
+factored form needs one. That difference is what lets the whole computation live
+in **16-bit lanes**, which hold eight channels — two entire pixels — per 128-bit
+register instead of four.
+
+So §25's win was not just fewer multiplies; it doubled the achievable lane count.
+Neither effect was the reason it was written.
+
+### SSE2, not AVX2
+
+The kernel is SSE2, which is **baseline on x86_64**: no runtime detection, no
+second code path, and the path that ships is the path the tests exercise. The
+encoder AVX2 kernels are runtime-detected because AVX2 is genuinely optional;
+copying that pattern here would have bought width the algorithm cannot use and a
+fallback nobody runs.
+
+### The result
+
+| mode | 0.3.9 | 0.3.10 | |
+|---|---:|---:|---|
+| 5 | 356.7 Mpx/s | **688.5** | +93% |
+| 0 | 218.8 | **387.1** | +77% |
+| 2 | 220.2 | **387.3** | +76% |
+| 4 | 312.0 | **541.6** | +74% |
+| 3 | 349.7 | **541.7** | +55% |
+| 7 | 313.9 | **488.1** | +55% |
+| 1 | 347.1 | **526.5** | +52% |
+| 6 | 280.9 | 336.9 | +20% |
+
+Real content, four ABBA samples per arm, no overlap between arms:
+
+| high192 | before | after | |
+|---|---:|---:|---|
+| 256² | 254.3 Mpx/s | **324.6** | **+27.6%** |
+| 128² | 251.2 | **315.8** | **+25.7%** |
+
+Against DirectXTex: **BC7 735.6 vs 70.6 Mpx/s — 10.42x**, 6.21x across formats.
+
+### §25 was wrong about modes 0 and 2
+
+§25 recorded that modes 0 and 2 "are partition-lookup bound", on the evidence
+that **two independent optimisations had failed to move them** — and said so in
+the confident register that two null results seem to earn.
+
+They gained **77% and 76%** here. They were interpolation bound the whole time.
+The scalar work simply never moved enough throughput past the other costs to be
+visible.
+
+That is the third time in this file a null result has been over-read (§21 on mode
+5, §25 here). The pattern is consistent enough to name: **a failure to improve
+something is evidence about the change you made, not about where the time goes.**
+Only a measurement that isolates the cost can say that, and neither of §25's two
+attempts did.
+
+### Mode 6 gains least, and that is now explicable
+
+Mode 6 is the only mode with 4-bit indices: sixteen index extractions of four
+bits each, against two or three bits elsewhere. With interpolation vectorised,
+the weight extraction is what remains, and mode 6 has the most of it. It is also
+88% of our packs, so it caps the real-content figure — the same shape as §25,
+one layer down.
+
+### Still open
+
+- Mode 6 weight extraction: sixteen shift-and-mask operations that could be
+  done as a vector gather or unpacked in bulk from the 64-bit index field.
+- BC1-BC5 have never been examined for either the index-chain or the
+  interpolation win. BC1 already runs at 684 Mpx/s, but nothing has profiled
+  *why*, and the same `base + w * delta` identity applies to its 2-bit
+  interpolation.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
