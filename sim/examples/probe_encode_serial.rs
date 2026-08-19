@@ -40,6 +40,8 @@ fn main() {
     // Format selectable so the same instrument serves every kernel.
     let content = match std::env::var("PROBE_FMT").unwrap_or_else(|_| "bc7".into()).as_str() {
         "bc1" => DecodeContent::Bc1,
+        "bc2" => DecodeContent::Bc2,
+        "bc4u" => DecodeContent::Bc4UNorm,
         "bc3" => DecodeContent::Bc3,
         "bc5u" => DecodeContent::Bc5UNorm,
         _ => DecodeContent::Bc7,

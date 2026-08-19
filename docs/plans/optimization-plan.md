@@ -3231,3 +3231,91 @@ format in the matrix now has a vectorised inner fit, BC6H included.
   measured and none should be quoted.
 - BC6H decode interpolation (§34) and the BC5 decode palette chain (§32), both
   latency-shaped.
+
+## §47 — The SIMD audit: every BCn format, one at a time
+
+The standing question was whether SIMD is a win in each block decoder and
+encoder, taken one by one, with a deterministic verdict either way. The list and
+its outcomes:
+
+| # | target | ceiling probe | verdict |
+|---|---|---|---|
+| 1 | BC6H block decode | interpolation ~37% | **+30.4%**, 16/16, z = +4.00 |
+| 2 | BC1 decode | gather ~78% | **+38.7%**, 16/16, z = +4.00 |
+| 3 | BC2 decode | alpha pass 37% | **+58.9%**, 16/16, z = +4.00 |
+| 4 | BC3 decode | alpha pass 26% | **+47.3%**, 16/16, z = +4.00 |
+| 5 | BC4 decode | gather ~77% | **+22.2%**, 16/16, z = +4.00 |
+| 6 | BC1/BC2/BC3/BC4 encode | see §48 | already vectorised, or ceiling zero |
+
+Everything on the list is now either vectorised or has a measured reason not to
+be. Every LDR block decoder — BC1, BC2, BC3, BC4, BC5, BC7 — is vectorised, as
+is BC6H.
+
+## §48 — BC2 encode: proving a negative with a ceiling, not an argument
+
+BC2 encode is a BC1 colour fit plus sixteen `>> 4` shifts packed two to a byte.
+The colour half already runs through `bc1_fit_4color_avx2`. The alpha half has
+no search at all, so the argument that it cannot benefit from SIMD is obvious —
+and an argument is not a verdict.
+
+Ceiling probe, 512^2 forced serial, alpha packing replaced by one
+pixel-dependent byte: **6.5104 ms full against 6.5104 ms stubbed.** The alpha
+half is below the CPU-time granularity. Its ceiling is zero, so no kernel can
+pay. Recorded as refuted with a number rather than asserted.
+
+The same audit confirmed the other three encoders reach real kernels:
+`bc1_fit_4color_avx2` (BC1, and the colour half of BC2 and BC3),
+`alpha_fit_avx2` (BC3 and BC4 alpha), plus `fit_indices_mode6_avx2` for BC7 and
+`fit_avx2` for BC6H.
+
+## §49 — The 86-point swing: where the dispatch sits decides the sign
+
+The BC1 gather is the campaign's sharpest lesson and it is not about the kernel.
+Written as a per-block gather called from the shared block loop it measured
+**0/16 wins, z = -4.00, 47.8% slower than scalar**. The identical `pshufb`,
+dispatched once per surface with the loop inside the `#[target_feature]`
+function, measured **+38.7%**.
+
+Decomposed by building one arm per suspect:
+
+| arm | 512^2 CPU ms | against scalar |
+|---|---|---|
+| scalar, inline | 0.1354 | — |
+| scalar body, behind the SIMD call | 0.1716 | -26.7% |
+| `pshufb` body, same boundary | 0.1959 | -13.9% further |
+| `pshufb`, boundary hoisted | **0.0805** | **+38.7%** |
+
+Two mechanisms, both from the boundary. A `#[target_feature]` function cannot be
+inlined into a caller that lacks the feature, so the per-block form pays a real
+call plus a `OnceLock` check every block. And `[u32; 4]` by value goes through a
+caller-allocated stack copy on the Windows x64 ABI, so the callee rebuilt the
+vector element-wise — this crate's **fifth** store-forwarding stall, and the one
+that finally has a general rule attached: prefer a packed `u64` (one `movq`) or
+keep the value inside the vector function.
+
+100% of the loss was harness, 0% was kernel. A refuted kernel is not a refuted
+idea until the loss has been decomposed.
+
+## §50 — The probe that measured the allocator
+
+BC6H decode had been reported at 1.76 ms (512^2) all campaign. The per-format
+probe called `decode_rgba8_into` — with a reused buffer — for five LDR formats,
+and `decode_rgba_f32` for BC6H. That entry point allocates and zeroes a fresh
+4 MiB `Vec` per call.
+
+| | 512^2 CPU ms |
+|---|---|
+| `decode_rgba_f32` (allocates per call) | 1.5234 |
+| `decode_rgba_f32_into` (buffer reused) | **0.6497** |
+
+**59% of the number was the allocator.** No shipped code was wrong; the
+instrument was, and so was everything derived from it. The tell was visible
+first as an implausible per-unit cost — BC6H moving 2.9 GB/s of output where BC1
+moved 12 — before the cause was.
+
+Re-running the ceilings on the corrected instrument moved the interpolation loop
+from 14% of decode to **~37%**, the largest share left in the format, and turned
+a change that looked not-worth-doing into +30.4%.
+
+The rule this earns: a probe that dispatches on format must be audited per
+format, and an allocating entry point never belongs in a hot loop — in any arm.
