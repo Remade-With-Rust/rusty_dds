@@ -224,6 +224,88 @@ pub(super) fn unquant6(v: u8) -> u8 {
 }
 
 #[allow(clippy::type_complexity)]
+/// Nearest of four RGB palette entries for sixteen pixels.
+///
+/// This scan is character-for-character [`super::bc1::bc1_fit_4color_scalar`] —
+/// same `sqr_rgb`, same strict `<`, same lowest-index tie-break — so modes 4 and
+/// 5 reuse that kernel and the 200 000-case oracle that already guards it,
+/// rather than growing a third copy. The only difference is the output form:
+/// BC1 wants a packed 2-bit table, these want `[u8; 16]`.
+///
+/// A doubling probe puts the four mode-4/5 fits at **~24% of BC7 encode**.
+#[inline]
+fn fit_indices_rgb4(pixels: &[[u8; 4]; 16], pal: &[[u8; 3]; 4]) -> ([u8; 16], i32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        // `i32::MAX` disables the abort: the largest possible error is
+        // 16 * 3 * 255^2 = 3_121_200, so `Some` is guaranteed here.
+        if let Some((table, err)) = simd::bc1_fit_4color_avx2(pixels, pal, i32::MAX) {
+            return (
+                core::array::from_fn(|i| ((table >> (2 * i)) & 3) as u8),
+                err,
+            );
+        }
+    }
+    let mut idx = [0u8; 16];
+    let mut err = 0i32;
+    for (i, p) in pixels.iter().enumerate() {
+        let mut bi = 0u8;
+        let mut be = i32::MAX;
+        for (j, pc) in pal.iter().enumerate() {
+            let e = sqr_rgb([p[0], p[1], p[2]], *pc);
+            if e < be {
+                be = e;
+                bi = j as u8;
+            }
+        }
+        idx[i] = bi;
+        err += be;
+    }
+    (idx, err)
+}
+
+/// Nearest of eight single-channel palette entries for sixteen samples.
+///
+/// The same scan BC4 and BC5 alpha run, so it reuses [`super::simd::alpha_fit_avx2`]
+/// and its oracle. That kernel compares `|p - s|` where this compares
+/// `(p - s)^2`; squaring is monotonic on non-negative values, so the argmin and
+/// the lowest-index tie-break are identical.
+#[inline]
+fn fit_indices_alpha8(alpha: &[u8; 16], pal: &[u8; 8]) -> ([u8; 16], i32) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_fit_avx2(pal, alpha);
+    }
+    let mut idx = [0u8; 16];
+    let mut err = 0i32;
+    for (i, &a) in alpha.iter().enumerate() {
+        let mut bi = 0u8;
+        let mut be = i32::MAX;
+        for (j, &p) in pal.iter().enumerate() {
+            let d = (p as i32 - a as i32).pow(2);
+            if d < be {
+                be = d;
+                bi = j as u8;
+            }
+        }
+        idx[i] = bi;
+        err += be;
+    }
+    (idx, err)
+}
+
+/// Nearest of *four* single-channel entries, via the eight-entry kernel.
+///
+/// Entries 4..8 are filled with entry 0. Under a strict `<` tie-break a later
+/// duplicate can never win, so those four candidates can never be selected and
+/// can never change the result — scanning eight is exactly scanning four. That
+/// buys mode 5's alpha the same vector kernel without a second one.
+#[inline]
+fn fit_indices_alpha4(alpha: &[u8; 16], pal: &[u8; 4]) -> ([u8; 16], i32) {
+    let pal8 = [pal[0], pal[1], pal[2], pal[3], pal[0], pal[0], pal[0], pal[0]];
+    fit_indices_alpha8(alpha, &pal8)
+}
+
 pub(super) fn fit_color_mode4(
     pixels: &[[u8; 4]; 16],
     e0: [u8; 3],
@@ -243,21 +325,7 @@ pub(super) fn fit_color_mode4(
             pal[k][c] = (((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64) as u8;
         }
     }
-    let mut idx = [0u8; 16];
-    let mut err = 0i32;
-    for (i, p) in pixels.iter().enumerate() {
-        let mut bi = 0u8;
-        let mut be = i32::MAX;
-        for (j, pc) in pal.iter().enumerate() {
-            let e = sqr_rgb([p[0], p[1], p[2]], *pc);
-            if e < be {
-                be = e;
-                bi = j as u8;
-            }
-        }
-        idx[i] = bi;
-        err += be;
-    }
+    let (mut idx, err) = fit_indices_rgb4(pixels, &pal);
     if idx[0] >= 2 {
         std::mem::swap(&mut q0, &mut q1);
         for v in idx.iter_mut() {
@@ -276,21 +344,7 @@ pub(super) fn score_alpha_mode4(alpha: &[u8; 16], q0: u8, q1: u8) -> (u8, u8, [u
     for (k, &w) in W3.iter().enumerate() {
         pal[k] = (((64 - w) * c0 as u32 + w * c1 as u32 + 32) / 64) as u8;
     }
-    let mut idx = [0u8; 16];
-    let mut err = 0i32;
-    for (i, &a) in alpha.iter().enumerate() {
-        let mut bi = 0u8;
-        let mut be = i32::MAX;
-        for (j, &p) in pal.iter().enumerate() {
-            let d = (p as i32 - a as i32).pow(2);
-            if d < be {
-                be = d;
-                bi = j as u8;
-            }
-        }
-        idx[i] = bi;
-        err += be;
-    }
+    let (mut idx, err) = fit_indices_alpha8(alpha, &pal);
     let (mut r0, mut r1) = (q0, q1);
     if idx[0] >= 4 {
         std::mem::swap(&mut r0, &mut r1);
@@ -349,21 +403,7 @@ pub(super) fn fit_color_mode5(
         q1[c] = e1[c] >> 1;
     }
     let pal = palette_mode5_color(q0, q1);
-    let mut idx = [0u8; 16];
-    let mut err = 0i32;
-    for (i, p) in pixels.iter().enumerate() {
-        let mut bi = 0u8;
-        let mut be = i32::MAX;
-        for (j, pc) in pal.iter().enumerate() {
-            let e = sqr_rgb([p[0], p[1], p[2]], *pc);
-            if e < be {
-                be = e;
-                bi = j as u8;
-            }
-        }
-        idx[i] = bi;
-        err += be;
-    }
+    let (mut idx, err) = fit_indices_rgb4(pixels, &pal);
     // Anchor: idx[0] MSB must be 0 (W2 symmetry keeps recon identical).
     if idx[0] >= 2 {
         std::mem::swap(&mut q0, &mut q1);
@@ -447,21 +487,7 @@ pub(super) fn score_alpha_mode5(alpha: &[u8; 16], c0: u8, c1: u8) -> (u8, u8, [u
     for (k, &w) in W2.iter().enumerate() {
         pal[k] = (((64 - w) * c0 as u32 + w * c1 as u32 + 32) / 64) as u8;
     }
-    let mut idx = [0u8; 16];
-    let mut err = 0i32;
-    for (i, &a) in alpha.iter().enumerate() {
-        let mut bi = 0u8;
-        let mut be = i32::MAX;
-        for (j, &p) in pal.iter().enumerate() {
-            let d = (p as i32 - a as i32).pow(2);
-            if d < be {
-                be = d;
-                bi = j as u8;
-            }
-        }
-        idx[i] = bi;
-        err += be;
-    }
+    let (mut idx, err) = fit_indices_alpha4(alpha, &pal);
     let (mut r0, mut r1) = (c0, c1);
     if idx[0] >= 2 {
         std::mem::swap(&mut r0, &mut r1);

@@ -3,6 +3,58 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.31 - 2026-08-19
+
+**BC7 encode modes 4 and 5: +18.7%, by adding no new kernel at all.**
+
+Modes 4 and 5 carried four nearest-palette scans of their own - two colour
+(16 pixels x 4 RGB entries), two alpha (16 samples x 8 and x 4 single-channel
+entries). All four are the shape this campaign has now paid for five times.
+
+The colour scan turned out to be **character-for-character**
+`bc1_fit_4color_scalar`: same `sqr_rgb`, same strict `<`, same lowest-index
+tie-break. So both colour fits route through `bc1_fit_4color_avx2` and inherit
+its 200 000-case oracle rather than growing a third copy; only the output form
+differs, and unpacking sixteen 2-bit fields is cheaper than the scan it
+replaces. Mode 4's alpha scan is exactly BC4/BC5's, so it routes through
+`alpha_fit_avx2`.
+
+Mode 5's alpha palette has four entries where that kernel wants eight, so
+entries 4..8 are filled with entry 0: **under a strict `<` tie-break a later
+duplicate can never win**, so scanning eight is exactly scanning four.
+
+512^2, forced serial, pinned, 16 paired CPU samples: **30.6803 ms against
+37.7604, 16/16 wins, z = +4.00, +18.7%** (confirmed at +19.9% on a second run).
+**Byte-identical** - payload hashes unchanged across BC7, BC1, BC3 and BC5U.
+BC1 and BC3 encode re-measured flat (z = +0.00 over 24 pairs and z = +0.45).
+
+### Two probes disagreed, and the reason is the finding
+
+A stub probe - replacing the four scans with pixel-dependent junk - read **42%
+of BC7 encode**. That number is inadmissible: `best_err` gates mode 4, the
+mode-1 64-shape ranking and the rotation loop, so junk errors change how much
+*downstream* work runs. It was a work-parity break, not a measurement.
+
+A doubling probe, which runs each scan a second time into a discarded
+accumulator and therefore leaves every downstream decision untouched, read
+**~24%**.
+
+The realized win is larger than that 24% predicts, and the gap is itself
+informative: the scalar scan is a loop-carried dependency chain
+(`if e < be { be = e; bi = j }`), so it is **latency-bound**, and a doubling
+probe measures the *marginal* cost of a second copy - which is nearly free when
+idle slots exist. Against latency-bound code the doubling probe is a **lower
+bound**, not an estimate.
+
+### Residual
+
+Doubled again on the vectorised code, the four fits still cost >=22% of BC7
+encode. The likely remainder is the `#[target_feature]` call boundary, paid four
+to eight times per block by the candidate loops in `try_bc7_mode5` and
+`try_bc7_mode4` - the same boundary that decided the sign of the BC1 decode
+result in 0.3.28. Hoisting it above those loops is the next step, and is not
+attempted here.
+
 ## 0.3.30 - 2026-08-19
 
 **BC6H block decode gets SIMD: +30.4%.** And the measurement that found it
