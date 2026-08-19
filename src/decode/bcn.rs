@@ -475,6 +475,27 @@ fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
 /// Decode a BC5 block pair straight to RGBA8: first channel in red, second in
 /// green, zero in blue, opaque alpha.
 #[inline]
+// The BC5 block is LATENCY bound, not throughput bound. Measured: doubling the
+// palette work is FREE (563.7 vs 521.5 Mpx/s, three samples each). The block is
+// one serial chain — load endpoints, delta, multiply, shift, add, pack, `movq`,
+// `pshufb`, unpack, store — roughly 25 cycles deep, and the palette build is
+// ~32% of it (full ~572 Mpx/s against ~847 with a trivial block-dependent
+// palette).
+//
+// This explains three refutations that each looked promising and each measured
+// neutral, because all three were THROUGHPUT edits against a LATENCY wall:
+//
+//   * halving the multiplies via the 65536-sum identity   (0.3.15)
+//   * branchless endpoint selection, killing a mispredict (0.3.16)
+//   * pairing two blocks per iteration for ILP            — 592.0 vs 579.7
+//     Mpx/s, eight samples per arm. The out-of-order engine was already
+//     overlapping adjacent blocks; saying so explicitly added nothing.
+//
+// The only remaining lever is SHORTENING THE CHAIN, not doing less work in it
+// or doing more of it at once. The untried candidate is building the palette
+// directly in an `__m128i` — skipping the scalar pack tree and the `movq` that
+// follows it, worth maybe six cycles of the twenty-five. Measure the chain, not
+// the operation count.
 fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
     let pr_packed = bc4_palette_packed(blk[0], blk[1], is_signed);
     let pg_packed = bc4_palette_packed(blk[8], blk[9], is_signed);
