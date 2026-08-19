@@ -586,6 +586,24 @@ pub(super) fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
 
 /// The two cheap seeds, always worth trying: they win 93.6% of blocks between
 /// them (74.3% + 19.3%, counted over 21 847 blocks).
+// Two further gates of this shape were built and REFUTED, and the numbers are
+// here so they are not rebuilt:
+//
+//   * Gating the least-squares refine on residual error. Quality-free only at
+//     SSE <= 4, where it fires on **0.2%** of blocks. At 16 it makes 7 corpus
+//     cases worse, at 64 thirteen, at 256 twenty-one (worst -0.78 dB). The
+//     refine earns its fit almost everywhere — unlike the seed extras, it is
+//     not waste.
+//   * Gating seed 1 on seed 0's error. Quality-free only at SSE <= 16, firing
+//     on **2.2%** of blocks; at 32 it costs 6 corpus cases.
+//
+// Together they moved 3.168 -> 3.147 fits per block, 0.7%, for two more tuned
+// constants. Not kept.
+//
+// That puts the search at 3.147 against a structural floor of 3.0 — two base
+// seeds plus one refine. **Index fits are finished at the quality-free level**;
+// the remaining 5% is protected by the corpus gate, not by inattention.
+
 /// Error below which the expensive mode-6 seeds are skipped.
 ///
 /// SSE over 16 pixels x 4 channels. Calibrated on the BC7 corpus, and the

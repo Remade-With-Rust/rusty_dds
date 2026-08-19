@@ -2745,3 +2745,79 @@ worse, mean −0.00004 dB.
 - `quantize_7p` is ~11% of encode and has never had its internals probed.
 - The box is still 73% busy. Pinning, forcing serial and pairing now make that
   survivable rather than fixed.
+
+---
+
+## §40 — The floor, and why 3.0 is not reachable
+
+§39 left the BC7 mode-6 search at **3.168 index fits per block**. The structural
+floor is **3.0** — two base seeds plus one refine — so the question was whether
+the last 5% could be taken.
+
+It cannot, and the reason is worth recording precisely.
+
+### The decomposition
+
+| component | fits/block |
+|---|---:|
+| base seeds (extrema + channel min/max) | 2.000 |
+| refine's second fit (runs on 98% of blocks) | 0.980 |
+| gated extras | 0.188 |
+| **total** | **3.168** |
+
+Two candidates, both the same shape as the gate that worked in §38: gate the
+**refine** on residual error, and gate **seed 1** on seed 0's error.
+
+### Both are quality-bound, not opportunity-bound
+
+Swept against the 102-case corpus:
+
+| gate | worse cases | worst |
+|---|---:|---:|
+| refine <= 4 | **0** | -0.0035 dB |
+| refine <= 16 | 7 | -0.018 |
+| refine <= 64 | 13 | -0.178 |
+| refine <= 256 | 21 | -0.776 |
+| seed1 <= 16 | **0** | -0.0035 |
+| seed1 <= 32 | 6 | -0.045 |
+| seed1 <= 64 | 8 | -0.101 |
+
+Quality-free thresholds exist — and at those thresholds the gates are **inert**:
+
+| gate | fires on |
+|---|---:|
+| refine <= 4 | **0.2%** of blocks |
+| seed1 <= 16 | **2.2%** of blocks |
+
+Together: **3.168 → 3.147, 0.7%**, for two more tuned constants. Reverted.
+
+### The distinction that matters
+
+§38's extras gate looked identical in form and behaved completely differently:
+it is quality-free at SSE <= 256, where it fires on **83.5%** of blocks. The same
+mechanism, three applications, two of them worthless.
+
+The difference is not the gate — it is what is being gated. **The seed extras
+are speculative** (three more guesses at an endpoint pair, winning 6.4%), so
+error predicts their value well. **The refine is corrective** — least squares
+uses the indices already fitted, so it improves 65.9% of the blocks it runs on
+*including* low-error ones, and residual error does not predict where it is
+wasted.
+
+A search-skip gate works when the skipped work is a **guess**. It does not work
+when the skipped work is a **correction**, because a correction earns its cost
+almost everywhere.
+
+### Where the encoder stands
+
+**3.147 against a floor of 3.0**, with the remaining 5% protected by the corpus
+gate rather than by inattention. Index fits are finished at the quality-free
+level. Anything further is a quality trade and belongs to a different mandate.
+
+### Still open
+
+- `quantize_7p` is ~11% of encode and has never had its internals probed. It is
+  the largest unexamined stage now that fits are closed.
+- The seed search itself is ~17%, of which the gate now skips 83.5% of the
+  expensive part.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
