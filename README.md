@@ -82,6 +82,21 @@ CRYTEK GameSDK + 10 USC-SIPI TIFF), pinned, interleaved:
 | BC7 wall (pinned min, 25 cases) | 2364 ms | **1167 ms** (2.03×) |
 | Largest single-case gain | — | **+13.53 dB** (BC7, UI startscreen) |
 
+**BC7 encode** — 512², forced serial, process-pinned, **process CPU time**, 14
+paired samples with the leading arm alternated, against 0.3.30. Byte-identical
+throughout. Two fixtures, because the default one never enters BC7 mode 4 at all
+(its alpha varies by under one code across a 4-pixel span, so the mode's gate
+never fires) — a fixture that never enters a mode cannot measure a change to it:
+
+| fixture | 0.3.30 | now | verdict |
+|---|---|---|---|
+| alpha-structured (modes 4 + 5 both run) | 83.6123 ms | **30.9710 ms** | 14/14, z = +3.74, **+63.0%** (2.70×) |
+| default | 33.5752 ms | **22.8795 ms** | 14/14, z = +3.74, **+31.9%** (1.47×) |
+
+```sh
+PROBE_FMT=bc7 PROBE_ALPHA=1 cargo run --release --example probe_encode_serial --manifest-path sim/Cargo.toml
+```
+
 **Block decode** — every BCn decoder is now vectorised. 512², process-pinned,
 **process CPU time**, 12 paired samples per format with the leading arm alternated,
 against 0.3.27. All byte-identical; each kernel is oracle-tested against the scalar

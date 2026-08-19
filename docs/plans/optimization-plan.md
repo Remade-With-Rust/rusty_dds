@@ -3439,3 +3439,48 @@ Crossings **57.95 -> 13.81**; alpha **50.00 -> 5.86**. Byte-identical on both
 fixtures; +18.5% (16/16) on the covering one, +14.0% (12/12) on the original.
 
 Remaining: `rgb4` is still 7.95 crossings per block. The same hoist applies.
+
+## §57 — The colour fits, and why the plan changed
+
+§53 named the colour fits' 7.95 kernel crossings per block as the next target.
+Counters, run before writing anything, redirected the work twice.
+
+**First redirection — redundancy.** `extrema_opaque`, `channel_minmax_rgb` and
+`pca_extremes_rgb` are pure functions of `pixels`, and at rotation 0 modes 4 and
+5 run on the same pixels. All three measured **2.00 calls per block**: computed
+once, then computed again. And the three seeds frequently coincide — the PCA
+seed equalled the extrema seed on **0.78 blocks per block** — so 1.04 fits per
+block were re-fitting endpoints already fitted, which cannot change anything
+under a strict `<`. Sharing the seeds and skipping the duplicates: **+10.1%**,
+byte-identical (0.3.33).
+
+(That measurement first reported `pca=0.00` against two visible call sites.
+`pca_extremes_rgb` lives in `bc1.rs`, so the instrumenting patch matched nothing.
+An impossible counter is a stale instrument, not a finding — the second time this
+campaign has been saved by refusing to believe a zero.)
+
+**Second redirection — these modes almost never win.** Asking how often the work
+pays off at all:
+
+| | mode 4 | mode 5 |
+|---|---|---|
+| attempts that lose | 96% | 95% |
+| already provably beaten after the FIRST half | **69%** | **89%** |
+
+Each mode is two halves with non-negative squared errors summing to the total,
+so either half alone reaching the incumbent proves the mode cannot win. And the
+two search their halves in **opposite orders** — mode 4 colour-then-alpha, mode 5
+alpha-then-colour — so each gets to skip the half the other one starts with.
+Two `i64` comparisons: **+17.7%**, byte-identical (0.3.34).
+
+**The boundary hoist named in §53 was never needed.** Two rounds of counters
+found more in redundancy and in early-exit than the vectorisation would have
+returned, at a fraction of the complexity. The colour fits still cross once each;
+that remains open, and is now a smaller share than when it was named.
+
+Cumulative BC7 encode, 0.3.30 -> 0.3.34, byte-identical throughout:
+
+| fixture | 0.3.30 | 0.3.34 | verdict |
+|---|---|---|---|
+| alpha-structured | 83.6123 ms | **30.9710 ms** | 14/14, z = +3.74, **2.70x** |
+| default | 33.5752 ms | **22.8795 ms** | 14/14, z = +3.74, **1.47x** |
