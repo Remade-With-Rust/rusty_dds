@@ -179,6 +179,20 @@ pub fn decode_bc4_into(
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
     let aligned = width % 4 == 0 && height % 4 == 0;
+    // One feature check per surface, not per block — see `decode_bc1_into`. The
+    // gather itself is unchanged; only where it is dispatched from has moved.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if aligned && crate::decode::simd::has_ssse3() {
+        // SAFETY: SSSE3 and fast `pdep` checked above; `block_grid` and
+        // `check_out_len` bound input and output; `aligned` is the shape the
+        // loop below would take.
+        unsafe {
+            crate::decode::simd::bc4_blocks_ssse3(
+                data, blocks_x, blocks_y, out, out_w, is_signed,
+            );
+        }
+        return Ok(());
+    }
     let pitch = out_w * 4;
     let mut scratch = [0u8; 64];
 
@@ -225,6 +239,20 @@ pub fn decode_bc5_into(
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
     let aligned = width % 4 == 0 && height % 4 == 0;
+    // One feature check per surface, not per block — see `decode_bc1_into`. The
+    // gather itself is unchanged; only where it is dispatched from has moved.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if aligned && crate::decode::simd::has_ssse3() {
+        // SAFETY: SSSE3 and fast `pdep` checked above; `block_grid` and
+        // `check_out_len` bound input and output; `aligned` is the shape the
+        // loop below would take.
+        unsafe {
+            crate::decode::simd::bc5_blocks_ssse3(
+                data, blocks_x, blocks_y, out, out_w, is_signed,
+            );
+        }
+        return Ok(());
+    }
     let pitch = out_w * 4;
     let mut scratch = [0u8; 64];
 
@@ -441,7 +469,7 @@ mod bc1_tests {
 /// The endpoint order selects six interpolants or four plus the two extremes.
 /// Signed blocks clamp `-128` to `-127` and use `-127`/`127` as the extremes.
 #[inline(always)]
-fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
+pub(super) fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
     const W4: [i32; 4] = [13107, 26215, 39321, 52429];
     const W6: [i32; 6] = [9363, 18724, 28086, 37450, 46812, 56173];
 
@@ -510,7 +538,7 @@ fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
 /// sixteen-deep serial dependency chain. Returning the word lets each index be
 /// read by computed offset instead, so all sixteen are independent.
 #[inline(always)]
-fn bc4_indices(blk: &[u8]) -> u64 {
+pub(super) fn bc4_indices(blk: &[u8]) -> u64 {
     u64::from_le_bytes([blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7]]) >> 16
 }
 
@@ -603,6 +631,16 @@ fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
         let o = row * pitch;
         out[o..o + 16].copy_from_slice(&px);
     }
+}
+
+#[cfg(test)]
+pub(super) fn bc4_block_rgba_for_test(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
+    bc4_block_rgba(blk, out, pitch, is_signed)
+}
+
+#[cfg(test)]
+pub(super) fn bc5_block_rgba_for_test(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
+    bc5_block_rgba(blk, out, pitch, is_signed)
 }
 
 #[cfg(test)]

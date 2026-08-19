@@ -225,7 +225,7 @@ pub(super) fn bc5_gather(
     // 3*pitch`, all within the `3 * pitch + 16` the caller guarantees; the loads
     // read eight bytes from `[u8; 8]` palettes and sixteen from local arrays.
     // Nothing is aligned-assuming and no pointer escapes.
-    unsafe { bc5_gather_ssse3(pr, pg, ir, ig, out, pitch) }
+    unsafe { bc5_gather_ssse3(pr, pg, ir, ig, out.as_mut_ptr(), pitch) }
     true
 }
 
@@ -235,7 +235,7 @@ unsafe fn bc5_gather_ssse3(
     pg: u64,
     ir: u64,
     ig: u64,
-    out: &mut [u8],
+    dst: *mut u8,
     pitch: usize,
 ) {
     // Sixteen 3-bit indices per channel, one byte each. These extractions are
@@ -275,7 +275,7 @@ unsafe fn bc5_gather_ssse3(
         _mm_unpackhi_epi16(rg_hi, ba),
     ];
     for (r, row) in rows.into_iter().enumerate() {
-        _mm_storeu_si128(out.as_mut_ptr().add(r * pitch) as *mut __m128i, row);
+        _mm_storeu_si128(dst.add(r * pitch) as *mut __m128i, row);
     }
 }
 
@@ -671,6 +671,85 @@ unsafe fn bc6h_interp_avx2_impl(
     }
 }
 
+
+/// Decode a whole BC5 surface, both channels gathered per block.
+///
+/// Same reason the BC1/BC2/BC3 loops live here: a `#[target_feature]` function
+/// cannot be inlined into a caller that lacks the feature, so dispatching inside
+/// the block loop pays a real call plus a `OnceLock` check on **every 4x4
+/// block**. 0.3.28 measured that boundary at 26.7% of BC1 decode. BC4 and BC5
+/// won their gathers in 0.3.28 *despite* paying it every block, because those
+/// gathers are heavy enough to carry it — which is exactly why it went
+/// unnoticed until the dispatch sites were listed side by side.
+///
+/// `bc5_gather_ssse3` is itself a `#[target_feature]` function with the same
+/// features, so it inlines into this loop rather than being called.
+///
+/// # Safety
+///
+/// The caller must have checked SSSE3 and fast `pdep`, must pass a `data` long
+/// enough for `blocks_x * blocks_y` sixteen-byte blocks, and an `out` long
+/// enough for `blocks_y * 4` rows of `out_w` pixels — the aligned case its
+/// caller validates.
+#[target_feature(enable = "ssse3,bmi2")]
+pub(super) unsafe fn bc5_blocks_ssse3(
+    data: &[u8],
+    blocks_x: usize,
+    blocks_y: usize,
+    out: &mut [u8],
+    out_w: usize,
+    is_signed: bool,
+) {
+    let pitch = out_w * 4;
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 16;
+            let blk = core::slice::from_raw_parts(src.add(bi), 16);
+            let pr = super::bcn::bc4_palette_packed(blk[0], blk[1], is_signed);
+            let pg = super::bcn::bc4_palette_packed(blk[8], blk[9], is_signed);
+            let ir = super::bcn::bc4_indices(&blk[..8]);
+            let ig = super::bcn::bc4_indices(&blk[8..16]);
+            let o = (by * 4 * out_w + bx * 4) * 4;
+            bc5_gather_ssse3(pr, pg, ir, ig, dst.add(o), pitch);
+        }
+    }
+}
+
+/// Decode a whole BC4 surface.
+///
+/// BC4 is BC5 with a zero second channel, so it runs the same gather with an
+/// all-zero green palette and a zero index word — reusing that kernel and its
+/// oracle rather than duplicating either, exactly as the per-block path did.
+///
+/// # Safety
+///
+/// As [`bc5_blocks_ssse3`], with eight-byte blocks.
+#[target_feature(enable = "ssse3,bmi2")]
+pub(super) unsafe fn bc4_blocks_ssse3(
+    data: &[u8],
+    blocks_x: usize,
+    blocks_y: usize,
+    out: &mut [u8],
+    out_w: usize,
+    is_signed: bool,
+) {
+    let pitch = out_w * 4;
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 8;
+            let blk = core::slice::from_raw_parts(src.add(bi), 8);
+            let pr = super::bcn::bc4_palette_packed(blk[0], blk[1], is_signed);
+            let ir = super::bcn::bc4_indices(blk);
+            let o = (by * 4 * out_w + bx * 4) * 4;
+            bc5_gather_ssse3(pr, 0, ir, 0, dst.add(o), pitch);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +957,91 @@ mod tests {
                     }
                 }
                 assert_eq!(got, want, "case {case}, {}", if which == 0 { "bc2" } else { "bc3" });
+            }
+        }
+    }
+
+    /// The BC4 and BC5 surface loops must be byte-identical to the scalar block
+    /// decoders, for both signedness conventions — the signed palette takes the
+    /// other `unquantize` branch and its endpoints are `-127..=127`.
+    #[test]
+    fn bc45_blocks_ssse3_match_scalar() {
+        if !has_ssse3() {
+            return;
+        }
+        let mut state = 0x45_45_c0ffee_1234u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const BX: usize = 2;
+        const BY: usize = 2;
+        for case in 0..20_000u32 {
+            for (bb, is_bc5) in [(8usize, false), (16usize, true)] {
+                let mut data = vec![0u8; BX * BY * bb];
+                match case {
+                    0 => {}
+                    1 => data.iter_mut().for_each(|x| *x = 0xff),
+                    // a0 <= a1 in every sub-block: the six-entry branch, where
+                    // index 6 is the low bound and index 7 the high one.
+                    2 => {
+                        for b in 0..BX * BY {
+                            data[b * bb] = 3;
+                            data[b * bb + 1] = 200;
+                            if is_bc5 {
+                                data[b * bb + 8] = 5;
+                                data[b * bb + 9] = 180;
+                            }
+                        }
+                    }
+                    _ => {
+                        for c in data.chunks_exact_mut(8) {
+                            c.copy_from_slice(&next().to_le_bytes());
+                        }
+                    }
+                }
+                for is_signed in [false, true] {
+                    let out_w = BX * 4;
+                    let pitch = out_w * 4;
+                    let len = out_w * BY * 4 * 4;
+                    let mut got = vec![0u8; len];
+                    unsafe {
+                        if is_bc5 {
+                            bc5_blocks_ssse3(&data, BX, BY, &mut got, out_w, is_signed)
+                        } else {
+                            bc4_blocks_ssse3(&data, BX, BY, &mut got, out_w, is_signed)
+                        }
+                    }
+                    let mut want = vec![0u8; len];
+                    for by in 0..BY {
+                        for bx in 0..BX {
+                            let bi = (by * BX + bx) * bb;
+                            let o = (by * 4 * out_w + bx * 4) * 4;
+                            if is_bc5 {
+                                super::super::bcn::bc5_block_rgba_for_test(
+                                    &data[bi..bi + bb],
+                                    &mut want[o..],
+                                    pitch,
+                                    is_signed,
+                                );
+                            } else {
+                                super::super::bcn::bc4_block_rgba_for_test(
+                                    &data[bi..bi + bb],
+                                    &mut want[o..],
+                                    pitch,
+                                    is_signed,
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        got, want,
+                        "case {case}, {} signed={is_signed}",
+                        if is_bc5 { "bc5" } else { "bc4" }
+                    );
+                }
             }
         }
     }

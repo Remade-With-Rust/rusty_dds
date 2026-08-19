@@ -3,6 +3,39 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.35 - 2026-08-19
+
+**BC4 decode +40.4%, BC5 +22.0% — same kernel, moved dispatch.** The last two
+decoders still crossing the SIMD boundary per block now cross it once per
+surface.
+
+BC1, BC2 and BC3 were hoisted to surface scope in 0.3.28-0.3.30. BC4 and BC5
+were not, and it went unnoticed because they **won anyway** (+22.2% and +32% in
+0.3.28) — their gathers are heavy enough to carry a per-block
+`#[target_feature]` call plus its `OnceLock` check, where BC1's was not (that
+boundary measured **26.7% of BC1 decode**, enough to invert the sign of the whole
+result). The two were only caught by listing every dispatch site side by side
+while answering an unrelated question about a dead one-line wrapper.
+
+Nothing about the gather changed. `bc5_gather_ssse3` now takes a raw destination
+instead of a slice, so the surface loop calls it without reborrowing per block,
+and because that kernel is itself a `#[target_feature]` function with the same
+features it **inlines into the loop** rather than being called.
+
+512^2, pinned, 16 paired CPU samples each, alternating leading arm:
+
+| format | before | after | verdict |
+|---|---|---|---|
+| BC4 | 0.1077 ms | **0.0642 ms** | 16/16, z = +4.00, **+40.4%** |
+| BC5 | 0.1540 ms | **0.1201 ms** | 16/16, z = +4.00, **+22.0%** |
+
+BC1 re-measured flat (z = +0.71). Byte-identical: the surface loops are
+oracle-tested against the scalar block decoders over 20 000 random surfaces per
+format **in both signedness conventions**, since the signed palette takes the
+other `unquantize` branch over `-127..=127` endpoints.
+
+Every BCn decoder now dispatches once per surface.
+
 ## 0.3.34 - 2026-08-19
 
 **BC7 encode +17.7%: two exact early-outs, found by asking how often these modes
