@@ -3,6 +3,48 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.37 - 2026-08-19
+
+**The parallel threshold was 8x too high: up to +44.9% on mid-sized surfaces.**
+
+`ENCODE_PARALLEL_MIN_BLOCKS = 4096` was inherited from BC7 *decode* and never
+validated for encode. Sweeping it (wall clock, because threading trades total CPU
+for latency — process CPU goes *up* when threading helps) shows the real
+crossover is around **512 blocks**:
+
+| blocks | always-parallel | always-serial | speedup |
+|---|---|---|---|
+| 144 | 0.757 ms | 0.406 ms | **0.54x** — threading loses |
+| 256 | 0.914 | 1.042 | 1.14x |
+| 1024 | 2.096 | 4.828 | **2.30x** |
+| 2116 | 3.124 | 8.861 | **2.84x** |
+| 16384 | 14.053 | 30.660 | 2.18x |
+
+Everything between ~512 and 4096 blocks was being forced onto one thread.
+
+Paired verification of the new value against the old, BC7, pinned, wall:
+
+| size | blocks | verdict |
+|---|---|---|
+| 64^2 | 256 | both serial, unchanged |
+| 91^2 | 529 | flat — the crossover itself |
+| 128^2 | 1024 | **+23.6%**, 10/10, z = +3.16 |
+| 181^2 | 2116 | **+44.9%**, 10/10, z = +3.16 |
+| 256^2 | 4096 | both parallel, unchanged (sanity) |
+
+Set to **512** rather than the measured break-even, because below ~256 blocks
+threading measurably loses (0.54x at 144) and the crossover band is flat rather
+than sharp. **Byte-identical** — parallel and serial encoders produce the same
+payload, which the hash gate now also proves for mip levels that changed path.
+
+The threshold applies **per surface**, so it governs each mip level
+independently: a 512^2 mip chain has three levels inside the band this fixes.
+
+One consideration for callers: more surfaces now spawn strips, so a caller that
+already parallelises *across* textures will see slightly more oversubscription
+than before. The direction is the same as the old value, only the size of the
+band changed.
+
 ## 0.3.36 - 2026-08-19
 
 **BC6H decode +25.4%: the sixth store-forwarding stall.** A decomposition probe
