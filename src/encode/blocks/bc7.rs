@@ -928,35 +928,151 @@ pub(super) fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: 
     bw.into_array()
 }
 
+/// Best 7-bit quantization of one channel for a given p-bit, and its squared
+/// error — precomputed for all 512 inputs.
+///
+/// `unquantize_7p_chan(q, p)` is `(q << 1) | p`, so the inner search is a pure
+/// function of `(channel_value, p_bit)` over 256 x 2 inputs. The direct form
+/// re-derived one of those 512 answers **24 times per call** (2 p-bits x 4
+/// channels x a 3-wide candidate window), and `quantize_7p` runs roughly six
+/// times per block.
+///
+/// The table is built by a `const fn` running the *identical* search, so the
+/// result is byte-identical by construction rather than by argument. 768 bytes
+/// total, which is L1-resident forever.
+const fn qtab_entry(c: u8, p: u8) -> (u8, u16) {
+    let q0 = c >> 1; // c is u8, so this is already <= 127
+    let lo = if q0 == 0 { 0 } else { q0 - 1 };
+    let hi = if q0 >= 127 { 127 } else { q0 + 1 };
+    let mut best_qi = q0;
+    let mut best_e = i32::MAX;
+    let mut cand = lo;
+    while cand <= hi {
+        let recon = ((cand as u32) << 1) | (p as u32);
+        let d = recon as i32 - c as i32;
+        let e = d * d;
+        if e < best_e {
+            best_e = e;
+            best_qi = cand;
+        }
+        cand += 1;
+    }
+    (best_qi, best_e as u16)
+}
+
+const fn build_qtab() -> ([[u8; 256]; 2], [[u16; 256]; 2]) {
+    let mut q = [[0u8; 256]; 2];
+    let mut e = [[0u16; 256]; 2];
+    let mut p = 0usize;
+    while p < 2 {
+        let mut c = 0usize;
+        while c < 256 {
+            let (qi, ei) = qtab_entry(c as u8, p as u8);
+            q[p][c] = qi;
+            e[p][c] = ei;
+            c += 1;
+        }
+        p += 1;
+    }
+    (q, e)
+}
+
+static QTAB: ([[u8; 256]; 2], [[u16; 256]; 2]) = build_qtab();
+
 pub(super) fn quantize_7p(c: [u8; 4]) -> ([u8; 4], u8) {
+    let (qt, et) = (&QTAB.0, &QTAB.1);
     let mut best_p = 0u8;
     let mut best_q = [0u8; 4];
     let mut best_err = i32::MAX;
-    for p in 0..2u8 {
-        let mut q = [0u8; 4];
-        let mut err = 0i32;
-        for i in 0..4 {
-            q[i] = (c[i] >> 1).min(127);
-            let mut best_qi = q[i];
+    for p in 0..2usize {
+        let (q, e) = (&qt[p], &et[p]);
+        let err = e[c[0] as usize] as i32
+            + e[c[1] as usize] as i32
+            + e[c[2] as usize] as i32
+            + e[c[3] as usize] as i32;
+        if err < best_err {
+            best_err = err;
+            best_p = p as u8;
+            best_q = [
+                q[c[0] as usize],
+                q[c[1] as usize],
+                q[c[2] as usize],
+                q[c[3] as usize],
+            ];
+        }
+    }
+    (best_q, best_p)
+}
+
+#[cfg(test)]
+mod qtab_tests {
+    use super::{quantize_7p, unquantize_7p_chan};
+
+    /// The table must reproduce the direct search for **every** input, not the
+    /// values encoders happen to produce. 2^32 colours is too many, so this
+    /// checks the per-channel primitive exhaustively (512 cases) and the
+    /// four-channel selection over a wide sweep.
+    #[test]
+    fn qtab_matches_the_direct_search() {
+        fn direct_chan(c: u8, p: u8) -> (u8, i32) {
+            let q0 = (c >> 1).min(127);
+            let mut best_qi = q0;
             let mut best_e = i32::MAX;
-            for cand in q[i].saturating_sub(1)..=q[i].saturating_add(1).min(127) {
+            for cand in q0.saturating_sub(1)..=q0.saturating_add(1).min(127) {
                 let recon = unquantize_7p_chan(cand, p);
-                let e = (recon as i32 - c[i] as i32).pow(2);
+                let e = (recon as i32 - c as i32).pow(2);
                 if e < best_e {
                     best_e = e;
                     best_qi = cand;
                 }
             }
-            q[i] = best_qi;
-            err += best_e;
+            (best_qi, best_e)
         }
-        if err < best_err {
-            best_err = err;
-            best_p = p;
-            best_q = q;
+        fn direct(c: [u8; 4]) -> ([u8; 4], u8) {
+            let mut best_p = 0u8;
+            let mut best_q = [0u8; 4];
+            let mut best_err = i32::MAX;
+            for p in 0..2u8 {
+                let mut q = [0u8; 4];
+                let mut err = 0i32;
+                for i in 0..4 {
+                    let (qi, e) = direct_chan(c[i], p);
+                    q[i] = qi;
+                    err += e;
+                }
+                if err < best_err {
+                    best_err = err;
+                    best_p = p;
+                    best_q = q;
+                }
+            }
+            (best_q, best_p)
+        }
+
+        // Per-channel primitive: all 512 inputs.
+        for p in 0..2u8 {
+            for c in 0..=255u8 {
+                let want = direct_chan(c, p);
+                let got = (super::QTAB.0[p as usize][c as usize],
+                           super::QTAB.1[p as usize][c as usize] as i32);
+                assert_eq!(got, want, "channel c={c} p={p}");
+            }
+        }
+        // Whole-colour selection, including the p-bit tie-break.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for case in 0..200_000 {
+            let c = if case < 256 {
+                [case as u8; 4]
+            } else {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let b = state.to_le_bytes();
+                [b[0], b[1], b[2], b[3]]
+            };
+            assert_eq!(quantize_7p(c), direct(c), "colour {c:?}");
         }
     }
-    (best_q, best_p)
 }
 
 pub(super) fn unquantize_7p(q: [u8; 4], p: u8) -> [u8; 4] {

@@ -2821,3 +2821,68 @@ level. Anything further is a quality trade and belongs to a different mandate.
 - The seed search itself is ~17%, of which the gate now skips 83.5% of the
   expensive part.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+
+---
+
+## §41 — `quantize_7p`: 512 answers, recomputed 24 times a call
+
+§40 named `quantize_7p` as the largest unexamined stage now that index fits are
+closed — ~11% of BC7 encode by ceiling probe. Opening it took one reading of the
+function it calls.
+
+### The whole search was a pure function of two bytes
+
+`unquantize_7p_chan(q, p)` is `(q << 1) | p`. That makes the inner candidate
+search a pure function of `(channel_value, p_bit)` — **512 possible inputs**.
+
+The direct form re-derived one of those 512 answers **24 times per call**: two
+p-bits x four channels x a three-wide candidate window, each step an unquantize
+and a squared error. `quantize_7p` runs roughly six times per block.
+
+Replaced by a `const fn` table — 768 bytes, permanently L1-resident, built by
+running the *identical* search so equivalence is by construction rather than by
+argument. Two p-bits x four channels = **8 lookups**.
+
+**+7.26% median, 18/19 paired wins, z = +3.90, byte-identical.**
+
+### Why it survived four rounds of looking
+
+The function is thirty lines of obviously-correct code with no allocation, no
+branching to speak of, and no obvious waste. Nothing about reading it says
+"hot". It was found by **decomposition**, not by inspection — the §37 ceiling
+probe put a number on it (~11%) two sections before anyone looked inside, and
+that number is the only reason it was opened at all.
+
+The tell, once inside, was not the loop but the **domain**: a `u8` in, a `u8` and
+a small error out, no other state. **Any pure function over a small domain that
+appears in a hot loop is a table.** The question to ask of a hot helper is not
+"is this code efficient" but "how many distinct inputs can it have".
+
+### The pattern, stated for reuse
+
+| signal | action |
+|---|---|
+| pure function, domain <= a few thousand | precompute; equivalence by construction |
+| pure function, large domain | look for a closed form |
+| impure or large state | neither — profile instead |
+
+`unquantize_7p_chan` had a 512-input domain sitting behind a 24-step search. The
+same question is worth asking of every remaining hot helper in the encoder.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | -19.1% fits |
+| 0.3.21 | residual-error seed gate | -23.8% fits, **+8.33% CPU** |
+| 0.3.22 | `quantize_7p` table | **+7.26% CPU**, byte-identical |
+
+Index fits 5.14 -> 3.147 per block, and two independent CPU wins on top, all with
+**0 of 102 corpus cases worse**.
+
+### Still open
+
+- The seed search is ~17% of encode; the gate now skips 83.5% of its expensive
+  half, but the cheap half (extrema, channel min/max) has not been examined.
+- `palette_mode6` and `best_index_pal` are the remaining per-candidate helpers.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.

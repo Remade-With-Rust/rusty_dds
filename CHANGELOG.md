@@ -3,6 +3,42 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.22 - 2026-08-19
+
+**`quantize_7p` becomes a compile-time table.** It was ~11% of BC7 encode by
+ceiling probe and had never been opened.
+
+`unquantize_7p_chan(q, p)` is `(q << 1) | p`, which makes the inner search a pure
+function of `(channel_value, p_bit)` - **512 possible inputs**. The direct form
+re-derived one of those 512 answers **24 times per call** (2 p-bits x 4 channels
+x a 3-wide candidate window), and `quantize_7p` runs roughly six times per block.
+
+Now: two p-bits x four channels = **8 table lookups**. The table is built by a
+`const fn` running the *identical* search, so equivalence is by construction
+rather than by argument. 768 bytes, permanently L1-resident.
+
+### Performance
+
+BC7 512^2 x 10 mips, pinned, forced serial, 20 paired CPU samples:
+
+| | |
+|---|---|
+| table median | **57.943 ms** |
+| direct median | 62.500 ms |
+| **table wins** | **18 / 19** (1 tie) |
+| **z** | **+3.90** |
+| **paired improvement** | **median +7.26%**, mean +8.08% |
+
+### Notes
+
+- **Byte-identical.** Verified by the frozen-payload tests and by an explicit
+  before/after payload hash across BC7, BC1, BC3 and BC5U.
+- The table is checked against the direct search **exhaustively** for the
+  per-channel primitive (all 512 inputs) and over 200 000 random colours for the
+  four-channel p-bit selection - not merely on values an encoder happens to
+  produce.
+- 98 tests pass.
+
 ## 0.3.21 - 2026-08-19
 
 **Encoder: the expensive BC7 mode-6 seeds are gated on residual error.** The
