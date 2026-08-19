@@ -2886,3 +2886,63 @@ Index fits 5.14 -> 3.147 per block, and two independent CPU wins on top, all wit
   half, but the cheap half (extrema, channel min/max) has not been examined.
 - `palette_mode6` and `best_index_pal` are the remaining per-candidate helpers.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+
+---
+
+## §42 — Two non-targets and one real one, all decided by counting
+
+§41 named `palette_mode6`, `best_index_pal` and the seed search's cheap half as
+the remaining candidates. Ceiling probes on a loaded box put all three inside the
+noise, which decided nothing. **Call counts decided all three in one run.**
+
+| helper | calls/block | verdict |
+|---|---:|---|
+| `palette_mode6` | 3.168 | one per fit — already minimal |
+| **`best_index_pal`** | **0** | **never runs** |
+| `extrema_rgba` | 2.245 | needs 1 |
+| `channel_minmax_rgba` | 3.245 | needs 2 |
+| `rgba_span_sum` | 1.245 | needs 0 |
+
+### The one that never runs
+
+`best_index_pal` searches 16 palette entries x 4 channels for every pixel. It
+reads like the hottest thing in the encoder. It is called **zero** times:
+`fit_indices_mode6` dispatches to the AVX2 kernel, leaving the scalar search as
+the fallback and the oracle.
+
+Two rounds ago that function would have been an obvious target. **A counter cost
+one build and removed it from consideration entirely** — where a ceiling probe on
+this box could not have, because zero and noise look identical when the box is
+20% noisy.
+
+### The real one
+
+`extrema_rgba` ran once to initialise `best_seed` and again inside the seed
+builder that returns the same pair. `rgba_span_sum` is a sum over
+`channel_minmax_rgba` — which the seed builder had already computed for seed 1.
+Three walks of sixteen pixels for two statistics.
+
+Hoisted to one computation each, threaded through, `rgba_span_sum` deleted:
+**+2.67%, 11/13 paired wins, z = +2.50, byte-identical.**
+
+### The lesson worth keeping
+
+**A call counter is a better first instrument than a ceiling probe**, and this
+round is the clean demonstration. The ceiling probe answers "what is this worth"
+but needs a quiet box; the counter answers "how often does this happen" and needs
+nothing. On a contended machine the counter is often *sufficient* — 0 calls needs
+no timing, and 2.245 calls where 1 is needed is a defect visible without a clock.
+
+Order of instruments, revised for this campaign:
+
+1. **Call counts** — free, exact, and frequently decisive on their own.
+2. **Ceiling probe** — what the work is worth, when the counter says it happens.
+3. **Paired CPU + z-score, forced serial, pinned** — the verdict.
+
+### Still open
+
+- `palette_mode6` at 3.168 calls per block is the last per-fit helper; a SIMD
+  interpolation is possible but it is 64 multiplies against an already-factored
+  form.
+- The AVX2 `fit_indices_mode6` kernel itself has never been opened.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.

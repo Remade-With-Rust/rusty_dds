@@ -3,6 +3,46 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.23 - 2026-08-19
+
+**Block statistics computed once each.** The BC7 mode-6 search walked the same
+sixteen pixels repeatedly for values it already had. Counted per block:
+
+| helper | calls | needed |
+|---|---:|---:|
+| `extrema_rgba` | **2.245** | 1 |
+| `channel_minmax_rgba` | **3.245** | 2 |
+| `rgba_span_sum` | 1.245 | 0 |
+
+`extrema_rgba` ran once to seed `best_seed` and again inside the seed builder
+that produces the same pair. `rgba_span_sum` is a sum over `channel_minmax_rgba`,
+which the seed builder had already computed for seed 1. Each of these walks 16
+pixels x 4 channels.
+
+Now each statistic is computed once at the top of the search and threaded
+through; `rgba_span_sum` is gone entirely, its value derived from the min/max
+already in hand.
+
+BC7 512^2 x 10 mips, pinned, forced serial, 20 paired CPU samples: **median
+46.224 ms against 47.526, 11/13 wins (7 ties), z = +2.50, +2.67%.**
+**Byte-identical.**
+
+### Two non-targets, measured rather than assumed
+
+- **`best_index_pal` is called ZERO times.** `fit_indices_mode6` dispatches to the
+  AVX2 kernel when available, so the scalar nearest-palette search survives only
+  as the fallback and the test oracle. It looks like an obvious hot spot - 16
+  entries x 4 channels per pixel - and on this machine it never runs.
+- **`palette_mode6` is already minimal** at 3.168 calls per block, one per index
+  fit, and its interpolation was factored to one multiply per component in
+  0.3.20. No further scalar win found.
+
+### Notes
+
+- Byte-identity verified by the frozen-payload tests and an explicit
+  before/after payload hash across BC7, BC1, BC3 and BC5U.
+- 98 tests pass.
+
 ## 0.3.22 - 2026-08-19
 
 **`quantize_7p` becomes a compile-time table.** It was ~11% of BC7 encode by

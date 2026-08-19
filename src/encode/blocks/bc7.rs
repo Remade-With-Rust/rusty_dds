@@ -510,13 +510,22 @@ pub(super) fn pack_bc7_mode5(
 pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
     let mut best_bits = [0u8; 16];
     let mut best_err = i64::MAX;
-    let mut best_seed = extrema_rgba(pixels);
+    // Walk the block ONCE per statistic. `extrema_rgba` was computed here and
+    // again inside the seed builder; `channel_minmax_rgba` was computed for
+    // seed 1 and again inside `rgba_span_sum`, which is just a sum over the same
+    // min/max. Counted: 2.245 extrema, 3.245 channel-minmax and 1.245 span calls
+    // per block, for statistics the block needs once each.
+    let ex = extrema_rgba(pixels);
+    let cm = channel_minmax_rgba(pixels);
+    let span: i32 = (0..4).map(|c| (cm.0[c] - cm.1[c]) as i32).sum();
+
+    let mut best_seed = ex;
     let mut have = false;
 
     // Keep the winning candidate itself, not just its endpoints: the refine
     // below starts from this rather than re-deriving it.
     let mut best_fit: Option<Mode6Fit> = None;
-    let (mut seeds, mut n_seeds) = bc7_mode6_seeds_base(pixels);
+    let (mut seeds, mut n_seeds) = bc7_mode6_seeds_base(ex, cm);
     let mut tried = 0usize;
     loop {
         for &(ep0, ep1) in &seeds[tried..n_seeds] {
@@ -536,13 +545,13 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) 
         if best_err <= SEED_EXTRA_ERR_GATE {
             break;
         }
-        bc7_mode6_seeds_extra(pixels, &mut seeds, &mut n_seeds);
+        bc7_mode6_seeds_extra(pixels, ex, span, &mut seeds, &mut n_seeds);
         if n_seeds == tried {
             break;
         }
     }
     // Skip LS on near-solid blocks — seed endpoints already win.
-    let do_ls = rgba_span_sum(pixels) > 8;
+    let do_ls = span > 8;
     if do_ls {
         if let Some(base) = best_fit {
             let (bits, err) = mode6_refine(pixels, base).pack();
@@ -564,10 +573,6 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) 
     (best_bits, best_err)
 }
 
-pub(super) fn rgba_span_sum(pixels: &[[u8; 4]; 16]) -> i32 {
-    let (mx, mn) = channel_minmax_rgba(pixels);
-    (0..4).map(|c| (mx[c] - mn[c]) as i32).sum()
-}
 
 pub(super) type Seed = ([u8; 4], [u8; 4]);
 
@@ -614,11 +619,11 @@ pub(super) fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
 /// neutral; 1024 would fire on 96.4% but was not quality-tested.
 const SEED_EXTRA_ERR_GATE: i64 = 256;
 
-pub(super) fn bc7_mode6_seeds_base(pixels: &[[u8; 4]; 16]) -> ([Seed; 5], usize) {
+pub(super) fn bc7_mode6_seeds_base(ex: Seed, cm: Seed) -> ([Seed; 5], usize) {
     let mut seeds = [([0u8; 4], [0u8; 4]); 5];
     let mut n = 0usize;
-    push_seed(&mut seeds, &mut n, extrema_rgba(pixels));
-    push_seed(&mut seeds, &mut n, channel_minmax_rgba(pixels));
+    push_seed(&mut seeds, &mut n, ex);
+    push_seed(&mut seeds, &mut n, cm);
     (seeds, n)
 }
 
@@ -633,14 +638,15 @@ pub(super) fn bc7_mode6_seeds_base(pixels: &[[u8; 4]; 16]) -> ([Seed; 5], usize)
 /// block they fit badly is exactly where the extras earn their cost.
 pub(super) fn bc7_mode6_seeds_extra(
     pixels: &[[u8; 4]; 16],
+    ex: Seed,
+    span: i32,
     seeds: &mut [Seed; 5],
     n: &mut usize,
 ) {
-    let span = rgba_span_sum(pixels);
     if span <= 16 {
         return;
     }
-    let (mx, mn) = extrema_rgba(pixels);
+    let (mx, mn) = ex;
     let mut mean = [0u32; 4];
     for p in pixels {
         for c in 0..4 {
