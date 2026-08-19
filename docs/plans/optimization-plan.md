@@ -1423,3 +1423,87 @@ replaced, which is what pointed at index-read count as the variable that matters
   should be expected to behave like mode 5 did.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §23 — Mode 7, and the shape of the whole problem
+
+§22 predicted mode 7 would behave like modes 1 and 3: two subsets, but **one**
+index set, so the sixteen-deep index-read chain is what it is paying. It does.
+
+| mode | general | specialised | |
+|---|---:|---:|---|
+| 7 | 162.5-165.9 Mpx/s | **237.7-257.7** | **+52%** |
+
+Alternating-order ABBA, four samples per arm, no overlap. The largest single-mode
+gain of the campaign — and mode 7 was the **slowest** mode on the general
+decoder.
+
+### The picture that only appears once you have four of them
+
+Per-mode, 256², serial:
+
+| mode | Mpx/s | state |
+|---|---:|---|
+| 3 | 301.9 | specialised |
+| 1 | 289.0 | specialised |
+| 7 | 257.8 | specialised |
+| 6 | 236.2 | specialised |
+| 2 | 162.2 | general |
+| 5 | 160.5 | general |
+| 4 | 152.7 | general |
+| 0 | 152.5 | general |
+
+**Bimodal.** Every specialised mode lands in 236-302 Mpx/s; every general one in
+152-162. And the gain is *inversely* ordered against the starting speed:
+
+| mode | general | specialised | gain |
+|---|---:|---:|---:|
+| 6 | 205.9 | ~244 | +18% |
+| 1 | 187.9 | 245.7 | +31% |
+| 3 | 180.3 | 248.7 | +38% |
+| 7 | 164.6 | 250.4 | +52% |
+
+The specialised column is nearly **flat**. Whatever a mode costs on the general
+decoder, specialising it lands at roughly the same place. That is the strongest
+statement this campaign has produced about BC7 decode: **the general decoder's
+152-206 spread is not mode complexity, it is per-pixel bitstream and dispatch
+overhead.** Modes are not meaningfully different in cost once you stop reading
+their indices through a mutating cursor.
+
+### Which means §21 is now doubly wrong
+
+Mode 5 sits at 160.5 on the general decoder. Every mode measured at that level
+has, on specialisation, gone to ~250. §21 recorded mode 5 as "neutral per block,
+not merely diluted" and reverted it — and §22 already suspected the
+implementation rather than the idea. This table makes that near-certain: a
+correct mode-5 path should reach ~250 Mpx/s, a **+56%** gain, the largest still
+on the table.
+
+The refutation in §21 was a sound measurement of unsound code. Recording it as a
+property of the *approach* was the error, and it survived two rounds because
+nothing challenged it until a fourth data point made the pattern visible.
+
+### The lesson worth keeping
+
+Three modes in, the story was "specialisation helps some modes." Four modes in,
+the story is "all modes cost the same once specialised, and the general decoder's
+variance is pure overhead." **The second story is not a refinement of the first,
+it is a different claim** — and it only became visible with enough points to see
+that the specialised column was flat.
+
+Do not conclude from two measurements what four would contradict. And when a
+negative result sits next to three positives with the same mechanism, re-examine
+the negative before trusting it.
+
+### Still open, in expected-value order
+
+- **Mode 5, revisited.** 160.5 Mpx/s, predicted ~250. Two index sets, a rotation
+  and a channel permutation — the parts my first attempt handled badly. This is
+  now the largest remaining win, and §21 must be corrected in the file, not
+  silently.
+- **Mode 4** (152.7): two index sets *and* an index-selection bit. Same family
+  as 5; attempt after it.
+- **Modes 0 and 2** (152.5, 162.2): three subsets. The partition lookup is wider
+  but the index chain is identical, so the mechanism should still apply.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.

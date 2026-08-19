@@ -3,6 +3,50 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.7 — 2026-08-19
+
+**Specialised BC7 decoder for mode 7**, the last two-subset mode and the first
+fast path carrying real alpha (RGBA 5.5.5.5, four unique p-bits, one 2-bit index
+set). Isolated, alternating-order ABBA, four samples per arm:
+
+| mode | general | specialised | |
+|---|---:|---:|---|
+| 7 | 162.5-165.9 Mpx/s | **237.7-257.7** | **+52%** |
+
+The largest single-mode gain of the campaign, with no overlap between arms.
+
+### Where BC7 decode now stands
+
+Per-mode, 256^2, serial:
+
+| mode | Mpx/s | |
+|---|---:|---|
+| 3 | 301.9 | specialised |
+| 1 | 289.0 | specialised |
+| 7 | 257.8 | specialised |
+| 6 | 236.2 | specialised |
+| 2 | 162.2 | general |
+| 5 | 160.5 | general |
+| 4 | 152.7 | general |
+| 0 | 152.5 | general |
+
+The split is bimodal, and that is the finding: **every specialised mode lands at
+236-302 Mpx/s regardless of how fast it was before.** Mode 6 started fastest
+(205.9) and gained least; mode 7 started slowest (164.6) and gained most. The
+general decoder's whole 152-206 spread was per-pixel bitstream and dispatch
+overhead, not the intrinsic cost of the mode.
+
+### Notes
+
+- Verified bit-identical to the general decoder across all **64 partitions x 200
+  randomised blocks**, plus all-zero and all-ones payloads. Mode 7 is the only
+  two-subset fast path with alpha, so a wrong p-bit or component offset would
+  surface in the alpha channel alone — the oracle covers it.
+- As with mode 3, **packs cooked by this crate contain no mode 7 at all**; our
+  encoder emits modes 1, 5 and 6. This pays on content from compressors that use
+  it. Shipped on the isolated measurement, stated plainly here.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.6 — 2026-08-18
 
 **Specialised BC7 decoders for the two-subset modes 1 and 3.** Profiling the

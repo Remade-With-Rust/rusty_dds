@@ -437,6 +437,7 @@ fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     bc7_mode6_block(blk, out, pitch)
         || bc7_mode1_block(blk, out, pitch)
         || bc7_mode3_block(blk, out, pitch)
+        || bc7_mode7_block(blk, out, pitch)
 }
 
 /// Subset assignment for BC7's 64 two-subset partitions: bit `p` set means
@@ -587,6 +588,125 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         out[o + 3] = 0xff;
     }
     true
+}
+
+/// Decode one mode 7 BC7 block straight to RGBA8.
+///
+/// Two subsets, RGBA 5.5.5.5 endpoints with a unique p-bit per endpoint, 2-bit
+/// indices. Structurally mode 3 with a real alpha channel: one index set drives
+/// all four components, so the same sixteen-deep index-read chain is what the
+/// general decoder is paying, and the same fix removes it.
+///
+/// Unlike modes 1 and 3 this mode carries alpha, so nothing can be assumed
+/// opaque.
+///
+/// Returns `false` if the block is not mode 7.
+#[inline]
+fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] != 0x80 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let partition = ((b >> 8) & 0x3f) as usize;
+    // 5 bits plus a unique p-bit is 6; shift the MSB to bit 7 and replicate the
+    // top two bits down into the vacated ones.
+    let ep = |shift: u32, pbit_shift: u32| {
+        let v = ((((b >> shift) & 0x1f) as u32) << 1) | (((b >> pbit_shift) & 1) as u32);
+        let t = v << 2;
+        t | (t >> 6)
+    };
+    // Component-major: R0..R3, G0..G3, B0..B3, then A0..A3. The p-bit is per
+    // endpoint and applies to all four components of that endpoint.
+    let e = [
+        [ep(14, 94), ep(34, 94), ep(54, 94), ep(74, 94)],
+        [ep(19, 95), ep(39, 95), ep(59, 95), ep(79, 95)],
+        [ep(24, 96), ep(44, 96), ep(64, 96), ep(84, 96)],
+        [ep(29, 97), ep(49, 97), ep(69, 97), ep(89, 97)],
+    ];
+
+    let subsets = BC7_P2_SUBSET[partition];
+    let fixup = BC7_P2_FIXUP[partition] as usize;
+    let idx = b >> 98;
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p2_index_at(p, fixup, 2);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
+        let s = (((subsets >> p) & 1) as usize) * 2;
+        let (a, c) = (&e[s], &e[s + 1]);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
+        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
+        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o + 3] = ((a[3] * (64 - weight) + c[3] * weight + 32) >> 6) as u8;
+    }
+    true
+}
+
+#[cfg(test)]
+mod bc7_mode7_tests {
+    use super::bc7_mode7_block;
+
+    /// Every partition, against the general decoder. Mode 7 is the only
+    /// two-subset fast path carrying alpha, so a wrong p-bit or component offset
+    /// would show up in the alpha channel alone and nowhere else.
+    #[test]
+    fn mode7_matches_the_general_decoder() {
+        let mut state = 0x0ddc_0ffe_e0dd_f00du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for partition in 0..64u8 {
+            for case in 0..200 {
+                let mut raw = [0u8; 16];
+                match case {
+                    0 => {}
+                    1 => raw.iter_mut().for_each(|x| *x = 0xff),
+                    _ => {
+                        let (x, y) = (next(), next());
+                        raw[..8].copy_from_slice(&x.to_le_bytes());
+                        raw[8..].copy_from_slice(&y.to_le_bytes());
+                    }
+                }
+                // Mode 7 occupies all eight bits of byte 0; the partition sits
+                // immediately above it.
+                let v = u128::from_le_bytes(raw);
+                let v = (v & !(0x3fu128 << 8)) | ((partition as u128) << 8);
+                let mut blk = v.to_le_bytes();
+                blk[0] = 0x80;
+
+                let mut ours = [0u8; 64];
+                assert!(bc7_mode7_block(&blk, &mut ours, 16), "partition {partition}");
+                let mut theirs = [0u8; 64];
+                bcdec_rs::bc7(&blk, &mut theirs, 16);
+                assert_eq!(
+                    ours, theirs,
+                    "mode 7, partition {partition}, case {case} diverged"
+                );
+            }
+        }
+    }
+
+    /// Mode 7 must not claim any other encoding. Byte 0 is entirely the mode
+    /// field here, so a stray high bit elsewhere must not be mistaken for it.
+    #[test]
+    fn other_modes_are_declined() {
+        for mode in 0..8u32 {
+            let mut blk = [0u8; 16];
+            blk[0] = 1u8 << mode;
+            let mut px = [0u8; 64];
+            assert_eq!(bc7_mode7_block(&blk, &mut px, 16), mode == 7, "vs mode {mode}");
+        }
+        // The reserved encoding must be declined too.
+        let mut px = [0u8; 64];
+        assert!(!bc7_mode7_block(&[0u8; 16], &mut px, 16));
+    }
 }
 
 #[cfg(test)]
