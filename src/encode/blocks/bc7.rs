@@ -630,10 +630,32 @@ pub(super) const W6M: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 
 /// trial instead of re-lerping per pixel per candidate index.
 #[inline]
 pub(super) fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    // `(64 - w) * c0 + w * c1 + 32` is exactly `c0 * 64 + 32 + w * (c1 - c0)`,
+    // and only the right operand varies with the weight. Base and delta are
+    // constant for the whole palette, so this is one multiply per component
+    // instead of two — 64 rather than 128 per call, and this is called once per
+    // seed candidate plus each refine, up to seven times a block.
+    //
+    // The same identity the decoder uses in `bc7_bd3`; the value is always
+    // >= 32 so the shift is exact either way. Byte-identical by construction,
+    // and the encode determinism tests gate it.
+    let base = [
+        c0[0] as i32 * 64 + 32,
+        c0[1] as i32 * 64 + 32,
+        c0[2] as i32 * 64 + 32,
+        c0[3] as i32 * 64 + 32,
+    ];
+    let delta = [
+        c1[0] as i32 - c0[0] as i32,
+        c1[1] as i32 - c0[1] as i32,
+        c1[2] as i32 - c0[2] as i32,
+        c1[3] as i32 - c0[3] as i32,
+    ];
     let mut pal = [[0u8; 4]; 16];
     for (k, &w) in W6M.iter().enumerate() {
+        let w = w as i32;
         for c in 0..4 {
-            pal[k][c] = (((64 - w) * c0[c] as u32 + w * c1[c] as u32 + 32) / 64) as u8;
+            pal[k][c] = ((base[c] + w * delta[c]) >> 6) as u8;
         }
     }
     pal

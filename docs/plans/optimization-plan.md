@@ -2431,3 +2431,92 @@ happen is quoting the clean-looking first number.
 - BC2 and BC3 have no real-content measurement.
 - **This box needs re-checking before the next timing round** — two consecutive
   rounds have now been degraded by interference.
+
+---
+
+## §36 — The encoder, and an instrument for a box that will not hold still
+
+The decoder campaign's findings were tested against the encoder. The encoder has
+had its own campaign (quality-first: AVX2 fit kernels, RDO, +1.22x CPU vs 0.1.2,
+21/3 on speed against DirectXTex), so the question was narrow: **does the
+decoder's specific defect class appear there?**
+
+### Where encode time is
+
+| stage | share |
+|---|---:|
+| mip downsample | ~4% (BC7), ~0% (BC1) |
+| **block encode** | **~96%** |
+
+And within the BC7 block search, by disabling each mode in turn:
+
+| mode | share |
+|---|---:|
+| **mode 6** | **~86%** |
+| mode 5 | ~9% |
+| mode 4 | ~5% |
+| mode 1 | ~0% |
+
+Mode 1 costing nothing is a **confirmation, not a null result**: it carries the
+campaign's err-ceiling + 2x-promise + shortlist gates, and they are doing exactly
+what they were built for. A gate that works is invisible in a profile.
+
+### The transferable finding
+
+The bit *writer* is not the analogue of the decoder's bit reader — it runs once
+per block after the search, not on the hot path. But `palette_mode6` is:
+
+```rust
+pal[k][c] = (((64 - w) * c0[c] + w * c1[c] + 32) / 64) as u8;
+```
+
+**That is the same expression §25 factored in the decoder**, in the encoder,
+called once per seed candidate plus each refine — up to seven times per block.
+`c0 * 64 + 32 + w * (c1 - c0)` halves it to one multiply per component: 64
+instead of 128 per call.
+
+The encoder and decoder share no code and were optimised in separate campaigns
+months apart. Nothing textual connects them; the palette is *built* in one and
+*interpolated* in the other. This is §28's lesson landing a second time — a fix
+is a hypothesis about every place with the same **shape**, and shape does not
+grep.
+
+### The box denied the verdict, so the instrument changed
+
+Timing was worthless: eight ABBA samples, one OLD reading **59.13 ms** against a
+~25 ms median, and min-estimator disagreeing with median-estimator on sign. Three
+consecutive rounds have now been degraded.
+
+Per this file's own rule for that situation — read the emitted assembly, which is
+deterministic and needs no quiet box:
+
+| | `imul` in the emitted library |
+|---|---:|
+| before | 851 |
+| **after** | **835** |
+
+**16 multiply instructions removed**, statically, byte-identically. That is a
+confirmation the change does less work. It is **not** a speed claim, and none is
+made.
+
+### Shipped to master, not released
+
+The change is byte-identical (the encode determinism tests gate it), strictly
+less work (deterministically confirmed), and **unmeasurable here today**. It is
+committed but no version is published: a release note is a claim, and there is
+nothing yet to claim. Re-measure on a calm box before publishing.
+
+### The lesson worth keeping
+
+**When the box will not hold still, change the instrument, not the standard.**
+The temptation is to average harder, quote the friendliest estimator, or ship on
+"it must be faster, it does less work". The assembly count answers a *different*
+and weaker question — does it do less work? — but answers it exactly, and that is
+worth more than a timing number the machine is deciding.
+
+### Still open
+
+- The encoder's mode 6 is ~86% of BC7 encode and its fit kernel is already AVX2;
+  a ceiling probe on the remainder has not been run.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+- **This box needs attention before any further timing round.**
