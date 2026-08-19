@@ -1104,3 +1104,77 @@ the next big swing rather than the next increment.
 - A specialised BC6H block decoder (above).
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §19 — The whole matrix, and where the lead is thinnest
+
+§18 ended by naming a specialised BC6H block decoder as the next big swing. Before
+starting a project that size, one cheap question: **is BC6H actually where the
+lead is thinnest?** Nobody had checked, because the LDR decode A/B had never been
+run — both providers implement `decode_rgba8` and nothing ever called them.
+
+### The matrix
+
+Mip 0, cooked pack, agreement checked before timing:
+
+| format | rusty_dds | DirectXTex | ratio |
+|---|---:|---:|---:|
+| BC1 | 684.7 Mpx/s | 107.8 Mpx/s | **6.35×** |
+| BC5U | 421.6 Mpx/s | 72.8 Mpx/s | **5.79×** |
+| BC4U | 543.4 Mpx/s | 98.2 Mpx/s | **5.53×** |
+| BC6H | 114.8 Mpx/s | 31.3 Mpx/s | 3.67× |
+| BC7 | 263.2 Mpx/s | 72.6 Mpx/s | **3.63×** |
+| all | | | **4.82×** |
+
+The answer: **BC7 is the thinnest lead, not BC6H** — and BC7 is the format modern
+games actually ship most of. §18's plan was aimed one format to the left.
+
+### Both remaining targets have no tail left
+
+§18 won by finding a *tail* — work outside the block decoder. There isn't one
+here. `decode_bc7_direct` writes straight into the caller's buffer with a pitch:
+no scratch, no widen, no conversion. BC7 decode is **100% `bcdec_rs::bc7`**, the
+same way BC6H is 84% `bc6h_half`.
+
+So both remaining targets need the same thing — a custom block decoder — and
+neither admits a cheap structural fix. That is worth knowing before spending a
+round looking for one.
+
+### The correctness finding
+
+BC4 disagreed with DirectXTex in **exactly 50.000%** of bytes. Exactly half is
+never rounding, and it wasn't:
+
+| | rusty_dds | DirectXTex |
+|---|---|---|
+| BC4 pixel | `146,0,0,255` | `146,146,146,255` |
+| R, A disagreement | 0 / 262 144 | |
+| G, B disagreement | 262 144 / 262 144 | |
+
+We emit what a GPU returns when sampling BC4 — absent channels zero, alpha one.
+DirectXTex **replicates** the single channel so a roughness or height map previews
+as greyscale. Neither is wrong. But a studio porting from
+`DirectXTex::Decompress` would find every single-channel map turning red, with
+nothing in our docs to explain it. Now documented on `decode_rgba8`, with the
+measurement. DirectXTex does not replicate for BC5, so only BC4 is affected.
+
+**This is the round's most valuable output, and it is not a speed number.** It
+surfaced only because the A/B asserted agreement *before* timing — a benchmark
+that had just measured throughput would have reported BC4 at 5.53× and said
+nothing.
+
+### The lesson worth keeping
+
+§17 said a number without a peer is not a result. This round adds: **a peer
+comparison you have not run is not a plan.** §18 named BC6H as the next target
+from throughput intuition. One afternoon of measurement says BC7, and the same
+measurement found a migration hazard nobody was looking for.
+
+### Still open
+
+- A specialised block decoder, **BC7 first** — the thinnest lead and the most
+  shipped format. Single-subset modes have contiguous index bits and no
+  partition lookup, and the 16-pixel interpolation vectorises.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.

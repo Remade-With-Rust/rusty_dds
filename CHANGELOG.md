@@ -3,6 +3,35 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.4 — 2026-08-18
+
+**The full decode matrix against DirectXTex.** 0.3.3 compared HDR decode 1:1 and
+found 3.75x. The LDR half of that comparison had never been run — both providers
+implemented it and nothing called them. Running it produced a competitive
+picture and one migration hazard worth documenting.
+
+| format, mip 0 | rusty_dds | DirectXTex | ratio |
+|---|---:|---:|---:|
+| BC1 | 684.7 Mpx/s | 107.8 Mpx/s | **6.35x** |
+| BC5U | 421.6 Mpx/s | 72.8 Mpx/s | **5.79x** |
+| BC4U | 543.4 Mpx/s | 98.2 Mpx/s | **5.53x** |
+| BC6H | 114.8 Mpx/s | 31.3 Mpx/s | **3.67x** |
+| BC7 | 263.2 Mpx/s | 72.6 Mpx/s | **3.63x** |
+| **all** | | | **4.82x** |
+
+### Documentation
+
+- **BC4 and BC5 channel conventions are now documented on `decode_rgba8`.** We
+  decode BC4 to `(R, 0, 0, 255)` — what a GPU returns when sampling it.
+  DirectXTex **replicates** the single channel to `(R, R, R, 255)`, a
+  greyscale-viewer convention. Over a 512^2 surface the two agree on R and A for
+  all 262 144 pixels and disagree on G and B for all of them.
+
+  Neither is wrong, but nothing warned about it: porting from
+  `DirectXTex::Decompress` turns every roughness and height map red. DirectXTex
+  does not replicate for BC5, so only BC4 is affected. Behaviour is unchanged —
+  this documents what was always true.
+
 ## 0.3.3 — 2026-08-18
 
 **The BC6H conversion tail.** With buffer restructuring exhausted, the only

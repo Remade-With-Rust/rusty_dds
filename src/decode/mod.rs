@@ -25,6 +25,24 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Volumes (`depth > 1`) decode every depth slice and stack them in
     /// [`ImageRgba8::pixels`]. sRGB-tagged formats return stored bytes without
     /// linearization.
+    ///
+    /// # Channel conventions for BC4 and BC5
+    ///
+    /// **BC4 decodes to `(R, 0, 0, 255)` and BC5 to `(R, G, 0, 255)`** — the
+    /// values a GPU returns when sampling those formats, where the absent
+    /// channels read as zero and alpha as one.
+    ///
+    /// This differs from Microsoft DirectXTex, which **replicates** BC4's single
+    /// channel into green and blue, producing `(R, R, R, 255)`. That is a
+    /// greyscale-viewer convention: it makes a roughness or height map look
+    /// right in an image preview. Measured over a 512^2 BC4 surface, the two
+    /// agree on R and A for every one of 262 144 pixels and disagree on G and B
+    /// for every one of them.
+    ///
+    /// Neither is wrong; they answer different questions. If you are porting
+    /// from `DirectXTex::Decompress` and your single-channel maps suddenly look
+    /// red, this is why — replicate the red channel yourself. DirectXTex does
+    /// *not* replicate for BC5, so only BC4 is affected.
     pub fn decode_rgba8(&self, id: SubresourceId) -> Result<ImageRgba8, Error> {
         let surf = self.surface(id)?;
         let kind = self.decode_content()?;
