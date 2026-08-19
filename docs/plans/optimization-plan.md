@@ -776,3 +776,83 @@ probe is the next thing this file wants.
   same win, not yet written.
 - Volume textures in `decode_block_rows_into` still return `UnsupportedFormat`.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §15 — BC6H: the format nobody profiled (round six)
+
+§14 said the next thing this file wanted was a tightened probe. It got one, and
+the probe immediately found the largest single win of the whole campaign.
+
+### The gap
+
+Profiling every decode path at 1024² side by side, which had never been done:
+
+| format | throughput | vs BC6H |
+|---|---:|---:|
+| BC7 (caller-parallel) | ~400 Mpx/s | 10.1× |
+| BC1 | 337.2 Mpx/s | 8.5× |
+| BC7 (internal parallel) | 232.1 Mpx/s | 5.8× |
+| BC5U | 179.2 Mpx/s | 4.5× |
+| **BC6H** | **39.7 Mpx/s** | — |
+
+BC6H is the most expensive format we ship *and* the only one with no parallel
+seam, no `_into` variant, and no caller split. Everything rounds one to five gave
+the LDR path, HDR had none of.
+
+### Cause one: a second pass nobody could see
+
+`decode_bc6h` decoded into a full-surface RGB plane, then walked it again to
+widen to RGBA. At 1024²: 12 MiB written, 12 MiB read back, 16 MiB written — 40
+MiB of traffic for a 16 MiB result.
+
+**The tell was in the numbers all along, and it was not a time.** Throughput
+*fell* with surface size — 56.8 / 49.2 / 39.7 Mpx/s at 256 / 512 / 1024. Decode
+cost per pixel does not depend on how many pixels there are; a number that
+degrades with working-set size is a cache cliff, full stop.
+
+Fixed by fusing both stages through the 192-byte block scratch the NPOT path
+already used, which never leaves L1. Throughput flattens: 76.9 / 62.7 / 56.1.
+
+**26.428 → 18.691 ms**, and the shape of the curve changed, which is the part
+that proves the mechanism rather than just the result.
+
+### Cause two: no seam
+
+Added `decode_rgba_f32_into` and `decode_block_rows_f32_into` / `block_rows_f32`.
+
+| 1024² BC6H_UF16 | time | throughput |
+|---|---:|---:|
+| before | 26.428 ms | 39.7 Mpx/s |
+| fused pass | 18.691 ms | 56.1 Mpx/s |
+| `_into` | 11.941 ms | 87.8 Mpx/s |
+| **24-thread caller split** | **2.743 ms** | **382.3 Mpx/s** |
+
+**9.6× end to end**, and BC6H now sits level with BC7 instead of 10× behind it.
+
+### What was *not* done, and why
+
+No internal thread pool. BC7's `thread::scope` costs a measured **1.531 ms of
+pure spawn toll per call** before a pixel is touched — 34% of its 4.519 ms
+parallel decode — and it still only scales 3.7× on 24 cores because BC7 decode is
+memory-bandwidth bound. Handing the caller the split beats the library's own
+threads by 1.7× *and* allocates nothing. Giving BC6H a pool would have bought a
+worse version of a thing we already know how to do better.
+
+The seam is also honest about when not to use it: at 256² a 24-thread split is
+**0.56×**, because spawn cost dominates. That decision belongs to the caller's
+scheduler, which knows what else is running. Ours does not.
+
+### The lesson worth keeping
+
+§13 said measure the profiler, not just with it. This round adds: **profile
+everything, not just what the harness happens to exercise.** The simulator only
+streamed LDR textures, so five rounds of optimisation never once touched the
+slowest decode in the crate. The win was not hard to find — it was hard to *look
+at*, because nothing pointed there.
+
+### Still open
+
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim streams no HDR content at all, which is exactly how this went unseen.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
