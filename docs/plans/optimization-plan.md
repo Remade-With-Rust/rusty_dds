@@ -3371,3 +3371,28 @@ loops in `try_bc7_mode5` and `try_bc7_mode4` call these kernels four to eight
 times per block, and §49 showed that boundary decide the *sign* of a result.
 Hoisting it above the candidate loops — one feature check per block, or per
 surface — is the next move, and is deliberately not attempted in 0.3.31.
+
+## §54 — Why `bc4_palette` went dead, and what stood next to it
+
+Mundane answer: `bc4_block_rgba` was its **only** caller. The 0.3.28 reroute
+needed the packed `u64` to hand to `bc5_gather`, so the call site became
+`bc4_palette_packed(...)` followed by `.to_le_bytes()` — which is the wrapper's
+entire one-line body, inlined. Its sole caller stopped calling it. No coverage
+was lost; the scalar fallback computes identical bytes, and the oracle that
+guards them never moved.
+
+The sibling read at that site found something live. After 0.3.28-0.3.30:
+
+| decoder | dispatch site |
+|---|---|
+| BC1, BC2, BC3 | surface scope (one feature check per surface) |
+| **BC4, BC5** | **per block** |
+
+BC4 and BC5 still pay the `#[target_feature]` call boundary and its `OnceLock`
+on every 4x4 block. §49 measured that boundary at **26.7% of BC1 decode** —
+enough there to invert the sign of the whole result. BC4 and BC5 won (+22.2% and
++32%) *despite* it, because their gathers are heavy enough to carry it, which is
+exactly why it was never noticed.
+
+Open item, not yet attempted: give BC4 and BC5 the surface-scope treatment the
+other three now have.
