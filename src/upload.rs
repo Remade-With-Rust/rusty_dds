@@ -210,6 +210,22 @@ fn gpu_format_from_dxgi(format: DxgiFormat) -> Result<GpuFormat, Error> {
             bc("BC5_UNorm", "Bc5RgUnorm", "VK_FORMAT_BC5_UNORM_BLOCK", 16)
         }
         BC5_SNorm => bc("BC5_SNorm", "Bc5RgSnorm", "VK_FORMAT_BC5_SNORM_BLOCK", 16),
+        // BC6H was missing from this table entirely, which meant a format this
+        // crate can both decode and encode could not be handed to a GPU at all.
+        // Every consumer of `gpu_format` — the upload planner included — failed
+        // closed on HDR content with `UnsupportedFormat`.
+        BC6H_Typeless | BC6H_UF16 => bc(
+            "BC6H_UF16",
+            "Bc6hRgbUfloat",
+            "VK_FORMAT_BC6H_UFLOAT_BLOCK",
+            16,
+        ),
+        BC6H_SF16 => bc(
+            "BC6H_SF16",
+            "Bc6hRgbFloat",
+            "VK_FORMAT_BC6H_SFLOAT_BLOCK",
+            16,
+        ),
         BC7_Typeless | BC7_UNorm => bc(
             "BC7_UNorm",
             "Bc7RgbaUnorm",

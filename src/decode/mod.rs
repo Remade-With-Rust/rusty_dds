@@ -156,6 +156,23 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// rows, tightly packed at `width * 4` floats per pixel row. Use
     /// [`DdsBase::block_rows_f32`] for the count.
     ///
+    /// # Split only what is worth splitting
+    ///
+    /// **Do not split a whole mip chain.** Measured over a cooked 512^2 pack,
+    /// splitting every level across 24 threads is a **net 0.53x — slower than
+    /// serial** — because a ten-level chain is mostly small mips, and entering
+    /// `std::thread::scope` costs ~50 us even to spawn a single worker. That is
+    /// more than the entire decode of every level past mip 4.
+    ///
+    /// Split above roughly **16 384 blocks (512x512)** and decode the rest on
+    /// the calling thread. Same pack, same threads, that one rule turns 0.53x
+    /// into **1.35x**; at 1024^2 mip 0 the split alone is worth 6.8x.
+    ///
+    /// ```text
+    /// let blocks = w.div_ceil(4) * h.div_ceil(4);
+    /// if blocks >= 16_384 { /* fan out */ } else { /* decode here */ }
+    /// ```
+    ///
     /// ```no_run
     /// # use rusty_dds::{Dds, SubresourceId};
     /// # fn f(dds: &Dds) -> Result<(), rusty_dds::Error> {

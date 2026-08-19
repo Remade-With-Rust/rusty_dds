@@ -9,11 +9,14 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use rusty_dds::{Dds, DecodeContent, EncodeLayout};
+use rusty_dds::{
+    AlphaMode, D3D10ResourceDimension, Dds, DecodeContent, DxgiFormat, EncodeLayout,
+    NewDxgiParams, SubresourceId,
+};
 
 use crate::hash::{fnv1a, hash_2d, mix, Rng, FNV_OFFSET};
 use crate::provider::{SimError, SimResult};
-use crate::scenario::Tier;
+use crate::scenario::{Content, Tier};
 
 // ------------------------------------------------------------------ manifest
 
@@ -113,9 +116,7 @@ impl Pack {
                     let content = f
                         .next()
                         .ok_or_else(|| SimError("texture line missing content".into()))?;
-                    let content = DecodeContent::ALL_LDR
-                        .iter()
-                        .find(|c| c.name() == content)
+                    let content = Content::parse(content)
                         .map(|c| c.name())
                         .ok_or_else(|| SimError(format!("unknown content `{content}`")))?;
                     pack.textures.push(PackTexture {
@@ -238,11 +239,16 @@ fn cook_one(
     out: &Path,
 ) -> SimResult<PackTexture> {
     let content = tier.content_for(id);
-    let pixels = source_rgba8(content, id, size);
-    let layout = EncodeLayout::flat_2d(content, size, size)
-        .with_mips(mips)
-        .with_rdo(tier.rdo());
-    let dds = Dds::encode_from_rgba8(&pixels, layout)?;
+    let dds = match content {
+        Content::Ldr(c) => {
+            let pixels = source_rgba8(c, id, size);
+            let layout = EncodeLayout::flat_2d(c, size, size)
+                .with_mips(mips)
+                .with_rdo(tier.rdo());
+            Dds::encode_from_rgba8(&pixels, layout)?
+        }
+        Content::Hdr => cook_bc6h(id, size, mips)?,
+    };
 
     let mut bytes = Vec::new();
     dds.write(&mut bytes)?;
@@ -380,4 +386,173 @@ fn normalize(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
 
 fn enc_unit(v: f32) -> u8 {
     (((v * 0.5 + 0.5).clamp(0.0, 1.0)) * 255.0).round() as u8
+}
+
+// ----------------------------------------------------------------- HDR cook
+
+/// Cook one BC6H_UF16 texture with a full mip chain.
+///
+/// `Dds::encode_bc6h_uf16` produces a single-mip container, so the chain is
+/// assembled here: encode each level on its own, then splice the payloads into
+/// a container declared with the right mip count. `subresource_range` is the
+/// crate's own offset arithmetic, so the layout cannot drift from what the
+/// decoder and the upload planner expect.
+fn cook_bc6h(id: u32, size: u32, mips: u32) -> SimResult<Dds> {
+    let mut dds = Dds::new_dxgi(NewDxgiParams {
+        height: size,
+        width: size,
+        depth: None,
+        format: DxgiFormat::BC6H_UF16,
+        mipmap_levels: Some(mips),
+        array_layers: None,
+        caps2: None,
+        is_cubemap: false,
+        resource_dimension: D3D10ResourceDimension::Texture2D,
+        alpha_mode: AlphaMode::Straight,
+    })?;
+
+    let mut src = source_rgba_f32(id, size);
+    let (mut w, mut h) = (size, size);
+    for mip in 0..mips {
+        let enc = Dds::encode_bc6h_uf16(&src, w, h)?;
+        let range = dds.subresource_range(SubresourceId::mip_layer(mip, 0))?;
+        if range.len() != enc.data.len() {
+            return Err(SimError(format!(
+                "bc6h mip {mip} ({w}x{h}): container reserves {} bytes, encoder produced {}",
+                range.len(),
+                enc.data.len()
+            )));
+        }
+        dds.data[range].copy_from_slice(&enc.data);
+        if mip + 1 < mips {
+            let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+            src = box_filter_rgba_f32(&src, w, h, nw, nh);
+            w = nw;
+            h = nh;
+        }
+    }
+    Ok(dds)
+}
+
+/// Box-filter an RGBA f32 image to `(nw, nh)`. Averaging in linear light is the
+/// whole point of an HDR mip chain; doing it in any transfer curve would dim
+/// every highlight as the chain descends.
+fn box_filter_rgba_f32(src: &[f32], w: u32, h: u32, nw: u32, nh: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (nw * nh * 4) as usize];
+    let (sx, sy) = (w as f32 / nw as f32, h as f32 / nh as f32);
+    for y in 0..nh {
+        for x in 0..nw {
+            let (x0, x1) = ((x as f32 * sx) as u32, (((x + 1) as f32 * sx) as u32).min(w));
+            let (y0, y1) = ((y as f32 * sy) as u32, (((y + 1) as f32 * sy) as u32).min(h));
+            let mut acc = [0f32; 4];
+            let mut n = 0f32;
+            for yy in y0..y1.max(y0 + 1) {
+                for xx in x0..x1.max(x0 + 1) {
+                    let i = ((yy.min(h - 1) * w + xx.min(w - 1)) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += src[i + c];
+                    }
+                    n += 1.0;
+                }
+            }
+            let d = ((y * nw + x) * 4) as usize;
+            for c in 0..4 {
+                out[d + c] = acc[c] / n;
+            }
+        }
+    }
+    out
+}
+
+/// A procedural HDR sky: sun disc, horizon gradient, cloud noise.
+///
+/// The dynamic range is the point. A flat or low-range source lets BC6H settle
+/// into one endpoint mode for every block, which would make the decode look
+/// cheaper than any real probe or sky and quietly flatter the numbers.
+fn source_rgba_f32(id: u32, size: u32) -> Vec<f32> {
+    let seed = 0x6bc6_0000 ^ id as u64;
+    let n = (size * size) as usize;
+    let mut out = Vec::with_capacity(n * 4);
+    // Sun somewhere above the horizon, per texture.
+    let mut rng = Rng::new(seed);
+    let sun_x = 0.15 + rng.next_f32() * 0.7;
+    let sun_y = 0.05 + rng.next_f32() * 0.35;
+    for i in 0..n {
+        let x = (i as u32 % size) as f32 / size as f32;
+        let y = (i as u32 / size) as f32 / size as f32;
+
+        // Horizon gradient: bright near the ground, deep blue at zenith.
+        let t = y.clamp(0.0, 1.0);
+        let sky = [
+            0.35 + 1.4 * (1.0 - t).powi(3),
+            0.55 + 1.0 * (1.0 - t).powi(2),
+            1.10 + 0.4 * (1.0 - t),
+        ];
+
+        // Clouds, lit from the sun side.
+        let c = noise(seed ^ 0x51, x * 6.0, y * 6.0, 5);
+        let cloud = ((c - 0.45) * 3.2).clamp(0.0, 1.0);
+
+        // The sun: four orders of magnitude above the sky, which is what forces
+        // BC6H to actually use its range.
+        let d = ((x - sun_x).powi(2) + (y - sun_y).powi(2)).sqrt();
+        let sun = (0.004 / (d * d + 1e-5)).min(4000.0);
+
+        let mut px = [0f32; 4];
+        for c in 0..3 {
+            px[c] = sky[c] * (1.0 - 0.75 * cloud) + cloud * 2.2 + sun;
+        }
+        px[3] = 1.0;
+        out.extend_from_slice(&px);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenario::Content;
+
+    /// The HDR half of a pack must survive the same round trip as the LDR half:
+    /// cook, parse, and report a mip chain the upload planner can walk. Five
+    /// rounds of optimisation missed BC6H entirely because nothing cooked it.
+    #[test]
+    fn bc6h_cooks_a_walkable_mip_chain() {
+        let dds = cook_bc6h(8, 64, 7).expect("cook");
+        let mut bytes = Vec::new();
+        dds.write(&mut bytes).expect("write");
+
+        let view = rusty_dds::DdsView::parse(&bytes).expect("parse");
+        assert_eq!(view.get_num_mipmap_levels(), 7);
+        // The format must reach the GPU planner, not just the decoder. This is
+        // the check that would have caught BC6H missing from `gpu_format`.
+        let fmt = view.gpu_format().expect("bc6h must have a GPU format");
+        assert_eq!(fmt.dxgi_name, "BC6H_UF16");
+        assert_eq!(fmt.block_bytes, 16);
+
+        for mip in 0..7 {
+            let id = rusty_dds::SubresourceId::mip_layer(mip, 0);
+            view.upload_plan_compressed(id)
+                .unwrap_or_else(|e| panic!("mip {mip} has no upload plan: {e}"));
+            let img = view.decode_rgba_f32(id).expect("decode");
+            assert!(
+                img.pixels.iter().any(|&v| v > 1.0),
+                "mip {mip} carries no HDR range — the source is not exercising BC6H"
+            );
+        }
+    }
+
+    /// Tier content must round-trip through the manifest by name, HDR included.
+    #[test]
+    fn content_names_round_trip() {
+        for tier in [Tier::Ultra, Tier::High, Tier::Medium] {
+            for i in 0..64u32 {
+                let c = tier.content_for(i);
+                assert_eq!(Content::parse(c.name()), Some(c), "{:?} index {i}", tier);
+            }
+        }
+        // The top tiers must actually carry HDR, or the blind spot is back.
+        assert!((0..64).any(|i| Tier::Ultra.content_for(i).is_hdr()));
+        assert!((0..64).any(|i| Tier::High.content_for(i).is_hdr()));
+    }
 }

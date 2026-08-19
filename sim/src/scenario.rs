@@ -22,6 +22,42 @@ pub enum Tier {
     Medium,
 }
 
+/// What a pack texture holds.
+///
+/// The crate's `DecodeContent` covers LDR formats only — and that type being
+/// LDR-only is precisely how HDR stayed invisible to this harness. Anything
+/// that describes pack content has to name both domains or the gap reopens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    Ldr(DecodeContent),
+    /// BC6H UF16 — sky, reflection probes, lightmaps.
+    Hdr,
+}
+
+impl Content {
+    pub fn name(self) -> &'static str {
+        match self {
+            Content::Ldr(c) => c.name(),
+            Content::Hdr => "bc6h",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Content> {
+        if s == "bc6h" {
+            return Some(Content::Hdr);
+        }
+        DecodeContent::ALL_LDR
+            .iter()
+            .copied()
+            .find(|c| c.name() == s)
+            .map(Content::Ldr)
+    }
+
+    pub fn is_hdr(self) -> bool {
+        matches!(self, Content::Hdr)
+    }
+}
+
 impl Tier {
     pub fn parse(s: &str) -> Option<Tier> {
         match s {
@@ -51,8 +87,20 @@ impl Tier {
     }
 
     /// Format mix, cycled across the pack. Ultra is BC7-heavy; medium drops to
-    /// BC1/BC3 as the plan's tier table specifies.
-    pub fn content_for(self, index: u32) -> DecodeContent {
+    /// BC1/BC3 as the plan's tier table specifies, and the top two tiers carry
+    /// HDR sky and reflection probes.
+    pub fn content_for(self, index: u32) -> Content {
+        // One texture in sixteen is HDR: the sky and the reflection probes. That
+        // small fraction is exactly why BC6H went unprofiled for five rounds of
+        // optimisation — it is easy to forget a format the harness never cooks.
+        // Medium ships an LDR sky, as a medium-tier game would.
+        if matches!(self, Tier::Ultra | Tier::High) && index % 16 == 8 {
+            return Content::Hdr;
+        }
+        Content::Ldr(self.ldr_content_for(index))
+    }
+
+    fn ldr_content_for(self, index: u32) -> DecodeContent {
         let albedo = match self {
             Tier::Ultra => DecodeContent::Bc7,
             Tier::High => {

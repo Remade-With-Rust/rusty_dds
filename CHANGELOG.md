@@ -3,6 +3,34 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.2 — 2026-08-18
+
+**BC6H could not be uploaded to a GPU.** Wiring HDR content into the streaming
+simulator immediately failed on `open`, and the cause was in this crate: BC6H
+had no entry in the GPU format table at all. A format rusty_dds can decode *and*
+encode could not be handed to a renderer — `gpu_format`, and therefore
+`upload_plan_compressed`, failed closed with `UnsupportedFormat` on every HDR
+texture.
+
+This is the same blind spot 0.3.1 fixed one layer down: nothing in the harness
+cooked BC6H, so nothing ever asked to upload it.
+
+### Fixed
+
+- **`BC6H_UF16` / `BC6H_SF16` added to `gpu_format`** (`Bc6hRgbUfloat` /
+  `Bc6hRgbFloat`, `VK_FORMAT_BC6H_UFLOAT_BLOCK` / `..._SFLOAT_BLOCK`, 16-byte
+  blocks). HDR textures now plan uploads like any other compressed format.
+
+### Documentation
+
+- `decode_block_rows_f32_into` now states the split threshold, with the numbers
+  behind it. Splitting a **whole mip chain** across 24 threads measured **0.53x
+  — slower than serial** on a cooked 512^2 pack, because a ten-level chain is
+  mostly small mips and entering `std::thread::scope` costs ~50 us even for one
+  worker. Splitting only above ~16 384 blocks (512x512) turns the same pack into
+  **1.35x**. The 6.8x figure from 0.3.1 is mip 0 at 1024^2; both are true, and a
+  caller needs to know which one applies.
+
 ## 0.3.1 — 2026-08-18
 
 **BC6H, the last unoptimised decode.** Profiling the whole format matrix found

@@ -856,3 +856,89 @@ at*, because nothing pointed there.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim streams no HDR content at all, which is exactly how this went unseen.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §16 — Closing the loop: HDR in the harness
+
+§15 ended by naming the cause rather than the symptom: the simulator streams no
+HDR content, which is why five rounds never profiled the slowest decode we ship.
+This round fixes the harness, not the library — and the harness immediately
+found a library bug.
+
+### The pack now cooks BC6H
+
+`Tier::content_for` returns a new sim-level `Content` (LDR + HDR) rather than the
+crate's `DecodeContent`, which is LDR-only *by definition* — that type being
+LDR-only is structurally how HDR stayed invisible. One texture in sixteen on the
+top two tiers is now BC6H_UF16: the sky and the reflection probes, which is both
+realistic and exactly the small fraction that is easy to forget.
+
+`Dds::encode_bc6h_uf16` emits a single-mip container, so the chain is assembled
+in the cooker: encode each level, splice payloads at `subresource_range`. The
+source is a procedural HDR sky with a sun four orders of magnitude above the
+horizon — a low-range source would let BC6H settle into one endpoint mode per
+block and quietly flatter every number that follows.
+
+### What it found immediately: BC6H had no GPU format
+
+The first run failed on `open`. Not in the sim — in the crate. **BC6H was absent
+from `gpu_format` entirely**, so `upload_plan_compressed` failed closed on every
+HDR texture. rusty_dds could decode and encode a format it could not hand to a
+renderer.
+
+That is the whole argument for this round in one line: the gap was never going to
+be found by reading the code, because nothing was asking the question.
+
+### Parity holds with HDR in the pack
+
+900 frames of `traverse`, 32 textures at 512², both stacks:
+
+| arm | request hash | upload hash | uploaded | allocations |
+|---|---|---|---:|---:|
+| rusty_dds | `b869b26b98c929d0` | `9c28758ed5ce5689` | 2.84 MiB | 472 |
+| DirectXTex | `b869b26b98c929d0` | `9c28758ed5ce5689` | 2.84 MiB | 472 |
+
+Identical. The comparability gate that guards every board in this file now covers
+HDR content too.
+
+### The number that matters, and it is not 9.6×
+
+`probe_pack_hdr` decodes the cooked pack across the full mip chain. Splitting
+**every** level across 24 threads:
+
+**0.53× — slower than serial.**
+
+A ten-level chain is mostly small mips, and `std::thread::scope` costs ~50 µs
+even to spawn one worker — more than the entire decode of every level past mip 4.
+(That ~50 µs is the same per-thread figure as §15's 1.531 ms / 24 threads. The
+two measurements agree, which is why both are believable.)
+
+Splitting only above ~16 384 blocks — 512×512, the *same* crossover rusty_dds
+measured independently for BC7 — and decoding the rest inline:
+
+| cooked 512² pack, all mips | time | throughput |
+|---|---:|---:|
+| serial | 4.889 ms | 143.0 Mpx/s |
+| split above threshold | **3.634 ms** | **192.4 Mpx/s** |
+
+**1.35×**, every level bit-identical. That is the honest end-to-end figure. The
+9.6× from §15 is mip 0 at 1024²; both are true, and which one a studio feels
+depends entirely on their surface sizes. The threshold is now documented on
+`decode_block_rows_f32_into` with these numbers, because a caller who splits
+naively makes their decode *slower* and would have no way to know why.
+
+### The lesson worth keeping
+
+§15 said profile everything, not just what the harness exercises. This round adds
+the corrective: **a synthetic win is a hypothesis until the harness carries real
+content.** Nothing here refuted §15 — 1024² mip 0 really is 6.8× — but shipping
+that number alone would have handed studios a rule that loses them performance on
+every mip chain shorter than the headline.
+
+### Still open
+
+- The DirectXTex arm has no HDR *decode* comparison; the shim exposes
+  `dxt_decode_rgba8` only. Streaming and upload are compared 1:1, decode is not.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
