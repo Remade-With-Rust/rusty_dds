@@ -3,6 +3,67 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.21 - 2026-08-19
+
+**Encoder: the expensive BC7 mode-6 seeds are gated on residual error.** The
+search tries up to five endpoint seeds. Counted over 21 847 blocks, the two cheap
+ones win **93.6%** between them (74.3% + 19.3%); the three expensive extras - a
+mean-split pair and an **O(16^2) farthest-pair scan** - win **6.4%**.
+
+Dropping them outright was measured first, as the ceiling: **-0.0028 dB mean**
+across the BC7 corpus for a large speed saving, worst case -0.049 dB. That is a
+quality trade, and this encoder's mandate is faster *and* better - so instead the
+extras are gated on the error the cheap seeds left behind. A block the first two
+already fit well cannot be rescued by a third seed; a block they fit badly is
+exactly where the extras earn their cost.
+
+### Calibrated, not guessed
+
+The residual-error distribution over those 21 847 blocks:
+
+| gate | extras skipped | corpus quality |
+|---|---:|---|
+| SSE <= 64 | 29.5% | 0 worse |
+| **SSE <= 256** | **83.5%** | **0 worse** |
+| SSE <= 1024 | 96.4% | untested |
+
+A gate of 64 fires on only 29.5% of blocks and measured neutral. 256 skips
+**83.5%** of the extras - including that O(16^2) scan - and the full 102-case
+corpus reports:
+
+- **0 better, 98 same, 0 worse** on finite-PSNR cases
+- mean **-0.00004 dB**, worst **-0.0035 dB**
+- 4 lossless cases still lossless, 0 broken
+
+### Work removed, counted
+
+Deterministic, same probe and image, gate on against gate disabled:
+
+| | `fit_indices_mode6` | per block |
+|---|---:|---:|
+| baseline | 90 833 | 4.158 |
+| **gated** | **69 209** | **3.168** |
+
+**-23.8%.** With 0.3.20's refine reuse, the search has gone **5.14 -> 3.168 fits
+per block, -38.4%** across the two releases.
+
+### No timing claim
+
+This box runs 73% busy from other processes. Probes are now pinned (mask 0x3c,
+high priority), which cut probe spread from 23% to a still-wide 11-16%; a null
+A/B of one binary against itself spanned 68.93-80.37 ms. `fit_indices` is ~18% of
+BC7 encode by ceiling probe, so -23.8% of it is a few percent of encode - real,
+and under that floor. Ten-plus pinned samples per arm showed no separation, which
+is the expected result, not a contradiction.
+
+### Notes
+
+- **This is not byte-identical**: 20 of 102 corpus payloads change, all at equal
+  or better PSNR. The frozen-payload tests still pass - those fixtures do not
+  trip the gate, which is worth knowing about their coverage.
+- Every measurement probe under `sim/examples/` is now pinned before timing.
+- 97 tests pass, 90 on the scalar path.
+
 ## 0.3.20 - 2026-08-19
 
 **Encoder: the BC7 mode-6 refine reuses the winning fit.** The search evaluates

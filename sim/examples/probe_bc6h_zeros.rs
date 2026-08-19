@@ -39,6 +39,13 @@ fn time(bytes: &[u8]) -> f64 {
 }
 
 fn main() {
+    // Pin before measuring. This box runs 70%+ busy from other processes, and
+    // an unpinned probe competes with them for cores — which is why the same
+    // change has read +34.5% and +3.5% on consecutive runs. Mask 0x3c is four
+    // physical cores; HIGH_PRIORITY_CLASS keeps the scheduler off us.
+    let pinned = rusty_dds_sim::os::pin_process(0x3c, true);
+    eprintln!("[probe] pinned={pinned} mask=0x3c high_priority=true");
+
     let side = 512u32;
     let zero = |_x: f32, _y: f32| [0.0, 0.0, 0.0];
     let night = |x: f32, y: f32| {

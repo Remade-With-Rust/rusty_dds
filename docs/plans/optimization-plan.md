@@ -2600,3 +2600,77 @@ you removed, and bound what it was worth.**
   ceiling probe of its internals.
 - BC6H interpolation (§34) and the BC5 palette chain (§32).
 - **The box.**
+
+---
+
+## §38 — The box, the seed gate, and three instruments doing three jobs
+
+Three items, executed in order because each unblocked the next.
+
+### 1. The box was never noisy — it was 73% busy
+
+Four rounds of degraded measurement had one cause, and one command found it:
+**LoadPercentage 73** on 24 logical cores, with ~21 000 CPU-seconds of VS Code,
+5 301 of Task Manager, plus AWCC, Killer and Brave.
+
+The fix was already in this campaign's own toolkit and simply not applied: the
+sim harness pins (`0x3c` + HIGH_PRIORITY_CLASS), but **every crate-level probe ran
+unpinned**. All fifteen now pin before timing.
+
+Effect: probe spread 23% → 11-16%. Honest about the residual — a null A/B of one
+binary against itself still spanned 68.93-80.37 ms, so the pinned floor is ~11%,
+not the 3.5% the first quiet eight samples suggested. **Pinning improved the
+instrument; it did not fix the machine.**
+
+### 2. The seed gate — measured at every step
+
+Counters said the two cheap seeds win **93.6%** of blocks and the three expensive
+extras **6.4%**. Dropping the extras outright was measured *first*, as the
+ceiling: **-0.0028 dB mean, -0.049 dB worst** across the BC7 corpus. A trade,
+which the encoder's mandate forbids.
+
+So gate on residual error instead — and calibrate rather than guess:
+
+| gate | extras skipped | quality |
+|---|---:|---|
+| SSE <= 64 | 29.5% | 0 worse |
+| **SSE <= 256** | **83.5%** | **0 worse** |
+| SSE <= 1024 | 96.4% | untested |
+
+**64 fires on only 29.5% of blocks, which is exactly why it measured neutral** —
+a gate that rarely fires saves nothing, and that was visible in the distribution
+before any timing. 256 skips 83.5% including the O(16²) farthest-pair scan, and
+the full 102-case corpus reports 0 better / 98 same / 0 worse, mean -0.00004 dB.
+
+Work removed, counted deterministically: **90 833 → 69 209 fits, -23.8%.** With
+§37 that is **5.14 → 3.168 per block, -38.4%** across two releases.
+
+### 3. The farthest-pair scan folded into 2
+
+It was listed as the third target — ~17% of encode, an O(16²) scan. It lives
+*inside* the extras the gate now skips on 83.5% of blocks, so item 3 was
+delivered by item 2 rather than separately. Worth noting because the temptation
+was to attack it directly; the cheaper move was to stop calling it.
+
+### The method, stated once
+
+Three instruments, three different questions, none substitutable:
+
+| instrument | question | immune to a busy box |
+|---|---|---|
+| **counter** | did the work actually go away? | yes |
+| **ceiling probe** | what was that work worth? | mostly |
+| **corpus A/B (PSNR/FNV)** | did quality survive? | yes |
+| pinned timing | how much faster? | **no** |
+
+This round used the first three and refused the fourth. The timing column stayed
+empty on purpose: `fit_indices` is ~18% of encode, so -23.8% of it is a few
+percent, and the pinned floor is ~11%. **A number the machine decides is not a
+result, and an empty column is more honest than a friendly estimator.**
+
+### Still open
+
+- The gate at 1024 skips 96.4% and is untested for quality — the obvious next
+  calibration point, and cheap, since the quality gate is deterministic.
+- `quantize_7p` is ~11% of encode and has never had its internals probed.
+- **The box.** Pinning narrowed it; it did not fix it.

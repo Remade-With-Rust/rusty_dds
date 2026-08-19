@@ -10,6 +10,13 @@ use std::time::Instant;
 use rusty_dds::{AlphaMode, D3D10ResourceDimension, Dds, DxgiFormat, DdsView, NewDxgiParams, SubresourceId};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Pin before measuring. This box runs 70%+ busy from other processes, and
+    // an unpinned probe competes with them for cores — which is why the same
+    // change has read +34.5% and +3.5% on consecutive runs. Mask 0x3c is four
+    // physical cores; HIGH_PRIORITY_CLASS keeps the scheduler off us.
+    let pinned = rusty_dds_sim::os::pin_process(0x3c, true);
+    eprintln!("[probe] pinned={pinned} mask=0x3c high_priority=true");
+
     for &side in &[128u32, 256, 512] {
         let blocks = ((side / 4) * (side / 4)) as usize;
         let mut dds = Dds::new_dxgi(NewDxgiParams {

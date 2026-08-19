@@ -20,6 +20,13 @@ fn force_mode(blk: &mut [u8], mode: u32) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Pin before measuring. This box runs 70%+ busy from other processes, and
+    // an unpinned probe competes with them for cores — which is why the same
+    // change has read +34.5% and +3.5% on consecutive runs. Mask 0x3c is four
+    // physical cores; HIGH_PRIORITY_CLASS keeps the scheduler off us.
+    let pinned = rusty_dds_sim::os::pin_process(0x3c, true);
+    eprintln!("[probe] pinned={pinned} mask=0x3c high_priority=true");
+
     let side = 256u32; // serial, cache-resident: the decoder is the limit here
     println!("all-mode-N BC7, {side}x{side}, serial, into a recycled buffer\n");
     println!("{:<8} {:>12} {:>10}  {}", "mode", "ms/call", "Mpx/s", "shape");

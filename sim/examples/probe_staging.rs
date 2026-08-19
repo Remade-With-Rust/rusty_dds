@@ -10,6 +10,13 @@ use std::time::Instant;
 use rusty_dds_sim::hash::{bulk_hash, fnv1a_seed, FNV_OFFSET};
 
 fn main() {
+    // Pin before measuring. This box runs 70%+ busy from other processes, and
+    // an unpinned probe competes with them for cores — which is why the same
+    // change has read +34.5% and +3.5% on consecutive runs. Mask 0x3c is four
+    // physical cores; HIGH_PRIORITY_CLASS keeps the scheduler off us.
+    let pinned = rusty_dds_sim::os::pin_process(0x3c, true);
+    eprintln!("[probe] pinned={pinned} mask=0x3c high_priority=true");
+
     const N: usize = 1_397_760; // one 1024^2 BC7 payload
     let src = vec![0xA5u8; N];
     let mut dst = Vec::with_capacity(N);
