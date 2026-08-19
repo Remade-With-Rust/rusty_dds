@@ -2674,3 +2674,74 @@ result, and an empty column is more honest than a friendly estimator.**
   calibration point, and cheap, since the quality gate is deterministic.
 - `quantize_7p` is ~11% of encode and has never had its internals probed.
 - **The box.** Pinning narrowed it; it did not fix it.
+
+---
+
+## §39 — The timing verdict, and a probe that was serial but not representative
+
+§38 shipped the seed gate with the timing column deliberately empty. This closes
+it: **+8.33% median, 17/17 paired wins, z = +4.12.** Getting there took three
+fixes to the instrument and one refuted probe.
+
+### Three fixes, each necessary
+
+1. **Pin** (§38) — spread 23% → 11-16%. Not enough on its own.
+2. **Force the encoder serial in both arms.** A 512² surface is 16 384 blocks,
+   above `ENCODE_PARALLEL_MIN_BLOCKS`, so it strips across threads — and *total
+   process CPU* then varies with scheduling and work-stealing even for identical
+   work. A null A/B of one binary against itself spanned 14% in CPU time. Raising
+   the threshold in both arms removes threads from the measurement entirely.
+3. **Report CPU time, paired, with a z-score** — the campaign's own memory has
+   said "CPU is the robust verdict on this loaded box" since the encoder
+   campaign, and every probe I built measured wall.
+
+### The probe that was serial and still wrong
+
+The first serial probe used 128² × 7 mips and reported a **1.5% regression**
+(z = −1.53), after an earlier 128² × 1 reported −2.00. Two negative results for a
+change the counters said removed 23.8% of the work.
+
+The cause was not the instrument's *precision* but its *content*:
+
+| probe shape | gate fires on |
+|---|---:|
+| 128² × 7 mips | **9.8%** of blocks |
+| 512² × 10 mips | **78.2%** of blocks |
+
+Coarse sampling of the same procedural generator raises per-block error, so the
+small probe almost never triggers the gate — it was measuring the restructure
+overhead with none of the benefit. Same code, same format, same mip count
+policy; **different content statistics, opposite verdict.**
+
+Fixed by measuring the production shape with the threshold raised: 42.969 vs
+46.875 ms median, 17/17 wins, z = +4.12, **+8.33%**.
+
+### The lesson worth keeping
+
+**"Serial" and "pinned" make a probe precise. Neither makes it representative.**
+Three sections of this file have now been spent on instruments that were
+carefully controlled and pointed at the wrong thing — §30's constant index that
+folded its own arithmetic away, §35's dead-store duplicate, and this one.
+
+The check that catches all three is the same and takes one counter: **before
+trusting a probe, verify the code path you care about actually executes in it, at
+the rate it executes in production.** A gate that fires 9.8% of the time in your
+benchmark and 78.2% in reality is not a benchmark of that gate.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | −19.1% fits, ~3.4% of encode, unmeasurable |
+| 0.3.21 | residual-error seed gate | −23.8% fits, **+8.33% CPU, z = +4.12** |
+
+Together: **5.14 → 3.168 index fits per block (−38.4%)**, 0 of 102 corpus cases
+worse, mean −0.00004 dB.
+
+### Still open
+
+- The gate at SSE ≤ 1024 skips 96.4% of extras and is untested for quality; the
+  quality gate is deterministic, so it is cheap to settle.
+- `quantize_7p` is ~11% of encode and has never had its internals probed.
+- The box is still 73% busy. Pinning, forcing serial and pairing now make that
+  survivable rather than fixed.

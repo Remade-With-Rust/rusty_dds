@@ -52,13 +52,16 @@ fn main() {
     let mips = W.trailing_zeros() + 1;
 
     println!("{W}x{W} source, {mips} mips\n");
-    println!("{:<10} {:>10} {:>10} {:>12} {:>10}", "format", "ms", "allocs", "MiB alloc", "out KiB");
+    println!("{:<10} {:>10} {:>10} {:>10} {:>12} {:>10}", "format", "cpu_ms", "wall_ms", "allocs", "MiB alloc", "out KiB");
 
     for (name, content, iters) in [
         ("BC1", DecodeContent::Bc1, 10u32),
         ("BC3", DecodeContent::Bc3, 10),
         ("BC5U", DecodeContent::Bc5UNorm, 10),
-        ("BC7", DecodeContent::Bc7, 3),
+        // Windows process-CPU granularity is 15.625 ms. Enough iterations that
+        // one tick is a small fraction of the accumulated total, or the quantum
+        // becomes the measurement.
+        ("BC7", DecodeContent::Bc7, 24),
     ] {
         let layout = EncodeLayout::flat_2d(content, W, W).with_mips(mips);
         // Warm any lazily-built tables so the first call is not the sample.
@@ -66,15 +69,25 @@ fn main() {
         let out_len = warm.data.len();
 
         let (a0, b0) = snap();
+        // CPU time, not wall. This box runs 70%+ busy from other processes, and
+        // wall-clock here swings 2-3x run to run while the work does not change.
+        // Process CPU time counts only cycles this process was actually given,
+        // so contention shortens no arm and lengthens none.
+        let cpu0 = rusty_dds_sim::os::process_cpu_secs();
         let t = Instant::now();
         for _ in 0..iters {
             std::hint::black_box(Dds::encode_from_rgba8(&px, layout).expect("encode").data.len());
         }
         let ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let cpu_ms = match (cpu0, rusty_dds_sim::os::process_cpu_secs()) {
+            (Some(a), Some(b)) => (b - a) * 1e3 / iters as f64,
+            _ => f64::NAN,
+        };
         let (a1, b1) = snap();
         println!(
-            "{:<10} {:>10.2} {:>10.1} {:>12.2} {:>10}",
+            "{:<10} {:>10.2} {:>10.2} {:>10.1} {:>12.2} {:>10}",
             name,
+            cpu_ms,
             ms,
             (a1 - a0) as f64 / iters as f64,
             (b1 - b0) as f64 / iters as f64 / (1 << 20) as f64,

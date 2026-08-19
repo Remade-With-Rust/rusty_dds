@@ -47,14 +47,33 @@ Deterministic, same probe and image, gate on against gate disabled:
 **-23.8%.** With 0.3.20's refine reuse, the search has gone **5.14 -> 3.168 fits
 per block, -38.4%** across the two releases.
 
-### No timing claim
+### Speed: +8.3%, measured properly
 
-This box runs 73% busy from other processes. Probes are now pinned (mask 0x3c,
-high priority), which cut probe spread from 23% to a still-wide 11-16%; a null
-A/B of one binary against itself spanned 68.93-80.37 ms. `fit_indices` is ~18% of
-BC7 encode by ceiling probe, so -23.8% of it is a few percent of encode - real,
-and under that floor. Ten-plus pinned samples per arm showed no separation, which
-is the expected result, not a contradiction.
+This box runs 73% busy from other processes, so wall-clock and even process CPU
+under thread contention were both useless (a null A/B of one binary against
+itself spanned 68.93-80.37 ms). Three changes to the instrument made the verdict
+possible:
+
+1. **Pin** every probe (mask 0x3c, high priority).
+2. **Force the encoder serial** in both arms (`ENCODE_PARALLEL_MIN_BLOCKS` raised)
+   so thread scheduling leaves the measurement.
+3. **Report CPU time and compare paired**, with a win-rate and z-score rather
+   than trusting magnitudes.
+
+BC7 512^2 x 10 mips, pinned, forced serial, 20 paired samples:
+
+| | |
+|---|---|
+| gated median | **42.969 ms** |
+| baseline median | 46.875 ms |
+| **gated wins** | **17 / 17** (3 ties) |
+| **z** | **+4.12** |
+| **paired improvement** | **median +8.33%**, mean +7.74% |
+
+A first attempt measured a 1.5% *regression* — because it used a 128^2 x7 probe,
+which fires this gate on **9.8%** of blocks against **78.2%** at the production
+shape. It was measuring the restructure overhead with almost none of the
+benefit. A probe must be representative in *content*, not merely in format.
 
 ### Notes
 

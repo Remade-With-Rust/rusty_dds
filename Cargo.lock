@@ -2637,7 +2637,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty_dds"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "bcdec_rs",
  "bitflags 2.13.1",

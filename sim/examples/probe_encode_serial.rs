@@ -1,0 +1,56 @@
+//! Encode timing with the threads taken out of the measurement.
+//!
+//! **Build both arms with `ENCODE_PARALLEL_MIN_BLOCKS` raised to `usize::MAX`**
+//! (in `src/encode/blocks.rs`) so a production-sized surface encodes serially.
+//! That matters on a contended box: with strips, total process CPU varies with
+//! scheduling and work-stealing overhead even when the work is identical — 14%
+//! spread was observed for one binary against itself.
+//!
+//! It also matters that the surface be production-*shaped*, not merely serial.
+//! A 128^2 x7 probe fires the BC7 seed gate on 9.8% of blocks where 512^2 x10
+//! fires it on 78.2%, because coarse sampling of the same generator raises
+//! per-block error. Measuring the small shape reported a 1.5% REGRESSION for a
+//! change that is +8.3% at the real one.
+//!
+//! Report CPU time, not wall, and compare with a paired win-rate + z-score.
+
+use std::time::Instant;
+
+use rusty_dds::{Dds, DecodeContent, EncodeLayout};
+
+fn main() {
+    let pinned = rusty_dds_sim::os::pin_process(0x3c, true);
+    eprintln!("[probe] pinned={pinned}");
+
+    const W: u32 = 512; // 1024 blocks — below the parallel threshold
+    let n = (W * W) as usize;
+    let mut px = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let x = (i as u32 % W) as f32 / W as f32;
+        let y = (i as u32 / W) as f32 / W as f32;
+        let v = |a: f32| (a.clamp(0.0, 1.0) * 255.0) as u8;
+        px.extend_from_slice(&[
+            v(x + 0.2 * (y * 24.0).sin()),
+            v(y + 0.2 * (x * 18.0).cos()),
+            v(0.5 + 0.4 * ((x * 12.0).sin() * (y * 12.0).cos())),
+            v(0.6 + 0.4 * x * y),
+        ]);
+    }
+
+    let layout = EncodeLayout::flat_2d(DecodeContent::Bc7, W, W).with_mips(10);
+    let _ = Dds::encode_from_rgba8(&px, layout).expect("warm");
+
+    // Enough iterations that the 15.625 ms process-CPU quantum is noise.
+    const ITERS: usize = 12;
+    let c0 = rusty_dds_sim::os::process_cpu_secs();
+    let t = Instant::now();
+    for _ in 0..ITERS {
+        std::hint::black_box(Dds::encode_from_rgba8(&px, layout).expect("encode").data.len());
+    }
+    let wall = t.elapsed().as_secs_f64() * 1e3 / ITERS as f64;
+    let cpu = match (c0, rusty_dds_sim::os::process_cpu_secs()) {
+        (Some(a), Some(b)) => (b - a) * 1e3 / ITERS as f64,
+        _ => f64::NAN,
+    };
+    println!("{cpu:.4} {wall:.4}");
+}
