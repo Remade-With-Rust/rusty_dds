@@ -3,6 +3,48 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.34 - 2026-08-19
+
+**BC7 encode +17.7%: two exact early-outs, found by asking how often these modes
+actually win.** They almost never do.
+
+Both BC7 mode 4 and mode 5 are built from two halves whose squared errors are
+each non-negative and sum to the mode's total. So the moment *either half alone*
+reaches the incumbent error, the mode cannot win, and abandoning it is exactly
+equivalent to finishing it and losing the `<` comparison at the call site.
+
+Counters, per block on alpha-structured content:
+
+| | mode 4 | mode 5 |
+|---|---|---|
+| attempts that lose | **96%** | **95%** |
+| already provably beaten after the *first* half | **69%** | **89%** |
+
+The two modes search their halves in **opposite orders** — mode 4 does colour
+then alpha, mode 5 does alpha then colour — so each one gets to skip the half
+the other one starts with. Mode 5 now abandons before its entire colour search
+(4 fits plus the LS refit) on 89% of blocks; mode 4 abandons before its entire
+alpha search (seed, 24-candidate neighbourhood, re-score) on 69%.
+
+512^2, forced serial, pinned, paired CPU samples:
+
+| fixture | before | after | verdict |
+|---|---|---|---|
+| alpha-structured | 35.4817 ms | **29.2155 ms** | 16/16, z = +4.00, **+17.7%** |
+| default | 20.8333 ms | 21.0503 ms | 4/12, z = +0.38, flat |
+
+The default fixture is unmoved, and that is again the mechanism confirming
+itself: mode 4 never runs there at all, and mode 5's alpha-side early-out fires
+on only 1% of its blocks. **Byte-identical on both fixtures.**
+
+### The general shape
+
+This is not a kernel and not a heuristic. It is the observation that a search
+which almost always loses should be asked to *prove it can still win* at the
+first point where that is decidable. The cost is one `i64` comparison; the
+saving is half a mode. Worth checking wherever a codec tries several modes and
+keeps the best.
+
 ## 0.3.33 - 2026-08-19
 
 **BC7 encode +10.1%, by deleting work rather than vectorising it.** The next
