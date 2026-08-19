@@ -3,6 +3,35 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.26 - 2026-08-19
+
+**A vectorised nearest-palette scan for BC4/BC5 alpha.** The alpha path had no
+SIMD kernel at all - unlike BC1 and BC7, there was nothing in `simd.rs` for it.
+Sixteen samples against an eight-entry palette, scalar, ~2.4 candidate fits per
+alpha block.
+
+Now sixteen samples live in one `__m256i` as `i16` lanes and the eight entries
+are scanned with compare-and-blend, exactly as the BC1 and BC7 kernels do.
+
+BC5U 512^2 x 10 mips, pinned, forced serial, 16 paired CPU samples: **median
+7.812 ms against 10.417, 12/12 wins, z = +3.46, +19.64%.** BC4 shares the path.
+BC3 measures neutral - its alpha is a smaller share of the block now that 0.3.25
+gave its colour half +26%.
+
+### Notes
+
+- **Byte-identical.** The scalar scan uses a strict `<`, so the lowest index wins
+  a tie; `_mm256_cmpgt_epi16(best, cur)` is exactly `cur < best` and preserves
+  that. A new oracle checks 200 000 cases against the scalar scan, including
+  palettes with duplicate values where the tie-break is the whole question.
+- The caller's early abort now applies to the completed total. Error only
+  accumulates, so a prefix that would have tripped the limit leaves a total that
+  trips it too; acceptance is unchanged.
+- `AlphaSelect` remains for non-AVX2 targets. It exists to make the scalar scan
+  cheap by turning it into a threshold lookup; vectorised, the plain scan is
+  cheaper still and needs no selector built per candidate.
+- 99 tests pass.
+
 ## 0.3.25 - 2026-08-19
 
 **The BC1 AVX2 kernel too.** `bc1_fit_4color_avx2` had the identical defect

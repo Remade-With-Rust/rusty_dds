@@ -411,6 +411,22 @@ impl AlphaSelect {
 }
 
 /// Pack indices + SSE; returns `None` if SSE cannot beat `err_limit` (early abort).
+/// Pack endpoints plus sixteen 3-bit indices into the eight-byte alpha block.
+#[inline]
+fn pack_alpha_out(a0: u8, a1: u8, indices: &[u8; 16], err: i32) -> ([u8; 8], i32) {
+    let mut out = [0u8; 8];
+    out[0] = a0;
+    out[1] = a1;
+    let mut bits: u64 = 0;
+    for (i, idx) in indices.iter().enumerate() {
+        bits |= (*idx as u64) << (3 * i);
+    }
+    for b in 0..6 {
+        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
+    }
+    (out, err)
+}
+
 pub(super) fn pack_alpha_indices_err(
     a0: u8,
     a1: u8,
@@ -420,6 +436,19 @@ pub(super) fn pack_alpha_indices_err(
 ) -> Option<([u8; 8], i32)> {
     let mut indices = [0u8; 16];
     let mut err = 0i32;
+    // Vectorised nearest-palette scan: sixteen samples against eight entries in
+    // registers, no per-candidate selector to build. Byte-identical to the
+    // scalar scan below, which is its oracle.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if super::simd::has_avx2() {
+        let (ix, e) = super::simd::alpha_fit_avx2(palette, samples);
+        if e >= err_limit {
+            return None;
+        }
+        indices = ix;
+        err = e;
+        return Some(pack_alpha_out(a0, a1, &indices, err));
+    }
     if alpha_sel_enabled() {
         let order = if a0 > a1 { &ALPHA_ORDER6 } else { &ALPHA_ORDER4 };
         let sel = AlphaSelect::build(palette, order);
@@ -451,17 +480,7 @@ pub(super) fn pack_alpha_indices_err(
             }
         }
     }
-    let mut out = [0u8; 8];
-    out[0] = a0;
-    out[1] = a1;
-    let mut bits: u64 = 0;
-    for (i, idx) in indices.iter().enumerate() {
-        bits |= (*idx as u64) << (3 * i);
-    }
-    for b in 0..6 {
-        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
-    }
-    Some((out, err))
+    Some(pack_alpha_out(a0, a1, &indices, err))
 }
 
 /// Least-squares endpoints from current indices (6-lerp weights). Falls back to None on 4-lerp.

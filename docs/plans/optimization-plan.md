@@ -3083,3 +3083,72 @@ Six releases, five byte-identical, **zero of 102 corpus cases worse**.
 - `palette_mode6` (3.168 calls/block) is the last per-fit helper.
 - The BC4/BC5 alpha fit has not been examined for the same shape.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+
+---
+
+## §45 — BC4/BC5 alpha: not the same defect, but the same shape
+
+§44 ended by naming the BC4/BC5 alpha fit as the last place the
+vector-writes-array-scalar-reads pattern might hide. **It was not there** — the
+alpha path had no SIMD kernel at all, so there was no vector producer to stall
+against a scalar consumer.
+
+What it had instead was the *work* those kernels do, done scalar: sixteen samples
+against an eight-entry palette, ~2.4 candidate fits per alpha block.
+
+### Measured before written
+
+| probe (BC5U 512² x10, serial, pinned) | ms |
+|---|---:|
+| full | 9.11 |
+| per-sample selection stubbed | ~7.81 |
+
+~14% available. Smaller than the kernel wins, and for a reason worth recording:
+**`AlphaSelect` had already taken the obvious scalar win**, replacing the
+eight-entry scan with a threshold lookup built per candidate. The remaining
+headroom was what a threshold lookup still costs over doing nothing.
+
+### The result
+
+Sixteen samples in one `__m256i`, eight entries scanned with compare-and-blend:
+**BC5U 10.417 → 7.812 ms, 12/12 paired wins, z = +3.46, +19.64%**, byte-identical.
+
+More than the 14% ceiling suggested, because the vector form also retires the
+per-candidate `AlphaSelect::build` that the ceiling probe left running.
+
+BC3 measured **neutral** — its alpha is a smaller share of the block now that
+§44 gave its colour half +26%. Two rounds ago it would have gained; optimising
+one half of a format changes what the other half is worth.
+
+### The lesson worth keeping
+
+**A hand-optimised scalar path is evidence that the work is hot, not that it is
+finished.** `AlphaSelect` is a genuinely clever structure — dedupe, order,
+threshold — and its existence is why nobody looked again. It made the scan cheap
+enough to stop being obvious, and it was still 14% of the format.
+
+The question that found it was not "is this slow" but the §42 question: **how
+often does this run?** 2.4 fits per alpha block × 16 samples is 38 selections per
+block, whatever each one costs.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | -19.1% fits |
+| 0.3.21 | residual-error seed gate | +8.33% |
+| 0.3.22 | `quantize_7p` table | +7.26% |
+| 0.3.23 | statistics hoist | +2.67% |
+| 0.3.24 | register-resident BC7 index fit | +9.23% |
+| 0.3.25 | register-resident BC1/BC3 colour fit | +37.5% / +26.1% |
+| **0.3.26** | **vectorised BC4/BC5 alpha scan** | **+19.6%** |
+
+Seven releases, six byte-identical, **zero of 102 corpus cases worse**. Every
+format in the matrix now has a vectorised inner fit.
+
+### Still open
+
+- `palette_mode6` (3.168 calls/block) is the last per-fit helper without one.
+- BC6H encode has never been examined at all.
+- BC6H decode interpolation (§34) and the BC5 decode palette chain (§32), both
+  latency-shaped.

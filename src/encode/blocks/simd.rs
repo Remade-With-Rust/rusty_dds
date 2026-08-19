@@ -231,6 +231,60 @@ unsafe fn bc1_fit_4color_avx2_impl(
 }
 
 
+
+/// Nearest-palette selection for one BC4/BC5 alpha block: sixteen samples
+/// against an eight-entry palette, in registers.
+///
+/// The scalar path scans the eight entries per sample with a strict `<`, so the
+/// lowest index wins a tie; `_mm256_cmpgt_epi16(best, cur)` is exactly
+/// `cur < best` and preserves that. `AlphaSelect` exists to make the scalar scan
+/// cheap by turning it into a threshold lookup; vectorised, the plain scan is
+/// cheaper still and needs no selector built per candidate.
+///
+/// Returns the sixteen indices and the total squared error. The caller's early
+/// abort is applied to the completed total: error only accumulates, so a prefix
+/// that would have tripped the limit leaves a total that trips it too, and
+/// acceptance is unchanged.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_fit_avx2(palette: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_fit_avx2_impl(palette, samples) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_fit_avx2_impl(palette: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
+    use std::arch::x86_64::*;
+    // Sixteen samples as sixteen i16 lanes — one register.
+    let sv = _mm256_cvtepu8_epi16(_mm_loadu_si128(samples.as_ptr() as *const __m128i));
+    let mut best = _mm256_set1_epi16(i16::MAX);
+    let mut idx = _mm256_setzero_si256();
+
+    for (k, &p) in palette.iter().enumerate() {
+        let pv = _mm256_set1_epi16(p as i16);
+        // |p - s| fits i16 for u8 inputs, and abs keeps the square exact below.
+        let d = _mm256_abs_epi16(_mm256_sub_epi16(pv, sv));
+        let m = _mm256_cmpgt_epi16(best, d);
+        best = _mm256_blendv_epi8(best, d, m);
+        idx = _mm256_blendv_epi8(idx, _mm256_set1_epi16(k as i16), m);
+    }
+
+    // madd squares and folds adjacent pairs: eight i32 partial sums.
+    let sq = _mm256_madd_epi16(best, best);
+    let mut parts = [0i32; 8];
+    _mm256_storeu_si256(parts.as_mut_ptr() as *mut __m256i, sq);
+    let err: i32 = parts.iter().sum();
+
+    let mut iw = [0i16; 16];
+    _mm256_storeu_si256(iw.as_mut_ptr() as *mut __m256i, idx);
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = iw[i] as u8;
+    }
+    (out, err)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -261,6 +315,66 @@ mod oracle {
             let fast = super::fit_indices_mode6_avx2(&px, &pal);
             let slow = super::super::fit_indices_mode6_exhaustive(&px, &pal);
             assert_eq!(fast, slow, "case {case}");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn alpha_avx2_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        fn scalar(palette: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
+            let mut idx = [0u8; 16];
+            let mut err = 0i32;
+            for (i, &s) in samples.iter().enumerate() {
+                let mut best = 0u8;
+                let mut best_d = i32::MAX;
+                for (j, &p) in palette.iter().enumerate() {
+                    let d = (p as i32 - s as i32).abs();
+                    if d < best_d {
+                        best_d = d;
+                        best = j as u8;
+                    }
+                }
+                idx[i] = best;
+                let diff = palette[best as usize] as i32 - s as i32;
+                err += diff * diff;
+            }
+            (idx, err)
+        }
+        let mut state = 0xfeed_1234_9876_abcdu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..200_000u32 {
+            let mut pal = [0u8; 8];
+            let mut sm = [0u8; 16];
+            match case {
+                0 => {}
+                1 => {
+                    pal = [255; 8];
+                    sm = [255; 16];
+                }
+                // Duplicate palette values: the tie-break must keep the lowest index.
+                2 => {
+                    pal = [7, 7, 7, 7, 200, 200, 200, 200];
+                    sm = [7, 200, 100, 0, 255, 7, 200, 3, 9, 199, 201, 6, 8, 128, 64, 32];
+                }
+                _ => {
+                    let a = next().to_le_bytes();
+                    pal.copy_from_slice(&a);
+                    let b = next().to_le_bytes();
+                    let c = next().to_le_bytes();
+                    sm[..8].copy_from_slice(&b);
+                    sm[8..].copy_from_slice(&c);
+                }
+            }
+            assert_eq!(alpha_fit_avx2(&pal, &sm), scalar(&pal, &sm), "case {case}");
         }
     }
 
