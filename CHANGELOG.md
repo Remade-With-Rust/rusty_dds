@@ -54,9 +54,10 @@ copy then overwrote. `DdsView` does not copy; `read_into` reuses warm pages.
   and after, and the decode/encode matrices are unchanged.
 - MSRV remains 1.73. `Dds` keeps its name and its `data: Vec<u8>` field.
 
-## Unreleased
+### Also in 0.3.0 — the API and hardening pass
 
-API and hardening pass. The encoder's output is unchanged — byte-identical on
+Landed before the runtime campaign and released here for the first time. The
+encoder's output is unchanged — byte-identical on
 all 22 payload hashes in the new `tests/encode_determinism.rs`, verified
 against the 0.2.0 tree — but how it is *configured*, and how the parser behaves
 on bytes it did not create, both changed.
