@@ -3,6 +3,46 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.3 — 2026-08-18
+
+**The BC6H conversion tail.** With buffer restructuring exhausted, the only
+remaining cost in HDR decode was inside the block decoder. Splitting it apart
+showed `bcdec_rs::bc6h_float` is `bc6h_half` plus 48 half-to-float conversions
+carrying two branches each — 15.5% of the call. Taking the halves directly and
+converting them branchlessly recovers most of it.
+
+### Performance
+
+1024^2 BC6H_UF16, measured ABAB against the previous code, not against a
+remembered number:
+
+| | 0.3.2 | 0.3.3 |
+|---|---:|---:|
+| serial | 12.103 / 11.455 ms | **10.780 / 10.629 ms** |
+| 24-thread caller split | 1.839 / 1.888 ms | **1.605 / 1.607 ms** |
+| throughput, split | 555.5 / 570.3 Mpx/s | **653.2 / 652.6 Mpx/s** |
+
+Against Microsoft DirectXTex on a cooked HDR pack, all mips: **108.4 Mpx/s
+against 28.9 — 3.75x**, up from 3.30x, pixels verified equal first.
+
+Cumulative since 0.3.0, 1024^2 BC6H: **26.428 ms to 1.605 ms, 16.5x.**
+
+### Changed
+
+- `decode_rgba_f32` now calls `bcdec_rs::bc6h_half` and converts to `f32`
+  itself, with a branchless IEEE binary16 to binary32 conversion verified
+  exhaustively against the reference for **all 65 536 input bit patterns**,
+  including Inf, NaN, denormals and negative zero.
+
+### Notes
+
+- The conversion runs as its own tight pass, **not** folded into the strided
+  RGBA scatter. Fusing them is one pass instead of two and measured *slower*
+  (1.72 ms against 1.61 ms): 48 independent conversions vectorise, a strided
+  read/write with the conversion inline does not. Recorded in a code comment so
+  it is not retried.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.2 — 2026-08-18
 
 **BC6H could not be uploaded to a GPU.** Wiring HDR content into the streaming

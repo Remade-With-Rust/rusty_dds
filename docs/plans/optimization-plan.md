@@ -1019,3 +1019,88 @@ side of it.
   gap.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §18 — The conversion tail, and two refutations on the way
+
+§17 established that BC6H decode is ~100% the block decoder and that we are 3.3×
+ahead of DirectXTex. The goal for this round was the remaining time itself.
+
+### Where the tail was
+
+`bcdec_rs::bc6h_float` is `bc6h_half` into a `[u16; 48]` scratch, then 48 calls
+to a half-to-float converter carrying **two branches each**:
+
+| stage, 512², 16 384 blocks | time |
+|---|---:|
+| `bc6h_half` (block decode only) | 1.369 ms |
+| `bc6h_float` (+ 48 conversions) | 1.621 ms |
+| **conversion tail** | **0.251 ms — 15.5%** |
+
+Taking the halves ourselves and converting branchlessly recovers most of that.
+The conversion is verified exhaustively against the reference for **all 65 536
+input bit patterns**, which is the only honest bar for replacing a numeric
+primitive: Inf, NaN, denormals and negative zero all have exact bit patterns,
+and "it works on sky textures" is not a proof.
+
+### Refuted #1: fusing the conversion into the scatter
+
+The obvious next step is to convert *while* scattering to RGBA — one pass over
+the data instead of two. Measured, 1024² 24-thread: **1.72 ms fused against
+1.61 ms unfused.** Slower.
+
+48 independent conversions vectorise. A strided read (`s + i*3`) with a strided
+write (`d + i*4`) and the conversion inline does not, and the vectoriser is worth
+more than the pass it costs. This is the *same shape* as §14's refuted backward
+in-place widen: **fusing is not free when it defeats vectorisation.** Two
+refutations with one mechanism is a pattern, and it is now in a code comment at
+the site so the third attempt does not happen.
+
+### Refuted #2: my own first measurement
+
+The fused version was initially reported here as a **1.56× win**. It was not. That
+number came from comparing against a figure measured in an earlier session under
+different thermal and cache conditions, rather than running the two versions
+back to back. A controlled ABAB immediately showed the fused variant was a
+*regression*.
+
+This is §13's lesson — measure the profiler, not just with it — arriving as a
+mistake rather than as advice, in the same file that records the advice. Worth
+keeping visible: the discipline is not knowing the rule, it is running the A/B
+when you already believe you know the answer.
+
+Every figure in this section is from an ABAB against the immediately preceding
+code, on the same box, in the same session.
+
+### The result
+
+1024² BC6H_UF16:
+
+| | 0.3.2 | 0.3.3 |
+|---|---:|---:|
+| serial | 12.103 / 11.455 ms | **10.780 / 10.629 ms** |
+| 24-thread split | 1.839 / 1.888 ms | **1.605 / 1.607 ms** |
+| throughput | 555.5 / 570.3 Mpx/s | **653.2 / 652.6 Mpx/s** |
+
+Against DirectXTex on the cooked pack, all mips: **3.75×**, up from 3.30×.
+
+Cumulative since §15 opened this thread: **26.428 ms to 1.605 ms — 16.5×.**
+
+### What is left, honestly
+
+The tail is now spent. `bc6h_half` is 84% of the call and it is somebody else's
+code: a per-pixel bitstream read, a partition-set branch, and three
+interpolate-and-unquantize steps. Beating it means writing our own BC6H block
+decoder — specialising the single-subset modes (10–13), which have no partition
+table and contiguous index bits, and vectorising the 16-pixel interpolation.
+
+That is a real project, not a round. It is also **optional**: it would extend a
+3.75× lead over the reference implementation, not close a gap. Recording it as
+the next big swing rather than the next increment.
+
+### Still open
+
+- A specialised BC6H block decoder (above).
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
