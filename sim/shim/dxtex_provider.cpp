@@ -235,6 +235,58 @@ int dxt_decode_rgba8(const DxtTexture* tex, uint32_t mip, uint32_t layer, uint32
     return DXT_OK;
 }
 
+int dxt_decode_rgba_f32(const DxtTexture* tex, uint32_t mip, uint32_t layer, uint32_t face,
+                        float** out, size_t* out_floats) {
+    if (!tex || !out || !out_floats) {
+        return DXT_ERR_RANGE;
+    }
+    DxtSub sub{};
+    int rc = dxt_subresource(tex, mip, layer, face, &sub);
+    if (rc != DXT_OK) {
+        return rc;
+    }
+
+    Image src{};
+    src.width = sub.width;
+    src.height = sub.height;
+    src.format = tex->meta.format;
+    src.rowPitch = sub.row_pitch;
+    src.slicePitch = sub.len;
+    src.pixels = const_cast<uint8_t*>(sub.data);
+
+    ScratchImage dst;
+    HRESULT hr;
+    if (IsCompressed(tex->meta.format)) {
+        hr = Decompress(src, DXGI_FORMAT_R32G32B32A32_FLOAT, dst);
+    } else if (tex->meta.format == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+        hr = dst.InitializeFromImage(src);
+    } else {
+        hr = Convert(src, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_DEFAULT,
+                     TEX_THRESHOLD_DEFAULT, dst);
+    }
+    if (FAILED(hr)) {
+        return DXT_ERR_UNSUPPORTED;
+    }
+
+    const Image* img = dst.GetImage(0, 0, 0);
+    if (!img) {
+        return DXT_ERR_UNSUPPORTED;
+    }
+    const size_t row_floats = static_cast<size_t>(img->width) * 4;
+    const size_t tight = row_floats * img->height;
+    auto* buf = static_cast<float*>(::operator new(tight * sizeof(float), std::nothrow));
+    if (!buf) {
+        return DXT_ERR_ALLOC;
+    }
+    for (size_t y = 0; y < img->height; ++y) {
+        std::memcpy(buf + y * row_floats, img->pixels + y * img->rowPitch,
+                    row_floats * sizeof(float));
+    }
+    *out = buf;
+    *out_floats = tight;
+    return DXT_OK;
+}
+
 void dxt_free(uint8_t* p) {
     ::operator delete(p);
 }

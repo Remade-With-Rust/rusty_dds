@@ -111,6 +111,14 @@ pub trait OpenTexture: Send + Sync {
     /// DirectXTex arm is written against the final shape.
     fn decode_rgba8(&self, id: SubId) -> SimResult<Vec<u8>>;
 
+    /// Decode one HDR subresource to tightly packed RGBA `f32`.
+    ///
+    /// The harness could compare LDR decode 1:1 and not HDR, which is the same
+    /// asymmetry that let BC6H go unprofiled on both sides of the board.
+    fn decode_rgba_f32(&self, _id: SubId) -> SimResult<Vec<f32>> {
+        Err(SimError("this provider has no HDR decode".into()))
+    }
+
     /// Bytes this handle holds resident, for the pool's accounting.
     fn resident_bytes(&self) -> u64;
 
@@ -191,6 +199,10 @@ impl OpenTexture for RustyTexture {
 
     fn decode_rgba8(&self, id: SubId) -> SimResult<Vec<u8>> {
         Ok(DdsView::parse(&self.bytes)?.decode_rgba8(id.into())?.pixels)
+    }
+
+    fn decode_rgba_f32(&self, id: SubId) -> SimResult<Vec<f32>> {
+        Ok(DdsView::parse(&self.bytes)?.decode_rgba_f32(id.into())?.pixels)
     }
 
     fn resident_bytes(&self) -> u64 {

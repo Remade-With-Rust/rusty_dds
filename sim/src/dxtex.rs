@@ -101,6 +101,14 @@ extern "C" {
         out: *mut *mut c_uchar,
         out_len: *mut usize,
     ) -> c_int;
+    fn dxt_decode_rgba_f32(
+        tex: *const DxtTextureOpaque,
+        mip: u32,
+        layer: u32,
+        face: u32,
+        out: *mut *mut f32,
+        out_floats: *mut usize,
+    ) -> c_int;
     fn dxt_free(p: *mut c_uchar);
     fn dxt_close(tex: *mut DxtTextureOpaque);
     fn dxt_resident_bytes(tex: *const DxtTextureOpaque) -> u64;
@@ -235,6 +243,25 @@ impl OpenTexture for DxTexTexture {
         let v = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
         // SAFETY: `out` came from dxt_decode_rgba8 and is freed exactly once.
         unsafe { dxt_free(out) };
+        Ok(v)
+    }
+
+    fn decode_rgba_f32(&self, id: SubId) -> SimResult<Vec<f32>> {
+        let mut out: *mut f32 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        // SAFETY: handle live; both out-params valid.
+        let rc = unsafe {
+            dxt_decode_rgba_f32(self.handle, id.mip, id.layer, id.face, &mut out, &mut len)
+        };
+        check(rc, "decode_rgba_f32")?;
+        if out.is_null() {
+            return Err(SimError("DirectXTex: HDR decode returned no buffer".into()));
+        }
+        // SAFETY: the shim allocated `len` floats at `out`; copied out and freed
+        // through the shim's own deallocator, never Rust's.
+        let v = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+        // SAFETY: `out` came from dxt_decode_rgba_f32 and is freed exactly once.
+        unsafe { dxt_free(out as *mut c_uchar) };
         Ok(v)
     }
 

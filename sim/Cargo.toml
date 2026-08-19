@@ -100,3 +100,7 @@ codegen-units = 1
 # Line tables still give profilers and panics usable stacks at a fraction of the
 # size, which is all this harness ever needed.
 debug = "line-tables-only"
+
+[dev-dependencies]
+# Probes that time the decoder against the scatter around it.
+bcdec_rs = "0.2"

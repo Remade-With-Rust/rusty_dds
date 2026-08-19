@@ -23,9 +23,13 @@ fn main() {
     let build = shim.join("build");
     let libs = build.join("lib");
 
-    if !have_libs(&libs) {
-        try_cmake(&shim, &build);
-    }
+    // Always ask CMake to build. Gating this on "does the .lib exist" meant an
+    // edit to dxtex_provider.cpp silently did nothing — the rerun-if-changed
+    // above would re-run this script, and this script would then skip the build
+    // because a stale library was sitting there. A benchmark harness that
+    // quietly measures last week's peer code is worse than one that fails.
+    // CMake's own build is incremental, so this costs nothing when nothing moved.
+    try_cmake(&shim, &build);
     if !have_libs(&libs) {
         panic!(
             "\n\nThe DirectXTex shim is not built.\n\

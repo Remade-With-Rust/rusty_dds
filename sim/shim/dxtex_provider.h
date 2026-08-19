@@ -60,6 +60,12 @@ int dxt_subresource(const DxtTexture* tex, uint32_t mip, uint32_t layer, uint32_
 // Decompress/Convert to tightly packed RGBA8. Caller frees with dxt_free.
 int dxt_decode_rgba8(const DxtTexture* tex, uint32_t mip, uint32_t layer, uint32_t face,
                      uint8_t** out, size_t* out_len);
+// Decompress to tightly packed RGBA f32 — the HDR twin, for BC6H. Without this
+// the harness could compare LDR decode 1:1 but not HDR, which is exactly the
+// asymmetry that let BC6H go unmeasured on both sides. Caller frees with
+// dxt_free.
+int dxt_decode_rgba_f32(const DxtTexture* tex, uint32_t mip, uint32_t layer, uint32_t face,
+                        float** out, size_t* out_floats);
 void dxt_free(uint8_t* p);
 void dxt_close(DxtTexture* tex);
 // Bytes the handle itself holds resident (0 for the loader path, which owns none).

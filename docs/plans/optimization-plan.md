@@ -942,3 +942,80 @@ every mip chain shorter than the headline.
   `dxt_decode_rgba8` only. Streaming and upload are compared 1:1, decode is not.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §17 — "BC6H is slow" — slow against *what*?
+
+§16 shipped a 1.35× and left an honest note that BC6H decode runs at ~143 Mpx/s
+against BC1's 337. That reads as a problem. It was the wrong comparison, and the
+harness could not say so, because the DirectXTex shim exposed `dxt_decode_rgba8`
+and no HDR twin. LDR decode was compared 1:1 on both stacks; **HDR was compared
+on neither.**
+
+### First, where the time actually is
+
+Splitting the decode from the scatter around it, 512², 16 384 blocks:
+
+| stage | time | share |
+|---|---:|---:|
+| `bcdec_rs::bc6h_float` into scratch | 1.771 ms | ~100% |
+| scatter RGB→RGBA (measured alone) | 0.447 ms | hidden |
+| both together | 1.768 ms | — |
+
+The scatter is **free** — it retires in the decode's shadow. Every remaining
+millisecond is inside the block decoder, so no further buffer restructuring can
+touch it. That ruled out the entire class of fix §14 and §15 were made of, and
+pointed at either a SIMD BC6H decoder or a reality check. The reality check is
+cheaper and comes first.
+
+### The comparison that was missing
+
+Added `dxt_decode_rgba_f32` to the shim (`Decompress` to
+`R32G32B32A32_FLOAT`), and `decode_rgba_f32` to both providers. Pixels are
+asserted equal to 1e-3 before any timing — a speed number between two decoders
+that disagree is meaningless.
+
+| BC6H decode | rusty_dds | DirectXTex | ratio |
+|---|---:|---:|---:|
+| 512² mip 0 | 2.954 ms | 8.885 ms | **3.01×** |
+| 256² mip 1 | 0.612 ms | 2.291 ms | **3.75×** |
+| 128² mip 2 | 0.130 ms | 0.554 ms | **4.25×** |
+| all HDR, all mips | **7.268 ms** (96.2 Mpx/s) | 23.949 ms (29.2 Mpx/s) | **3.30×** |
+
+**We are 3.3× faster than Microsoft's own BC6H decoder, serial, before any
+split.** With the §15 caller-parallel seam at 1024² — 382 Mpx/s — the gap is
+roughly 13×.
+
+BC6H looked slow because it was measured against BC1: a *different format* doing
+a quarter of the work per block, not a different implementation. Fourteen modes,
+delta-coded endpoints and half-float conversion cost what they cost.
+
+### A build bug this turned up
+
+`sim/build.rs` gated the CMake invocation on `if !have_libs(&libs)`. The
+`rerun-if-changed` lines would correctly re-run the script when
+`dxtex_provider.cpp` changed, and the script would then **skip the build**
+because a stale `.lib` was already sitting there. Editing the peer's C++ did
+nothing, silently.
+
+For a benchmark harness that is worse than a hard failure: it measures last
+week's peer code and reports it as today's. CMake's build is incremental, so it
+is now always invoked.
+
+### The lesson worth keeping
+
+§13: measure the profiler. §15: profile everything, not just what the harness
+runs. §16: a synthetic win is a hypothesis until real content carries it. This
+round adds the one they all depend on: **a number without a peer is not a
+result.** "143 Mpx/s" was true, reproducible, correctly measured — and it
+supported exactly the wrong conclusion, because there was nothing on the other
+side of it.
+
+### Still open
+
+- A SIMD BC6H decoder is still the only remaining lever on decode, and it is now
+  clearly optional rather than urgent: it would extend a 3.3× lead, not close a
+  gap.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.

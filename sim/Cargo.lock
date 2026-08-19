@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_dds"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "bcdec_rs",
  "bitflags 2.13.1",
@@ -3810,6 +3810,7 @@ name = "rusty_dds_sim"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "bcdec_rs",
  "dioxus",
  "naga",
  "rusty_alloc-api",
