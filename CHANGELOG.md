@@ -3,6 +3,59 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.8 — 2026-08-19
+
+**Every BC7 mode now has a specialised decoder.** Modes 0, 2, 4 and 5 join 1, 3,
+6 and 7; `bcdec_rs::bc7` is now reached only for the reserved encoding, which it
+zero-fills per spec.
+
+### Performance
+
+Per mode, isolated on all-mode-N surfaces, alternating-order ABBA:
+
+| mode | general | specialised | |
+|---|---:|---:|---|
+| 4 | 146.7 Mpx/s | 253.8 | **+73%** |
+| 5 | 158.2 | 261.0 | **+65%** |
+| 7 | 164.6 | 250.4 | +52% |
+| 3 | 180.3 | 248.7 | +38% |
+| 1 | 187.9 | 245.7 | +31% |
+| 2 | 163.4 | 202.1 | +24% |
+| 0 | 158.4 | 194.1 | +22% |
+| 6 | 205.9 | ~244 | +18% |
+
+On a real 192-texture pack at 256^2: **207.8 -> 223.0 Mpx/s, +7.3%**, four ABBA
+samples per arm with no overlap. That is the honest whole-content figure; the
+pack is 88% mode 6, which was already specialised, so most of the gain here comes
+from mode 5 at 9.4% share.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC7 503.5 vs 58.4 Mpx/s
+(8.62x)**, and **6.30x** across all formats.
+
+### Fixed
+
+- **Dispatch.** Chaining eight per-mode probes with `||`, each `#[inline]`,
+  measured **8-10% slower on real content** than before modes 0/2/4/5 existed —
+  a net regression despite every isolated mode being faster. Eight inlined
+  decoders blow the block loop's instruction footprint, and a mode-5 block paid
+  seven failed probes before being claimed. Now one `trailing_zeros` and a
+  `match` (a jump table), with the decoders out of line.
+
+  The per-mode benchmarks could not see this: each exercises one decoder and
+  never pays for the other seven being resident.
+
+### Notes
+
+- Corrects 0.3.6's note that mode 5 does not benefit from specialisation. It
+  does — by 65%. The earlier attempt resolved the rotation with a conditional
+  swap **inside** the per-pixel loop; hoisting it into a channel map computed
+  once is the whole difference.
+- Verified bit-identical to the general decoder for every mode: all partitions
+  each mode can address (16 for mode 0, 64 for modes 1/2/3/7), every rotation and
+  index-selection combination for modes 4 and 5, plus all-zero and all-ones
+  payloads. Partition tables asserted against the spec constants.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.7 — 2026-08-19
 
 **Specialised BC7 decoder for mode 7**, the last two-subset mode and the first

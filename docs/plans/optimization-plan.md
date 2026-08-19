@@ -1507,3 +1507,85 @@ the negative before trusting it.
 - **Modes 0 and 2** (152.5, 162.2): three subsets. The partition lookup is wider
   but the index chain is identical, so the mechanism should still apply.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §24 — All eight modes, and the regression that only real content could see
+
+§23 predicted every remaining BC7 mode would reach ~250 Mpx/s on specialisation,
+and named mode 5 — refuted in §21 — as the largest win left. Both held.
+
+### The results
+
+Isolated, all-mode-N surfaces, alternating-order ABBA:
+
+| mode | general | specialised | gain |
+|---|---:|---:|---:|
+| 4 | 146.7 Mpx/s | 253.8 | **+73%** |
+| 5 | 158.2 | 261.0 | **+65%** |
+| 7 | 164.6 | 250.4 | +52% |
+| 3 | 180.3 | 248.7 | +38% |
+| 1 | 187.9 | 245.7 | +31% |
+| 2 | 163.4 | 202.1 | +24% |
+| 0 | 158.4 | 194.1 | +22% |
+| 6 | 205.9 | ~244 | +18% |
+
+The prediction was right with one refinement: **one- and two-subset modes land at
+~245-260; three-subset modes plateau at ~200.** Modes 0 and 2 carry a two-bit
+subset index per pixel and six endpoints, and that part is irreducible.
+
+### §21 is closed, correctly this time
+
+Mode 5 gains **65%**. The §21 code was slow because it resolved the rotation with
+a conditional `swap` inside the per-pixel loop — a branch and two bounds-checked
+indexed accesses, sixteen times a block. Mode 4, the same family, made this
+unmissable: hoisting the rotation into a channel map computed once took it from
+146.7 to 253.8.
+
+Three sections were needed to unwind one wrong conclusion. §21 measured
+correctly and generalised from one implementation to the whole idea; §22
+suspected it; §23 made it near-certain from the shape of the data; §24 proves it.
+The measurement was never the problem. **The inference from it was**, and no
+amount of re-measuring the same code would have found that.
+
+### The regression only real content could see
+
+With all eight written and chained as `||` probes, each `#[inline]`, the real
+192-texture pack got **8-10% slower** than before modes 0/2/4/5 existed. Every
+isolated mode was faster; the integration was a net loss.
+
+Two causes, both invisible to the per-mode benchmark:
+
+1. Eight decoders inlined into one dispatch blow the block loop's instruction
+   footprint. An all-mode-N benchmark only ever exercises one of them and never
+   pays for the other seven being resident.
+2. An `||` chain is sequential. A mode-5 block paid seven failed probes first.
+
+Fixed with one `trailing_zeros` and a `match` — a jump table — and the decoders
+left out of line. Real content then goes **207.8 -> 223.0 Mpx/s, +7.3%**, four
+ABBA samples per arm, no overlap.
+
+**This is the exact inverse of §20's lesson.** There, an optimisation was real
+but invisible at the only size being tested. Here, eight optimisations were each
+real in isolation and *harmful together*. A benchmark that isolates the thing you
+changed cannot see what the change costs everything else.
+
+### Where BC7 decode stands
+
+All eight modes specialised; `bcdec_rs::bc7` is now reached only for the reserved
+encoding. Against Microsoft DirectXTex on a cooked 1024² pack: **BC7 503.5 vs
+58.4 Mpx/s — 8.62x** — and **6.30x** across all formats.
+
+### The lesson worth keeping
+
+Isolation tells you whether a change is faster. Integration tells you whether it
+is worth having. **Both are required, and they can disagree in either
+direction.** This file now contains one case of each, three sections apart.
+
+### Still open
+
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+- BC1-BC5 have no per-mode structure to exploit, but they run through the same
+  `bcdec_rs` bitstream. Whether the same index-read argument applies to them has
+  not been measured.

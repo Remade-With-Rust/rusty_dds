@@ -418,26 +418,45 @@ fn blit_rg_to_rgba(
 
 // --------------------------------------------------------------- BC7 mode 6
 
-// A mode-5 fast path was written, verified bit-identical to the general decoder
-// across all four rotations x 10 000 randomised blocks, and REFUTED on speed:
-// neutral at every size, even on a synthetic surface where 100% of blocks are
-// mode 5 (128^2: 157.2 vs 158.9 Mpx/s; 256^2: 158.9 vs 164.3, four ABBA samples
-// each). Mode 5 is only ~9% of real blocks, so it could never have shown in a
-// whole-surface measurement either. Whatever mode 6 gains below, it is not
-// "specialisation" in general — do not assume modes 1/3 will pay without
-// measuring them the same way.
+// Every BC7 mode now has a specialised decoder. An earlier mode-5 attempt
+// measured neutral and was recorded here as refuting the whole approach; that
+// was wrong. The approach is sound and the code was not — it resolved the
+// rotation with a conditional swap inside the per-pixel loop. See
+// `bc7_mode5_block` for the correction and the numbers.
 
-/// Dispatch a block to whichever specialised decoder claims it.
+/// Dispatch a block to its specialised decoder.
 ///
-/// Ordered by measured share: mode 6 is ~88% of blocks, mode 1 the next largest
-/// two-subset mode. Returns `false` when no fast path applies, so the caller
-/// falls back to the general decoder.
+/// BC7 encodes the mode in unary in the low bits of byte 0, so the mode number
+/// is one `trailing_zeros`. Branching on it directly gives the compiler a jump
+/// table; an `||` chain of eight per-mode probes does not, and costs a
+/// mode-5 block seven failed checks before it is claimed.
+///
+/// The per-mode decoders are deliberately **not** `#[inline]`. Inlining all
+/// eight into this one function was measured at 8-10% *slower* on real content
+/// than calling them out of line: the block loop is hot and small, and eight
+/// inlined decoders blow its instruction footprint. The isolated per-mode
+/// benchmarks could not see this, because each one only ever exercises a single
+/// decoder and never pays for the other seven being resident.
+///
+/// Returns `false` for the reserved encoding, which falls through to the
+/// general decoder to be zero-filled per spec.
 #[inline]
 fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
-    bc7_mode6_block(blk, out, pitch)
-        || bc7_mode1_block(blk, out, pitch)
-        || bc7_mode3_block(blk, out, pitch)
-        || bc7_mode7_block(blk, out, pitch)
+    if blk[0] == 0 {
+        // Reserved: no mode bit set in the low byte.
+        return false;
+    }
+    match blk[0].trailing_zeros() {
+        0 => bc7_mode0_block(blk, out, pitch),
+        1 => bc7_mode1_block(blk, out, pitch),
+        2 => bc7_mode2_block(blk, out, pitch),
+        3 => bc7_mode3_block(blk, out, pitch),
+        4 => bc7_mode4_block(blk, out, pitch),
+        5 => bc7_mode5_block(blk, out, pitch),
+        6 => bc7_mode6_block(blk, out, pitch),
+        7 => bc7_mode7_block(blk, out, pitch),
+        _ => false,
+    }
 }
 
 /// Subset assignment for BC7's 64 two-subset partitions: bit `p` set means
@@ -497,7 +516,6 @@ fn bc7_p2_index_at(p: usize, fixup: usize, bits: u32) -> (u32, u32) {
 /// parallel.
 ///
 /// Returns `false` if the block is not mode 1.
-#[inline]
 fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0x3 != 0x2 {
         return false;
@@ -550,7 +568,6 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 /// opaque alpha. Same argument as [`bc7_mode1_block`].
 ///
 /// Returns `false` if the block is not mode 3.
-#[inline]
 fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0xf != 0x8 {
         return false;
@@ -601,7 +618,6 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 /// opaque.
 ///
 /// Returns `false` if the block is not mode 7.
-#[inline]
 fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] != 0x80 {
         return false;
@@ -706,6 +722,517 @@ mod bc7_mode7_tests {
         // The reserved encoding must be declined too.
         let mut px = [0u8; 64];
         assert!(!bc7_mode7_block(&[0u8; 16], &mut px, 16));
+    }
+}
+
+/// Bit offset and width of pixel `p`s index in a single-subset mode with
+/// `bits`-wide indices. Only pixel 0 is a fix-up, so this is simpler than the
+/// two-subset form but serves the same purpose: independent extractions.
+#[inline(always)]
+fn bc7_p1_index_at(p: usize, bits: u32) -> (u32, u32) {
+    let off = bits as usize * p - usize::from(p > 0);
+    let w = bits - u32::from(p == 0);
+    (off as u32, w)
+}
+
+/// Decode one mode 4 BC7 block straight to RGBA8.
+///
+/// One subset, RGB 5.5.5 with 6-bit alpha, no p-bits, a rotation, and **two**
+/// index sets — a 2-bit set and a 3-bit set — with an index-selection bit
+/// choosing which drives colour and which drives alpha.
+///
+/// This is the family my first mode 5 attempt handled badly. The lesson applied
+/// here: the rotation is resolved **once**, into a channel map, rather than as a
+/// conditional swap inside the per-pixel loop. A dynamic `swap` on every pixel
+/// costs a branch and a pair of bounds-checked indexed accesses sixteen times
+/// over, which was enough to eat the gain the independent index reads produced.
+///
+/// Returns `false` if the block is not mode 4.
+fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] & 0x1f != 0x10 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let rotation = ((b >> 5) & 0x3) as usize;
+    let isb = ((b >> 7) & 1) != 0;
+
+    // Colour is 5 bits with no p-bit: shift the MSB to bit 7 and replicate the
+    // top three bits down. Alpha is 6 bits, likewise with two.
+    let c = |shift: u32| {
+        let t = (((b >> shift) & 0x1f) as u32) << 3;
+        t | (t >> 5)
+    };
+    let a = |shift: u32| {
+        let t = (((b >> shift) & 0x3f) as u32) << 2;
+        t | (t >> 6)
+    };
+    let e0 = [c(8), c(18), c(28), a(38)];
+    let e1 = [c(13), c(23), c(33), a(44)];
+
+    // Two index regions: the 2-bit set at bit 50, the 3-bit set at bit 81.
+    let i2 = b >> 50;
+    let i3 = b >> 81;
+
+    // Resolve the rotation once. `map[k]` is the output byte that computed
+    // channel `k` belongs in; the rotation swaps alpha with one colour channel.
+    let mut map = [0usize, 1, 2, 3];
+    if rotation != 0 {
+        map.swap(3, rotation - 1);
+    }
+
+    for p in 0..16usize {
+        let (o2, w2) = bc7_p1_index_at(p, 2);
+        let (o3, w3) = bc7_p1_index_at(p, 3);
+        let wa = BC7_WEIGHTS2[((i2 >> o2) & ((1u128 << w2) - 1)) as usize];
+        let wb = BC7_WEIGHTS3[((i3 >> o3) & ((1u128 << w3) - 1)) as usize];
+        // The index-selection bit decides which set drives colour and which
+        // drives alpha; it does not change what the sets are.
+        let (wc, walpha) = if isb { (wb, wa) } else { (wa, wb) };
+
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o + map[0]] = ((e0[0] * (64 - wc) + e1[0] * wc + 32) >> 6) as u8;
+        out[o + map[1]] = ((e0[1] * (64 - wc) + e1[1] * wc + 32) >> 6) as u8;
+        out[o + map[2]] = ((e0[2] * (64 - wc) + e1[2] * wc + 32) >> 6) as u8;
+        out[o + map[3]] = ((e0[3] * (64 - walpha) + e1[3] * walpha + 32) >> 6) as u8;
+    }
+    true
+}
+
+#[cfg(test)]
+mod bc7_mode4_tests {
+    use super::bc7_mode4_block;
+
+    /// Every rotation crossed with both index-selection values. Those two fields
+    /// interact — the selection bit decides which weight a channel takes, the
+    /// rotation decides where that channel lands — so neither can be verified
+    /// alone.
+    #[test]
+    fn mode4_matches_the_general_decoder() {
+        let mut state = 0xfeed_face_dead_10ccu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for rotation in 0..4u8 {
+            for isb in 0..2u8 {
+                for case in 0..3_000 {
+                    let mut raw = [0u8; 16];
+                    match case {
+                        0 => {}
+                        1 => raw.iter_mut().for_each(|x| *x = 0xff),
+                        _ => {
+                            let (x, y) = (next(), next());
+                            raw[..8].copy_from_slice(&x.to_le_bytes());
+                            raw[8..].copy_from_slice(&y.to_le_bytes());
+                        }
+                    }
+                    // Mode 4 in the low five bits, rotation at 5..7, selection at 7.
+                    raw[0] = 0x10 | (rotation << 5) | (isb << 7);
+
+                    let mut ours = [0u8; 64];
+                    assert!(
+                        bc7_mode4_block(&raw, &mut ours, 16),
+                        "rot {rotation} isb {isb} not recognised"
+                    );
+                    let mut theirs = [0u8; 64];
+                    bcdec_rs::bc7(&raw, &mut theirs, 16);
+                    assert_eq!(
+                        ours, theirs,
+                        "mode 4, rotation {rotation}, isb {isb}, case {case} diverged"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn other_modes_are_declined() {
+        for mode in 0..8u32 {
+            for rot in 0..4u8 {
+                for isb in 0..2u8 {
+                    let mut blk = [0u8; 16];
+                    blk[0] = (1u8 << mode) | (rot << 5) | (isb << 7);
+                    // Mode 4 occupies bits 0..5; rotation and selection live
+                    // above it and must never be read as part of the mode.
+                    let mut px = [0u8; 64];
+                    let expect = mode == 4;
+                    assert_eq!(
+                        bc7_mode4_block(&blk, &mut px, 16),
+                        expect,
+                        "mode {mode} rot {rot} isb {isb}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Subset assignment for BC7s 64 three-subset partitions, two bits per
+/// pixel in raster order. Derived from the spec table.
+const BC7_P3_SUBSET: [u32; 64] = [
+    0xaa685050, 0x6a5a5040, 0x5a5a4200, 0x5450a0a8,
+    0xa5a50000, 0xa0a05050, 0x5555a0a0, 0x5a5a5050,
+    0xaa550000, 0xaa555500, 0xaaaa5500, 0x90909090,
+    0x94949494, 0xa4a4a4a4, 0xa9a59450, 0x2a0a4250,
+    0xa5945040, 0x0a425054, 0xa5a5a500, 0x55a0a0a0,
+    0xa8a85454, 0x6a6a4040, 0xa4a45000, 0x1a1a0500,
+    0x0050a4a4, 0xaaa59090, 0x14696914, 0x69691400,
+    0xa08585a0, 0xaa821414, 0x50a4a450, 0x6a5a0200,
+    0xa9a58000, 0x5090a0a8, 0xa8a09050, 0x24242424,
+    0x00aa5500, 0x24924924, 0x24499224, 0x50a50a50,
+    0x500aa550, 0xaaaa4444, 0x66660000, 0xa5a0a5a0,
+    0x50a050a0, 0x69286928, 0x44aaaa44, 0x66666600,
+    0xaa444444, 0x54a854a8, 0x95809580, 0x96969600,
+    0xa85454a8, 0x80959580, 0xaa141414, 0x96960000,
+    0xaaaa1414, 0xa05050a0, 0xa0a5a5a0, 0x96000000,
+    0x40804080, 0xa9a8a9a8, 0xaaaaaa44, 0x2a4a5254,
+];
+
+/// Pixel indices carrying the fix-up index for subsets 1 and 2, per
+/// partition. Subset 0s fix-up is always pixel 0. All three store one bit
+/// fewer, so all three shorten the index stream.
+const BC7_P3_ANCHOR: [[u8; 2]; 64] = [
+    [ 3,15], [ 3, 8], [15, 8], [15, 3], [ 8,15], [ 3,15], [15, 3], [15, 8],
+    [ 8,15], [ 8,15], [ 6,15], [ 6,15], [ 6,15], [ 5,15], [ 3,15], [ 3, 8],
+    [ 3,15], [ 3, 8], [ 8,15], [15, 3], [ 3,15], [ 3, 8], [ 6,15], [10, 8],
+    [ 5, 3], [ 8,15], [ 8, 6], [ 6,10], [ 8,15], [ 5,15], [15,10], [15, 8],
+    [ 8,15], [15, 3], [ 3,15], [ 5,10], [ 6,10], [10, 8], [ 8, 9], [15,10],
+    [15, 6], [ 3,15], [15, 8], [ 5,15], [15, 3], [15, 6], [15, 6], [15, 8],
+    [ 3,15], [15, 3], [ 5,15], [ 5,15], [ 5,15], [ 8,15], [ 5,15], [10,15],
+    [ 5,15], [10,15], [ 8,15], [13,15], [15, 3], [12,15], [ 3,15], [ 3, 8],
+];
+
+/// Bit offset and width of pixel `p`s index in a three-subset mode. Fix-ups sit
+/// at pixel 0 and at the two anchors, and each stores one bit fewer.
+#[inline(always)]
+fn bc7_p3_index_at(p: usize, anchors: [u8; 2], bits: u32) -> (u32, u32) {
+    let (a1, a2) = (anchors[0] as usize, anchors[1] as usize);
+    let short = usize::from(p > 0) + usize::from(p > a1) + usize::from(p > a2);
+    let off = bits as usize * p - short;
+    let w = bits - u32::from(p == 0 || p == a1 || p == a2);
+    (off as u32, w)
+}
+
+/// Decode one mode 0 BC7 block straight to RGBA8.
+///
+/// Three subsets, a 4-bit partition (so only the first 16 partitions are
+/// reachable), RGB 4.4.4 endpoints with a unique p-bit each, 3-bit indices,
+/// opaque alpha.
+///
+/// Three subsets means three fix-up indices rather than two, so the index stream
+/// is three bits shorter than a naive layout and the general decoder is even
+/// more dependent on its stateful cursor to walk it. The offsets are still
+/// arithmetic, so the sixteen reads still become independent.
+///
+/// Returns `false` if the block is not mode 0.
+fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] & 0x1 != 0x1 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    // Mode 0 carries only four partition bits.
+    let partition = ((b >> 1) & 0xf) as usize;
+    // 4 bits plus a unique p-bit is 5; shift the MSB to bit 7 and replicate the
+    // top three bits into the vacated ones.
+    let ep = |shift: u32, pbit_shift: u32| {
+        let v = ((((b >> shift) & 0xf) as u32) << 1) | (((b >> pbit_shift) & 1) as u32);
+        let t = v << 3;
+        t | (t >> 5)
+    };
+    // Component-major: R0..R5, G0..G5, B0..B5, then six p-bits.
+    let e = [
+        [ep(5, 77), ep(29, 77), ep(53, 77)],
+        [ep(9, 78), ep(33, 78), ep(57, 78)],
+        [ep(13, 79), ep(37, 79), ep(61, 79)],
+        [ep(17, 80), ep(41, 80), ep(65, 80)],
+        [ep(21, 81), ep(45, 81), ep(69, 81)],
+        [ep(25, 82), ep(49, 82), ep(73, 82)],
+    ];
+
+    let subsets = BC7_P3_SUBSET[partition];
+    let anchors = BC7_P3_ANCHOR[partition];
+    let idx = b >> 83;
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p3_index_at(p, anchors, 3);
+        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize];
+        let s = ((subsets >> (2 * p)) & 0x3) as usize * 2;
+        let (a, c) = (&e[s], &e[s + 1]);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
+        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
+        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o + 3] = 0xff;
+    }
+    true
+}
+
+/// Decode one mode 2 BC7 block straight to RGBA8.
+///
+/// Three subsets, a 6-bit partition, RGB 5.5.5 endpoints with no p-bits, 2-bit
+/// indices, opaque alpha.
+///
+/// Returns `false` if the block is not mode 2.
+fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] & 0x7 != 0x4 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let partition = ((b >> 3) & 0x3f) as usize;
+    // 5 bits, no p-bit.
+    let ep = |shift: u32| {
+        let t = (((b >> shift) & 0x1f) as u32) << 3;
+        t | (t >> 5)
+    };
+    let e = [
+        [ep(9), ep(39), ep(69)],
+        [ep(14), ep(44), ep(74)],
+        [ep(19), ep(49), ep(79)],
+        [ep(24), ep(54), ep(84)],
+        [ep(29), ep(59), ep(89)],
+        [ep(34), ep(64), ep(94)],
+    ];
+
+    let subsets = BC7_P3_SUBSET[partition];
+    let anchors = BC7_P3_ANCHOR[partition];
+    let idx = b >> 99;
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p3_index_at(p, anchors, 2);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
+        let s = ((subsets >> (2 * p)) & 0x3) as usize * 2;
+        let (a, c) = (&e[s], &e[s + 1]);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
+        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
+        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o + 3] = 0xff;
+    }
+    true
+}
+
+#[cfg(test)]
+mod bc7_p3_tests {
+    use super::{bc7_mode0_block, bc7_mode2_block, BC7_P3_ANCHOR, BC7_P3_SUBSET};
+
+    /// Both three-subset fast paths, against the general decoder, over every
+    /// partition each mode can address. Mode 0 has a 4-bit partition field and
+    /// so reaches only the first 16; mode 2 reaches all 64.
+    #[test]
+    fn three_subset_modes_match_the_general_decoder() {
+        for &(mode, mask, set, pshift, pbits) in
+            &[(0u32, 0x1u8, 0x1u8, 1u32, 4u32), (2, 0x7, 0x4, 3, 6)]
+        {
+            let mut state = 0x1234_9876_abcd_5678u64 ^ mode as u64;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let partitions = 1u32 << pbits;
+            for partition in 0..partitions {
+                for case in 0..200 {
+                    let mut raw = [0u8; 16];
+                    match case {
+                        0 => {}
+                        1 => raw.iter_mut().for_each(|x| *x = 0xff),
+                        _ => {
+                            let (x, y) = (next(), next());
+                            raw[..8].copy_from_slice(&x.to_le_bytes());
+                            raw[8..].copy_from_slice(&y.to_le_bytes());
+                        }
+                    }
+                    let pmask = ((1u128 << pbits) - 1) << pshift;
+                    let v = u128::from_le_bytes(raw);
+                    let v = (v & !pmask) | ((partition as u128) << pshift);
+                    let mut blk = v.to_le_bytes();
+                    blk[0] = (blk[0] & !mask) | set;
+
+                    let mut ours = [0u8; 64];
+                    let claimed = if mode == 0 {
+                        bc7_mode0_block(&blk, &mut ours, 16)
+                    } else {
+                        bc7_mode2_block(&blk, &mut ours, 16)
+                    };
+                    assert!(claimed, "mode {mode} partition {partition} not recognised");
+
+                    let mut theirs = [0u8; 64];
+                    bcdec_rs::bc7(&blk, &mut theirs, 16);
+                    assert_eq!(
+                        ours, theirs,
+                        "mode {mode}, partition {partition}, case {case} diverged"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn other_modes_are_declined() {
+        for mode in 0..8u32 {
+            let mut blk = [0u8; 16];
+            blk[0] = 1u8 << mode;
+            let mut px = [0u8; 64];
+            assert_eq!(bc7_mode0_block(&blk, &mut px, 16), mode == 0, "m0 vs {mode}");
+            assert_eq!(bc7_mode2_block(&blk, &mut px, 16), mode == 2, "m2 vs {mode}");
+        }
+    }
+
+    /// The three-subset tables must be the specs, not merely self-consistent.
+    #[test]
+    fn partition_tables_are_the_spec_tables() {
+        assert_eq!(BC7_P3_SUBSET[0], 0xaa68_5050);
+        assert_eq!(BC7_P3_SUBSET[1], 0x6a5a_5040);
+        // Subset 0 always owns pixel 0.
+        assert!(BC7_P3_SUBSET.iter().all(|m| m & 0x3 == 0));
+        for (i, m) in BC7_P3_SUBSET.iter().enumerate() {
+            // All three subsets must actually be used, and none may be 3.
+            let mut seen = [false; 4];
+            for p in 0..16 {
+                seen[((m >> (2 * p)) & 0x3) as usize] = true;
+            }
+            assert!(seen[0] && seen[1] && seen[2], "partition {i} misses a subset");
+            assert!(!seen[3], "partition {i} uses subset 3");
+            // Each anchor must belong to the subset it anchors.
+            let [a1, a2] = BC7_P3_ANCHOR[i];
+            assert_eq!((m >> (2 * a1 as u32)) & 0x3, 1, "partition {i} anchor 1");
+            assert_eq!((m >> (2 * a2 as u32)) & 0x3, 2, "partition {i} anchor 2");
+        }
+    }
+}
+
+/// Decode one mode 5 BC7 block straight to RGBA8.
+///
+/// One subset, RGB 7.7.7 with a separate 8-bit alpha, no p-bits, a rotation, and
+/// two independent 2-bit index sets — one driving colour, one driving alpha.
+///
+/// An earlier attempt at this mode measured neutral and was reverted as a
+/// refutation of the whole approach. That was wrong twice over. The approach is
+/// sound — every other mode gained 18-73% from it — and the earlier code was
+/// slow for a specific reason: it resolved the rotation with a conditional
+/// `swap` **inside** the per-pixel loop, paying a branch and two bounds-checked
+/// indexed accesses sixteen times per block. Mode 4, the same family, gained 73%
+/// once the rotation was hoisted into a channel map computed once. That is what
+/// this does.
+///
+/// Returns `false` if the block is not mode 5.
+fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    // Five zero bits then a one; bits 6-7 are the rotation, so only the low six
+    // bits identify the mode.
+    if blk[0] & 0x3f != 0x20 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let rotation = ((b >> 6) & 0x3) as usize;
+    // Colour is 7 bits: shift the MSB to bit 7 and replicate it into the vacated
+    // low bit. Alpha is already 8 bits.
+    let c = |shift: u32| {
+        let t = (((b >> shift) & 0x7f) as u32) << 1;
+        t | (t >> 7)
+    };
+    let a = |shift: u32| ((b >> shift) & 0xff) as u32;
+    let e0 = [c(8), c(22), c(36), a(50)];
+    let e1 = [c(15), c(29), c(43), a(58)];
+
+    // Two 31-bit index regions: colour at bit 66, alpha at bit 97.
+    let ci = b >> 66;
+    let ai = b >> 97;
+
+    // Resolve the rotation once, into an output-byte map.
+    let mut map = [0usize, 1, 2, 3];
+    if rotation != 0 {
+        map.swap(3, rotation - 1);
+    }
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p1_index_at(p, 2);
+        let mask = (1u128 << w) - 1;
+        let wc = BC7_WEIGHTS2[((ci >> off) & mask) as usize];
+        let wa = BC7_WEIGHTS2[((ai >> off) & mask) as usize];
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o + map[0]] = ((e0[0] * (64 - wc) + e1[0] * wc + 32) >> 6) as u8;
+        out[o + map[1]] = ((e0[1] * (64 - wc) + e1[1] * wc + 32) >> 6) as u8;
+        out[o + map[2]] = ((e0[2] * (64 - wc) + e1[2] * wc + 32) >> 6) as u8;
+        out[o + map[3]] = ((e0[3] * (64 - wa) + e1[3] * wa + 32) >> 6) as u8;
+    }
+    true
+}
+
+#[cfg(test)]
+mod bc7_mode5_tests {
+    use super::bc7_mode5_block;
+
+    /// All four rotations. The rotation permutes channels on the way out, so it
+    /// is exactly where a hoisted channel map could silently disagree with a
+    /// per-pixel swap.
+    #[test]
+    fn mode5_matches_the_general_decoder() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for rotation in 0..4u8 {
+            for case in 0..10_000 {
+                let mut raw = [0u8; 16];
+                match case {
+                    0 => {}
+                    1 => raw.iter_mut().for_each(|x| *x = 0xff),
+                    _ => {
+                        let (x, y) = (next(), next());
+                        raw[..8].copy_from_slice(&x.to_le_bytes());
+                        raw[8..].copy_from_slice(&y.to_le_bytes());
+                    }
+                }
+                raw[0] = 0x20 | (rotation << 6);
+
+                let mut ours = [0u8; 64];
+                assert!(bc7_mode5_block(&raw, &mut ours, 16), "rot {rotation}");
+                let mut theirs = [0u8; 64];
+                bcdec_rs::bc7(&raw, &mut theirs, 16);
+                assert_eq!(
+                    ours, theirs,
+                    "mode 5, rotation {rotation}, case {case} diverged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_modes_are_declined() {
+        for mode in 0..8u32 {
+            for rot in 0..4u8 {
+                let mut blk = [0u8; 16];
+                blk[0] = (1u8 << mode) | (rot << 6);
+                let mut px = [0u8; 64];
+                assert_eq!(
+                    bc7_mode5_block(&blk, &mut px, 16),
+                    mode == 5,
+                    "mode {mode} rot {rot}"
+                );
+            }
+        }
     }
 }
 
@@ -828,7 +1355,6 @@ const BC7_WEIGHTS4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51
 /// gain is real only once the surface fits in cache. That is not a small case:
 /// a full mip chain is mostly small surfaces, so a streamer decoding chains
 /// spends most of its decode time in exactly this range.
-#[inline]
 fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // Mode is unary: `mode` zero bits then a one. Mode 6 is 0x40 exactly.
     if blk[0] != 0x40 {
