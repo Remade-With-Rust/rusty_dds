@@ -487,6 +487,41 @@ const BC7_WEIGHTS3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
 /// BC7 interpolation weights for 2-bit indices.
 const BC7_WEIGHTS2: [u32; 4] = [0, 21, 43, 64];
 
+/// Base and delta per endpoint pair, so interpolation costs one multiply per
+/// channel instead of two.
+///
+/// The spec form `(e0 * (64 - w) + e1 * w + 32) >> 6` equals
+/// `(e0 * 64 + 32 + w * (e1 - e0)) >> 6`, and in that form only one operand
+/// varies with the weight. The endpoint pairs are constant for a whole block, so
+/// this runs once and the sixteen-pixel loop keeps just a multiply-add.
+/// Identical arithmetic, identical bytes out.
+#[inline(always)]
+fn bc7_bd3(e: &[[u32; 3]], pairs: usize) -> [([i32; 3], [i32; 3]); 3] {
+    let mut out = [([0i32; 3], [0i32; 3]); 3];
+    for (k, slot) in out.iter_mut().enumerate().take(pairs) {
+        let (a, c) = (&e[k * 2], &e[k * 2 + 1]);
+        for i in 0..3 {
+            slot.0[i] = a[i] as i32 * 64 + 32;
+            slot.1[i] = c[i] as i32 - a[i] as i32;
+        }
+    }
+    out
+}
+
+/// [`bc7_bd3`] for the modes that carry alpha.
+#[inline(always)]
+fn bc7_bd4(e: &[[u32; 4]], pairs: usize) -> [([i32; 4], [i32; 4]); 2] {
+    let mut out = [([0i32; 4], [0i32; 4]); 2];
+    for (k, slot) in out.iter_mut().enumerate().take(pairs) {
+        let (a, c) = (&e[k * 2], &e[k * 2 + 1]);
+        for i in 0..4 {
+            slot.0[i] = a[i] as i32 * 64 + 32;
+            slot.1[i] = c[i] as i32 - a[i] as i32;
+        }
+    }
+    out
+}
+
 /// Bit offset and width of pixel `p`s index, for a two-subset mode with
 /// `bits`-wide indices and subset 1 anchored at `fixup`.
 ///
@@ -548,15 +583,18 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let fixup = BC7_P2_FIXUP[partition] as usize;
     let idx = b >> 82;
 
+    // One multiply per channel, not two: see `bc7_mode6_block`. Base and delta
+    // are per endpoint pair, so both subsets are prepared up front.
+    let bd = bc7_bd3(&e, 2);
+
     for p in 0..16usize {
         let (off, w) = bc7_p2_index_at(p, fixup, 3);
-        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize];
-        let s = (((subsets >> p) & 1) as usize) * 2;
-        let (a, c) = (&e[s], &e[s + 1]);
+        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
+        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
-        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
-        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
         out[o + 3] = 0xff;
     }
     true
@@ -593,15 +631,17 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let fixup = BC7_P2_FIXUP[partition] as usize;
     let idx = b >> 98;
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let bd = bc7_bd3(&e, 2);
+
     for p in 0..16usize {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
-        let s = (((subsets >> p) & 1) as usize) * 2;
-        let (a, c) = (&e[s], &e[s + 1]);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
+        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
-        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
-        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
         out[o + 3] = 0xff;
     }
     true
@@ -648,16 +688,18 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let fixup = BC7_P2_FIXUP[partition] as usize;
     let idx = b >> 98;
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let bd = bc7_bd4(&e, 2);
+
     for p in 0..16usize {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
-        let s = (((subsets >> p) & 1) as usize) * 2;
-        let (a, c) = (&e[s], &e[s + 1]);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
+        let (base, delta) = &bd[((subsets >> p) & 1) as usize];
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
-        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
-        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
-        out[o + 3] = ((a[3] * (64 - weight) + c[3] * weight + 32) >> 6) as u8;
+        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
+        out[o + 3] = ((base[3] + weight * delta[3]) >> 6) as u8;
     }
     true
 }
@@ -784,6 +826,20 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         map.swap(3, rotation - 1);
     }
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let base = [
+        e0[0] as i32 * 64 + 32,
+        e0[1] as i32 * 64 + 32,
+        e0[2] as i32 * 64 + 32,
+        e0[3] as i32 * 64 + 32,
+    ];
+    let delta = [
+        e1[0] as i32 - e0[0] as i32,
+        e1[1] as i32 - e0[1] as i32,
+        e1[2] as i32 - e0[2] as i32,
+        e1[3] as i32 - e0[3] as i32,
+    ];
+
     for p in 0..16usize {
         let (o2, w2) = bc7_p1_index_at(p, 2);
         let (o3, w3) = bc7_p1_index_at(p, 3);
@@ -792,12 +848,13 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         // The index-selection bit decides which set drives colour and which
         // drives alpha; it does not change what the sets are.
         let (wc, walpha) = if isb { (wb, wa) } else { (wa, wb) };
+        let (wc, walpha) = (wc as i32, walpha as i32);
 
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o + map[0]] = ((e0[0] * (64 - wc) + e1[0] * wc + 32) >> 6) as u8;
-        out[o + map[1]] = ((e0[1] * (64 - wc) + e1[1] * wc + 32) >> 6) as u8;
-        out[o + map[2]] = ((e0[2] * (64 - wc) + e1[2] * wc + 32) >> 6) as u8;
-        out[o + map[3]] = ((e0[3] * (64 - walpha) + e1[3] * walpha + 32) >> 6) as u8;
+        out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
+        out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
+        out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
+        out[o + map[3]] = ((base[3] + walpha * delta[3]) >> 6) as u8;
     }
     true
 }
@@ -963,15 +1020,17 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let anchors = BC7_P3_ANCHOR[partition];
     let idx = b >> 83;
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let bd = bc7_bd3(&e, 3);
+
     for p in 0..16usize {
         let (off, w) = bc7_p3_index_at(p, anchors, 3);
-        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize];
-        let s = ((subsets >> (2 * p)) & 0x3) as usize * 2;
-        let (a, c) = (&e[s], &e[s + 1]);
+        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
+        let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
-        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
-        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
         out[o + 3] = 0xff;
     }
     true
@@ -1011,15 +1070,17 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let anchors = BC7_P3_ANCHOR[partition];
     let idx = b >> 99;
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let bd = bc7_bd3(&e, 3);
+
     for p in 0..16usize {
         let (off, w) = bc7_p3_index_at(p, anchors, 2);
-        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
-        let s = ((subsets >> (2 * p)) & 0x3) as usize * 2;
-        let (a, c) = (&e[s], &e[s + 1]);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize] as i32;
+        let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
-        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
-        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
         out[o + 3] = 0xff;
     }
     true
@@ -1163,16 +1224,30 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         map.swap(3, rotation - 1);
     }
 
+    // One multiply per channel, not two: see `bc7_mode6_block`.
+    let base = [
+        e0[0] as i32 * 64 + 32,
+        e0[1] as i32 * 64 + 32,
+        e0[2] as i32 * 64 + 32,
+        e0[3] as i32 * 64 + 32,
+    ];
+    let delta = [
+        e1[0] as i32 - e0[0] as i32,
+        e1[1] as i32 - e0[1] as i32,
+        e1[2] as i32 - e0[2] as i32,
+        e1[3] as i32 - e0[3] as i32,
+    ];
+
     for p in 0..16usize {
         let (off, w) = bc7_p1_index_at(p, 2);
         let mask = (1u128 << w) - 1;
-        let wc = BC7_WEIGHTS2[((ci >> off) & mask) as usize];
-        let wa = BC7_WEIGHTS2[((ai >> off) & mask) as usize];
+        let wc = BC7_WEIGHTS2[((ci >> off) & mask) as usize] as i32;
+        let wa = BC7_WEIGHTS2[((ai >> off) & mask) as usize] as i32;
         let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o + map[0]] = ((e0[0] * (64 - wc) + e1[0] * wc + 32) >> 6) as u8;
-        out[o + map[1]] = ((e0[1] * (64 - wc) + e1[1] * wc + 32) >> 6) as u8;
-        out[o + map[2]] = ((e0[2] * (64 - wc) + e1[2] * wc + 32) >> 6) as u8;
-        out[o + map[3]] = ((e0[3] * (64 - wa) + e1[3] * wa + 32) >> 6) as u8;
+        out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
+        out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
+        out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
+        out[o + map[3]] = ((base[3] + wa * delta[3]) >> 6) as u8;
     }
     true
 }
@@ -1384,6 +1459,28 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         (f(56) << 1) | p1,
     ];
 
+    // The spec interpolation is `(e0 * (64 - w) + e1 * w + 32) >> 6`, which is
+    // two multiplies per channel. Rearranged:
+    //
+    //     e0*64 + 32 + w*(e1 - e0)
+    //
+    // it is one multiply against a base and a delta that are constant for the
+    // whole block. Sixteen pixels x four channels means 128 multiplies become
+    // 64, and the base/delta pair is computed once. Identical arithmetic, so
+    // identical output — the oracle test covers that.
+    let base = [
+        (e0[0] as i32) * 64 + 32,
+        (e0[1] as i32) * 64 + 32,
+        (e0[2] as i32) * 64 + 32,
+        (e0[3] as i32) * 64 + 32,
+    ];
+    let delta = [
+        e1[0] as i32 - e0[0] as i32,
+        e1[1] as i32 - e0[1] as i32,
+        e1[2] as i32 - e0[2] as i32,
+        e1[3] as i32 - e0[3] as i32,
+    ];
+
     // Indices occupy bits 65..128. The first is the fix-up index and carries one
     // less bit, its high bit being implicitly zero.
     let idx = b >> 65;
@@ -1392,13 +1489,12 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             BC7_WEIGHTS4[(idx & 0x7) as usize]
         } else {
             BC7_WEIGHTS4[((idx >> (3 + (i - 1) * 4)) & 0xf) as usize]
-        };
-        let iw = 64 - w;
+        } as i32;
         let o = (i / 4) * pitch + (i % 4) * 4;
-        out[o] = ((e0[0] * iw + e1[0] * w + 32) >> 6) as u8;
-        out[o + 1] = ((e0[1] * iw + e1[1] * w + 32) >> 6) as u8;
-        out[o + 2] = ((e0[2] * iw + e1[2] * w + 32) >> 6) as u8;
-        out[o + 3] = ((e0[3] * iw + e1[3] * w + 32) >> 6) as u8;
+        out[o] = ((base[0] + w * delta[0]) >> 6) as u8;
+        out[o + 1] = ((base[1] + w * delta[1]) >> 6) as u8;
+        out[o + 2] = ((base[2] + w * delta[2]) >> 6) as u8;
+        out[o + 3] = ((base[3] + w * delta[3]) >> 6) as u8;
     }
     true
 }

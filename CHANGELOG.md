@@ -3,6 +3,52 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.9 - 2026-08-19
+
+**One multiply per channel instead of two.** The BC7 spec writes interpolation
+as `(e0 * (64 - w) + e1 * w + 32) >> 6` - two multiplies per channel, both
+depending on the per-pixel weight. It is exactly equal to:
+
+```text
+(e0 * 64 + 32 + w * (e1 - e0)) >> 6
+```
+
+where `base = e0 * 64 + 32` and `delta = e1 - e0` are constant for the whole
+block. Sixteen pixels times four channels means **128 multiplies become 64**,
+and the base/delta pair is computed once per endpoint pair.
+
+### Performance
+
+Per mode, 256^2 serial:
+
+| mode | 0.3.8 | 0.3.9 | |
+|---|---:|---:|---|
+| 5 | 262.4 Mpx/s | **356.7** | +36% |
+| 6 | 216.8 | **280.9** | +30% |
+| 4 | 243.3 | 312.0 | +28% |
+| 1 | 275.8 | **347.1** | +26% |
+| 3 | 279.4 | **349.7** | +25% |
+| 7 | 252.8 | 313.9 | +24% |
+| 2 | 213.9 | 220.2 | +3% |
+| 0 | 215.0 | 218.8 | +2% |
+
+The three-subset modes barely move: their cost is the per-pixel partition lookup
+and six endpoint pairs, not the interpolation.
+
+**On a real 192-texture pack**, four ABBA samples per arm with no overlap between
+arms: **256^2 240.6 -> 273.7 Mpx/s (+13.8%)** and **128^2 242.3 -> 274.6
+(+13.3%)**. That is nearly double the whole-content gain 0.3.8 reported, and it
+comes almost entirely from mode 6, which is 88% of that pack.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC7 676.7 vs 79.3 Mpx/s
+(8.53x)**, 5.83x across all formats.
+
+### Notes
+
+- Identical arithmetic, so decode output is unchanged bit for bit. The per-mode
+  oracle tests, which compare every mode against the general decoder, passed
+  unchanged.
+
 ## 0.3.8 — 2026-08-19
 
 **Every BC7 mode now has a specialised decoder.** Modes 0, 2, 4 and 5 join 1, 3,

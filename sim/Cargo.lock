@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_dds"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "bcdec_rs",
  "bitflags 2.13.1",

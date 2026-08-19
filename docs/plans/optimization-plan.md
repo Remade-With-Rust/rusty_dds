@@ -1589,3 +1589,90 @@ direction.** This file now contains one case of each, three sections apart.
 - BC1-BC5 have no per-mode structure to exploit, but they run through the same
   `bcdec_rs` bitstream. Whether the same index-read argument applies to them has
   not been measured.
+
+---
+
+## §25 — The 7.3%, chased into the arithmetic
+
+§24 shipped all eight BC7 modes and reported **+7.3%** on real content. That
+number was modest because the pack is 88% mode 6, and mode 6 had turned out to be
+the *slowest* of the one- and two-subset specialised modes — 216.8 Mpx/s against
+mode 3's 279.4. Mode 6 interpolates four channels with 4-bit indices where modes
+1 and 3 do three channels with constant alpha: a third more work per pixel.
+
+That put the remaining real-content time squarely in the interpolation itself.
+
+### The identity
+
+The BC7 spec writes interpolation as
+
+```text
+(e0 * (64 - w) + e1 * w + 32) >> 6
+```
+
+Two multiplies per channel, both depending on the per-pixel weight. It is exactly
+equal to
+
+```text
+(e0 * 64 + 32 + w * (e1 - e0)) >> 6
+```
+
+where `base = e0 * 64 + 32` and `delta = e1 - e0` do **not** depend on `w` and
+are constant for the whole block. Sixteen pixels x four channels: 128 multiplies
+become 64, and base/delta is computed once per endpoint pair.
+
+No approximation and no reassociation of the rounding — the same integer
+expression, rearranged. Every per-mode oracle test passed unchanged, which is
+exactly what those tests are for.
+
+### The result
+
+| mode | 0.3.8 | 0.3.9 | |
+|---|---:|---:|---|
+| 5 | 262.4 Mpx/s | **356.7** | +36% |
+| 6 | 216.8 | **280.9** | +30% |
+| 4 | 243.3 | 312.0 | +28% |
+| 1 | 275.8 | **347.1** | +26% |
+| 3 | 279.4 | **349.7** | +25% |
+| 7 | 252.8 | 313.9 | +24% |
+| 2 | 213.9 | 220.2 | +3% |
+| 0 | 215.0 | 218.8 | +2% |
+
+The three-subset modes barely move, which is informative rather than
+disappointing: their cost is the per-pixel partition lookup and six endpoint
+pairs, not the interpolation. **Two independent optimisations have now failed to
+shift modes 0 and 2**, which is a fairly strong statement about where their time
+actually goes.
+
+Real content, four ABBA samples per arm, no overlap between arms:
+
+| high192 | before | after | |
+|---|---:|---:|---|
+| 256² | 240.6 Mpx/s | **273.7** | **+13.8%** |
+| 128² | 242.3 | **274.6** | **+13.3%** |
+
+Nearly double §24's whole-content gain, from a change that touches no structure
+at all.
+
+### The lesson worth keeping
+
+§24 ended with the real-content number limited by the one mode that was *already*
+specialised. The instinct at that point is structural: better dispatch, more
+modes, SIMD. The actual fix was a line of algebra applied to a formula that had
+been transcribed verbatim from the specification and carried through five
+sections without anyone reading it as arithmetic.
+
+**A specification tells you what to compute, not how to compute it.** Every
+expression copied from a spec is worth re-deriving once — spec authors optimise
+for unambiguity, and factoring your inner loop is not their job.
+
+### Still open
+
+- Modes 0 and 2 are partition-lookup bound. A packed subset representation that
+  avoids the per-pixel shift-and-mask is the remaining idea, and it is small.
+- SIMD across the four channels is now the obvious structural step, and the crate
+  already has a `simd` feature with an established runtime-detected,
+  scalar-fallback pattern.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- BC1-BC5 run through the same `bcdec_rs` bitstream and have never been examined
+  for either the index-chain or the interpolation win.
