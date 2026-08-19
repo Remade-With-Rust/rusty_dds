@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 use crate::format::{D3DFormat, DxgiFormat};
-use crate::Dds;
+use crate::DdsBase;
 
 /// Tightly packed RGBA8 image (row-major).
 ///
@@ -136,7 +136,7 @@ impl DecodeContent {
     }
 }
 
-impl Dds {
+impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Classify this DDS for LDR RGBA8 decode/encode, if supported.
     pub fn decode_content(&self) -> Result<DecodeContent, Error> {
         if let Some(dxgi) = self.get_dxgi_format() {

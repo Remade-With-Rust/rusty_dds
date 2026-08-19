@@ -12,3 +12,8 @@ corpus/raw_crytif/
 corpus/raw_tif/
 bench/preserved/
 corpus/raw_hdr/
+
+# Simulator (docs/plans/simulator-demo.md) — build output, cooked packs, runs
+sim/target/
+sim/pack/
+sim/runs/

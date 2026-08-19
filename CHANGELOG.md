@@ -3,6 +3,57 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.0 — 2026-08-18
+
+**The runtime streaming path.** A texture-streaming simulator
+([`sim/`](sim/)) measured this crate against Microsoft DirectXTex on D3D11 and
+Vulkan and found rusty_dds *behind* on the profile a running game actually
+exercises. This release closes that gap. Encoder output is unchanged.
+
+### Added
+
+- **`DdsView<'a>` — zero-copy parse.** `Dds` is now `DdsBase<Vec<u8>>` and
+  `DdsView<'a>` is `DdsBase<&'a [u8]>`, sharing one implementation. Every
+  existing call is unchanged. `DdsView::parse(&bytes)` allocates **nothing**.
+- **`DdsView::read_into` / `read_into_limited`** — read from any reader into a
+  buffer you recycle, for callers that cannot borrow (archive, network).
+- **`decode_rgba8_into`** — decode into your buffer instead of a fresh one.
+- **`decode_block_rows_into` / `block_rows`** — decode a range of block rows, so
+  your job system parallelises the work and the library owns no threads.
+
+### Performance
+
+Measured pinned, ABBA-interleaved, N=7, 192 textures, 10 500 frames; every run
+gated on byte-identical uploaded data.
+
+| | before | after |
+|---|---:|---:|
+| Container parse, total | 433.4 ms | **1.5 ms** |
+| Allocations per run | 263 112 | **45 162** (DirectXTex: 45 162) |
+| `decode_rgba8` (1024² BC7) | 2.184 ms | **1.158 ms** via `_into` |
+| Payload copy | 1 per open | **0** with `DdsView` |
+
+Root cause, in one line: `Dds::read` allocated a fresh payload buffer per open,
+and ~87% of that call was the operating system faulting in and zeroing pages the
+copy then overwrote. `DdsView` does not copy; `read_into` reuses warm pages.
+
+### Fixed
+
+- **BC7 parallel decode threshold** was 4 096 blocks — precisely the size where
+  spawning a thread per core is a **net 2.26× loss**. Raised to 16 384, the
+  smallest size where parallelism is measured to win. At 4 096 blocks the call
+  drops from 75 allocations to 1.
+- `std::thread::available_parallelism()` was a syscall on every decode; cached.
+- Internal format queries allocated a `Box<dyn DataFormat>` — **12 per
+  `upload_plan_compressed`**, now zero, via an allocation-free `FormatOf`.
+- `upload_plan_compressed` computed the subresource range twice.
+
+### Notes
+
+- No behaviour change: the simulator's whole-run trace hash is identical before
+  and after, and the decode/encode matrices are unchanged.
+- MSRV remains 1.73. `Dds` keeps its name and its `data: Vec<u8>` field.
+
 ## Unreleased
 
 API and hardening pass. The encoder's output is unchanged — byte-identical on

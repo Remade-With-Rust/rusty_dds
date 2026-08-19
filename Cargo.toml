@@ -1,11 +1,11 @@
 [package]
 name = "rusty_dds"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
     "Mike Dilger <mike@optcomp.nz>",
     "Remade With Rust / Mata Network",
 ]
-description = "Memory-safe DDS texture toolkit — container, decode, encode (BC1-BC7, BC6H HDR), rate-distortion optimization, GPU upload plans (Remade With Rust)"
+description = "Memory-safe DDS texture toolkit — zero-copy container parse, decode, encode (BC1-BC7, BC6H HDR), rate-distortion optimization, GPU upload plans (Remade With Rust)"
 repository = "https://github.com/Remade-With-Rust/rusty_dds"
 homepage = "https://github.com/Remade-With-Rust/rusty_dds"
 documentation = "https://docs.rs/rusty_dds"
@@ -17,6 +17,9 @@ edition = "2021"
 rust-version = "1.73"
 exclude = [
     "fuzz/*",
+    # The simulator demo: its own crate, its own MSRV, never part of the
+    # published library package.
+    "sim/*",
     "third_party/*",
     "tools/*",
     "corpus/raw/*",

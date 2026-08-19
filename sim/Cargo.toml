@@ -1,0 +1,102 @@
+[package]
+name = "rusty_dds_sim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Deterministic DDS texture-streaming simulator — the measurement harness behind docs/plans/simulator-demo.md"
+# Own MSRV: the sim may take deps (ash, windows, rusty_alloc/edition-2024) that
+# the library must never inherit. rusty_dds keeps MSRV 1.73 regardless.
+rust-version = "1.74"
+
+[dependencies]
+# The only dependency in Phase 0. Arms and backends arrive in later phases:
+#   Phase 1: windows (D3D11)      Phase 3: ash (Vulkan)
+#   Phase 2: dxtex_provider FFI   Phase 5: rusty_alloc (feature `rusty-alloc`)
+rusty_dds = { path = "..", features = ["decode", "encode", "simd"] }
+
+# Cockpit only (feature `ui`). Dioxus desktop is a WebView surface: it renders
+# the control panel and telemetry, NOT the D3D11/Vulkan swapchain — that is a
+# separate native window in Phases 1 and 3.
+dioxus = { version = "0.7", features = ["desktop"], optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
+
+# The allocator arm (feature `rusty-alloc`, binary `sim-ra`). Pinned >=0.4.0:
+# upstream declares 0.3.2 and earlier unsound on every target.
+rusty_alloc-api = { path = "../../rusty_alloc/crates/rusty_alloc_api", version = "0.4.0", optional = true }
+
+# The graphics axis. Both APIs are off-the-shelf system runtimes driven through
+# a conventional renderer — nothing of ours sits in the graphics path.
+ash = { version = "0.38", optional = true }
+
+# Compiles shaders/quad.wgsl to SPIR-V. A build dependency, not a runtime one:
+# a broken shader should fail the build, not the demo.
+[build-dependencies]
+naga = { version = "22", features = ["wgsl-in", "spv-out"], optional = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # WNDCLASSEXW carries HICON/HBRUSH, so the window-class API is gated on Gdi.
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[features]
+default = ["alloc-counters"]
+# Wrap the global allocator in a counting shim. Off => zero allocator
+# instrumentation, for measuring the shim's own tax against a null run.
+alloc-counters = []
+# The Dioxus desktop cockpit.
+ui = ["dep:dioxus", "dep:tokio"]
+# Build `sim-ra`, the same harness on rusty_alloc instead of the system allocator.
+rusty-alloc = ["dep:rusty_alloc-api"]
+# The Microsoft DirectXTex peer arm. Needs the shim built (see sim/shim/).
+dxtex = []
+# Live viewports on the off-the-shelf system runtimes.
+d3d11 = ["dep:windows"]
+vulkan = ["dep:ash", "vulkan-shaders"]
+# Split out so build.rs can gate on it without pulling ash into the build script.
+vulkan-shaders = ["dep:naga"]
+# The whole demo: both stacks, both allocators, both graphics APIs, cockpit.
+demo = ["d3d11", "vulkan", "dxtex", "rusty-alloc", "ui"]
+
+[lib]
+name = "rusty_dds_sim"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sim"
+path = "src/bin/sim.rs"
+
+# The allocator arm. A separate binary because `#[global_allocator]` is a
+# compile-time choice; `bench` launches whichever the arm names.
+[[bin]]
+name = "sim-ra"
+path = "src/bin/sim_ra.rs"
+required-features = ["rusty-alloc"]
+
+# The Dioxus cockpit. Feature-gated so the headless harness — the thing that
+# produces reportable numbers — never has to pull a WebView toolchain to build.
+[[bin]]
+name = "cockpit"
+path = "src/bin/cockpit.rs"
+required-features = ["ui"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Line tables, not full debug info. `debug = true` here cost ~1 GB of PDBs:
+# every feature-combination rebuild relinks all three binaries and MSVC rewrites
+# the whole symbol file each time (cockpit.pdb alone was 55 MB, stored twice).
+# Line tables still give profilers and panics usable stacks at a fraction of the
+# size, which is all this harness ever needed.
+debug = "line-tables-only"

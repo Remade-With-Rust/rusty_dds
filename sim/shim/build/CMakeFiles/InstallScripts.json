@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/talmo/coding/rusty_dds/sim/shim/build/cmake_install.cmake",
+		"C:/Users/talmo/coding/rusty_dds/sim/shim/build/DirectXTex/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

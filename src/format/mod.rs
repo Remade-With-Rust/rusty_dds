@@ -68,3 +68,61 @@ pub trait DataFormat {
         }
     }
 }
+
+/// The header's format, held by value.
+///
+/// [`crate::Dds::get_format`] boxes the same information into a
+/// `Box<dyn DataFormat>` — a heap allocation on *every* call. That accessor sits
+/// underneath `get_pitch`, `get_pitch_height`, `get_bits_per_pixel` and
+/// `get_min_mipmap_size_in_bytes`, all of which sit underneath every subresource
+/// offset computation, so one `upload_plan_compressed` was costing twelve
+/// allocations. This is the allocation-free equivalent for that path; the boxed
+/// accessor stays for callers who want type erasure.
+///
+/// The delegation below covers exactly the five methods `DataFormat` requires.
+/// Neither `DxgiFormat` nor `D3DFormat` overrides the two provided methods
+/// (`get_pitch_height`, `get_minimum_mipmap_size_in_bytes`), so inheriting them
+/// here is behaviour-identical to dispatching through `dyn DataFormat`. If
+/// either concrete type ever overrides one, this enum must delegate it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatOf {
+    Dxgi(DxgiFormat),
+    D3d(D3DFormat),
+}
+
+impl DataFormat for FormatOf {
+    fn get_pitch(&self, width: u32) -> Option<u32> {
+        match self {
+            FormatOf::Dxgi(f) => f.get_pitch(width),
+            FormatOf::D3d(f) => f.get_pitch(width),
+        }
+    }
+
+    fn get_bits_per_pixel(&self) -> Option<u8> {
+        match self {
+            FormatOf::Dxgi(f) => f.get_bits_per_pixel(),
+            FormatOf::D3d(f) => f.get_bits_per_pixel(),
+        }
+    }
+
+    fn get_block_size(&self) -> Option<u32> {
+        match self {
+            FormatOf::Dxgi(f) => f.get_block_size(),
+            FormatOf::D3d(f) => f.get_block_size(),
+        }
+    }
+
+    fn get_fourcc(&self) -> Option<FourCC> {
+        match self {
+            FormatOf::Dxgi(f) => f.get_fourcc(),
+            FormatOf::D3d(f) => f.get_fourcc(),
+        }
+    }
+
+    fn requires_extension(&self) -> bool {
+        match self {
+            FormatOf::Dxgi(f) => f.requires_extension(),
+            FormatOf::D3d(f) => f.requires_extension(),
+        }
+    }
+}

@@ -22,7 +22,7 @@
 mod driver;
 use driver::exercise;
 
-use rusty_dds::Dds;
+use rusty_dds::{Dds, DdsView};
 
 /// xorshift64, so any failure is reproducible from the printed seed alone.
 struct Rng(u64);
@@ -234,6 +234,125 @@ fn read_limited_is_a_hard_ceiling() {
     assert!(Dds::read_limited(&big[..], 8 * 1024 * 1024).is_ok());
     // The unbounded read still accepts it, by design.
     assert!(Dds::read(&big[..]).is_ok());
+}
+
+/// A recycled buffer must never let one texture see the tail of the previous
+/// one. Reuse is the entire point of `read_into`, and a stale tail is exactly
+/// the bug that shape invites.
+#[test]
+fn read_into_reuse_does_not_leak_the_previous_payload() {
+    let files = fixtures();
+    let (_, base) = &files[0];
+
+    // A deliberately oversized payload first, then the original.
+    let mut big = base.clone();
+    big.resize(base.len() + 512 * 1024, 0xAB);
+
+    let mut buf = Vec::new();
+    let big_len = {
+        let view = DdsView::read_into(&big[..], &mut buf).expect("big");
+        view.data.len()
+    };
+    let small_len = {
+        let view = DdsView::read_into(&base[..], &mut buf).expect("small");
+        view.data.len()
+    };
+    assert!(
+        small_len < big_len,
+        "second read did not shrink: {small_len} vs {big_len}"
+    );
+
+    // And it must agree byte-for-byte with the owning path on the same bytes.
+    let owned = Dds::read(&base[..]).expect("owned");
+    let view = DdsView::read_into(&base[..], &mut buf).expect("reused");
+    assert_eq!(view.data, &owned.data[..], "reused buffer diverged from Dds::read");
+}
+
+/// `read_into_limited` inherits `read_limited`'s posture: a hard ceiling that
+/// fails closed, on a buffer the caller owns.
+#[test]
+fn read_into_limited_is_a_hard_ceiling() {
+    let files = fixtures();
+    let (_, base) = &files[0];
+    let mut big = base.clone();
+    big.resize(base.len() + 4 * 1024 * 1024, 0xAB);
+
+    let mut buf = Vec::new();
+    let err = DdsView::read_into_limited(&big[..], &mut buf, 1024);
+    assert!(
+        matches!(err, Err(rusty_dds::Error::SizeLimitExceeded { .. })),
+        "over-budget payload was not rejected: {err:?}"
+    );
+    assert!(DdsView::read_into_limited(&big[..], &mut buf, 8 * 1024 * 1024).is_ok());
+}
+
+/// A borrowing parse must see exactly what the owning parse sees.
+#[test]
+fn view_and_owned_agree() {
+    for (name, bytes) in fixtures() {
+        let owned = Dds::read(&bytes[..]).expect(&name);
+        let view = DdsView::parse(&bytes).expect(&name);
+        assert_eq!(view.data, &owned.data[..], "{name}: payload differs");
+        assert_eq!(view.get_width(), owned.get_width(), "{name}: width differs");
+        assert_eq!(
+            view.get_num_mipmap_levels(),
+            owned.get_num_mipmap_levels(),
+            "{name}: mip count differs"
+        );
+    }
+}
+
+/// A recycled decode buffer must never let one surface see the tail of another,
+/// and must agree byte-for-byte with the allocating path.
+#[test]
+fn decode_into_reuse_matches_fresh_decodes() {
+    let mut buf = Vec::new();
+    for (name, bytes) in fixtures() {
+        let Ok(dds) = DdsView::parse(&bytes) else { continue };
+        let mips = dds.get_num_mipmap_levels();
+        // Largest mip first, then a smaller one, through the same buffer: a
+        // stale tail from the first would survive into the second.
+        for mip in [0, mips.saturating_sub(1), 0] {
+            let id = rusty_dds::SubresourceId::mip_layer(mip, 0);
+            let (Ok(fresh), Ok((w, h, d))) =
+                (dds.decode_rgba8(id), dds.decode_rgba8_into(id, &mut buf))
+            else {
+                continue;
+            };
+            assert_eq!(
+                buf.len(),
+                (w as usize) * (h as usize) * (d as usize) * 4,
+                "{name} mip {mip}: wrong length"
+            );
+            assert_eq!(buf, fresh.pixels, "{name} mip {mip}: reused buffer differs");
+        }
+    }
+}
+
+/// Splitting a surface into block-row ranges must reassemble into exactly the
+/// whole-surface decode — that is the contract a caller's job system relies on.
+#[test]
+fn decode_block_rows_reassemble_into_the_whole_surface() {
+    for (name, bytes) in fixtures() {
+        let Ok(dds) = DdsView::parse(&bytes) else { continue };
+        let id = rusty_dds::SubresourceId::mip_layer(0, 0);
+        let (Ok(whole), Ok(rows)) = (dds.decode_rgba8(id), dds.block_rows(id)) else {
+            continue;
+        };
+        if rows < 2 {
+            continue;
+        }
+        let mut split = vec![0u8; whole.pixels.len()];
+        let mid = rows / 2;
+        let split_at = (mid * 4).min(whole.height) as usize * whole.width as usize * 4;
+        let (top, bottom) = split.split_at_mut(split_at);
+        if dds.decode_block_rows_into(id, 0..mid, top).is_err()
+            || dds.decode_block_rows_into(id, mid..rows, bottom).is_err()
+        {
+            continue;
+        }
+        assert_eq!(split, whole.pixels, "{name}: split decode differs from whole");
+    }
 }
 
 /// Every input that ever crashed the parser lives here forever.

@@ -9,7 +9,7 @@
 use crate::error::Error;
 use crate::format::{D3DFormat, DxgiFormat};
 use crate::surface::SubresourceId;
-use crate::Dds;
+use crate::DdsBase;
 
 /// Recommended GPU texture format name (stringly typed — no graphics API crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,7 +62,7 @@ pub struct UploadPlan {
     pub rows_per_image: u32,
 }
 
-impl Dds {
+impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Map this DDS to a [`GpuFormat`] for compressed GPU upload, if supported.
     pub fn gpu_format(&self) -> Result<GpuFormat, Error> {
         if let Some(dxgi) = self.get_dxgi_format() {
@@ -77,17 +77,19 @@ impl Dds {
     /// Plan a **compressed** upload of one subresource (Path A).
     pub fn upload_plan_compressed(&self, id: SubresourceId) -> Result<UploadPlan, Error> {
         let format = self.gpu_format()?;
-        let surf = self.surface(id)?;
+        // `surface()` is `subresource_range()` + `mip_dimensions()`, so calling
+        // both walked the mip chain twice for one query. `mip_dimensions` is a
+        // shift; the range walk is the expensive half, and once is enough.
         let range = self.subresource_range(id)?;
-        let (bytes_per_row, rows_per_image) =
-            compressed_pitches(format, surf.width, surf.height)?;
+        let (width, height, depth) = self.mip_dimensions(id.mip)?;
+        let (bytes_per_row, rows_per_image) = compressed_pitches(format, width, height)?;
         Ok(UploadPlan {
             id,
             path: UploadPath::Compressed,
             format,
-            width: surf.width,
-            height: surf.height,
-            depth: surf.depth,
+            width,
+            height,
+            depth,
             data_offset: range.start,
             data_len: range.end - range.start,
             bytes_per_row,
