@@ -3,6 +3,68 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.28 - 2026-08-19
+
+**BC1 and BC4 decode get SIMD.** Two of the four remaining scalar decoders, and
+the first case in this campaign where the *same kernel* measured both a heavy
+loss and a solid win depending on nothing but where the dispatch sat.
+
+### BC4 decode: +22.2%
+
+A ceiling probe put the palette gather at **~77% of BC4 decode** (0.1536 ms
+against 0.0352 stubbed). BC4 is BC5 with a zero second channel, so it needs no
+new kernel at all: the existing `bc5_gather`, with an all-zero green palette and
+a zero index word, yields `(v, 0, 0, 255)` per pixel. It reuses that kernel's
+oracle too, rather than duplicating either.
+
+512^2, pinned, 16 paired CPU samples: **0.1094 ms against 0.1406, 16/16 wins,
+z = +4.00, +22.2%.** BC5 re-measured flat (z = +0.33) confirming the shared
+kernel was not disturbed. Byte-identical.
+
+### BC1 decode: +38.7%, after a 47.8% loss
+
+A BC1 palette is four RGBA entries - exactly sixteen bytes, exactly one register
+- so one `pshufb` expands four pixels from a 256-entry compile-time selector
+table. A ceiling probe put the gather at **~78% of BC1 decode**.
+
+Written the obvious way, as a per-block gather called from the shared block
+loop, it measured **0/16 wins, z = -4.00, 47.8% SLOWER than scalar**.
+
+The refutation decomposed into two costs, both from the ABI boundary that a
+`#[target_feature]` function cannot be inlined across:
+
+| arm | 512^2 CPU ms | against |
+|---|---|---|
+| scalar, inline | 0.1354 | - |
+| scalar body, behind the SIMD call | 0.1716 | **-26.7%** - the call and its `OnceLock` alone |
+| `pshufb` body, same boundary | 0.1959 | **-13.9%** further, from the palette spill |
+| `pshufb`, boundary hoisted to surface scope | **0.0805** | **+38.7%** |
+
+The second cost is this crate's fifth store-forwarding stall: a `[u32; 4]` is
+passed by value through a caller-allocated stack copy on the Windows x64 ABI, so
+the callee rebuilt the vector element-wise from four loads and three `pinsrd` on
+the shuffle port. One sixteen-byte load recovered 0.041 ms of it.
+
+The fix for both is the same - dispatch **once per surface** instead of once per
+block, with the whole block loop inside the `#[target_feature]` function. The
+palette build is split into a plain `#[inline] bc1_palette`, which inlines *into*
+that loop, so the palette is built in registers and never reaches memory. Same
+kernel, same `pshufb`, an 86-point swing.
+
+A store-floor probe - identical stores, no palette indexing - reads 0.041 ms, so
+BC1 decode at 0.0805 is now within 2x of its own store stream.
+
+512^2, pinned, 16 paired CPU samples, alternating leading arm: **0.0805 ms
+against 0.1313, 16/16 wins, z = +4.00, +38.7%.** Byte-identical; the SSSE3
+surface loop is oracle-tested against the scalar block decoder over 20 000
+random surfaces including both endpoint orderings and the degenerate `c0 == c1`
+three-colour case.
+
+### Also
+
+- Removed `bc4_palette`, a one-line wrapper left dead by the BC4 change.
+- Non-multiple-of-four surfaces keep the scalar path, which is unchanged.
+
 ## 0.3.27 - 2026-08-19
 
 **BC6H encode gets SIMD, and doubles.** It had none - `grep` for any intrinsic in

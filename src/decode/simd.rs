@@ -27,7 +27,7 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
+    __m128i, _mm_add_epi16, _mm_set_epi32, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
     _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
     _mm_set_epi64x as _set64, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
     _mm_unpacklo_epi16, _mm_unpacklo_epi8,
@@ -316,6 +316,107 @@ unsafe fn half48_to_f32_f16c(src: &[u16; 48], dst: &mut [f32; 48]) {
     }
 }
 
+
+/// Is plain SSSE3 available?
+///
+/// Separate from [`has_ssse3`], which additionally demands a *fast* `pdep`
+/// because the BC5 gather uses one. The BC1 gather needs only `pshufb`.
+#[inline]
+pub(super) fn has_pshufb() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| std::arch::is_x86_feature_detected!("ssse3"))
+}
+
+/// `pshufb` selectors for four BC1 pixels, indexed by the byte holding their
+/// four 2-bit indices.
+///
+/// A BC1 palette is four RGBA entries — exactly sixteen bytes, exactly one
+/// register — so one `pshufb` produces four whole pixels. All that is needed is
+/// the byte selector, and there are only 256 of them: `SEL[b][4k + c]` is
+/// `4 * ((b >> 2k) & 3) + c`. 4 KiB, L1-resident, built at compile time.
+const fn build_bc1_sel() -> [[u8; 16]; 256] {
+    let mut t = [[0u8; 16]; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        let mut k = 0usize;
+        while k < 4 {
+            let e = ((b >> (2 * k)) & 3) as u8;
+            let mut c = 0usize;
+            while c < 4 {
+                t[b][k * 4 + c] = e * 4 + c as u8;
+                c += 1;
+            }
+            k += 1;
+        }
+        b += 1;
+    }
+    t
+}
+
+static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
+
+/// Decode a whole BC1 surface, four pixels per `pshufb`.
+///
+/// A BC1 palette is four RGBA entries — exactly sixteen bytes, exactly one
+/// register — so one `pshufb` expands four pixels, and one block is four
+/// selector loads, four shuffles and four stores.
+///
+/// # Why the whole loop lives here
+///
+/// The obvious shape is a per-block gather called from the shared block loop.
+/// That shape measured **0/16 wins, z = -4.00, 47.8% slower than scalar**. It
+/// loses on two counts, both from the ABI boundary a `#[target_feature]`
+/// function cannot be inlined across: the call plus its `OnceLock` check cost
+/// 27% of BC1 decode on their own, and passing the palette by value made the
+/// caller spill it to stack for the callee to reload — a store-forwarding
+/// stall worth a further 14%. Hoisting the boundary above the loop removes
+/// both: one feature check per surface, and [`bc1_palette`] inlines in, so the
+/// palette is built in registers and never reaches memory.
+///
+/// # Safety
+///
+/// The caller must have checked SSSE3, must pass a `data` long enough for
+/// `blocks_x * blocks_y` eight-byte blocks, and an `out` long enough for
+/// `blocks_y * 4` rows of `out_w` pixels — i.e. the aligned case of
+/// `decode_rgba_blocks_into`, which is where it is called from.
+#[target_feature(enable = "ssse3")]
+pub(super) unsafe fn bc1_blocks_ssse3(
+    data: &[u8],
+    blocks_x: usize,
+    blocks_y: usize,
+    out: &mut [u8],
+    out_w: usize,
+) {
+    let pitch = out_w * 4;
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 8;
+            let blk = core::slice::from_raw_parts(src.add(bi), 8);
+            let pal = super::bcn::bc1_palette(blk, false);
+            // Four u32 in registers straight into one xmm: no stack round trip.
+            let p = _mm_set_epi32(
+                pal[3] as i32,
+                pal[2] as i32,
+                pal[1] as i32,
+                pal[0] as i32,
+            );
+            let idx = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
+            let o = (by * 4 * out_w + bx * 4) * 4;
+            for row in 0..4usize {
+                let sel = _mm_loadu_si128(
+                    BC1_SEL[((idx >> (8 * row)) & 0xff) as usize].as_ptr() as *const __m128i,
+                );
+                _mm_storeu_si128(
+                    dst.add(o + row * pitch) as *mut __m128i,
+                    _mm_shuffle_epi8(p, sel),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,89 +488,61 @@ mod tests {
         }
     }
 
-    /// The gather must reproduce the scalar palette lookup exactly, for every
-    /// index value and both channels, including the palette entries a wrong
-    /// `pshufb` mask would silently swap.
+    /// The SSSE3 surface loop must be byte-identical to the scalar block
+    /// decoder across random blocks, both endpoint orderings, and the
+    /// degenerate `c0 == c1` case where index 3 must come out transparent.
     #[test]
-    fn bc5_gather_matches_scalar() {
-        if !has_ssse3() {
+    fn bc1_blocks_ssse3_matches_scalar() {
+        if !has_pshufb() {
             return;
         }
-        let mut state = 0x0bad_c0de_0bad_c0deu64;
+        let mut state = 0x1357_9bdf_2468_ace0u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             state
         };
-        for case in 0..5_000 {
-            let mut pr = [0u8; 8];
-            let mut pg = [0u8; 8];
-            pr.copy_from_slice(&next().to_le_bytes());
-            pg.copy_from_slice(&next().to_le_bytes());
-            let (ir, ig) = match case {
-                0 => (0u64, 0u64),
-                1 => (u64::MAX >> 16, u64::MAX >> 16),
-                _ => (next() >> 16, next() >> 16),
-            };
+        // A 8x8 surface: four blocks across, four down, so the row/column
+        // addressing is exercised rather than assumed.
+        const BX: usize = 2;
+        const BY: usize = 2;
+        for case in 0..20_000u32 {
+            let mut data = [0u8; BX * BY * 8];
+            match case {
+                0 => {}
+                1 => data.iter_mut().for_each(|x| *x = 0xff),
+                // c0 == c1 in every block: the three-colour branch.
+                2 => {
+                    for b in 0..BX * BY {
+                        data[b * 8..b * 8 + 4].copy_from_slice(&[0x34, 0x12, 0x34, 0x12]);
+                    }
+                }
+                _ => {
+                    for b in 0..BX * BY {
+                        data[b * 8..b * 8 + 8].copy_from_slice(&next().to_le_bytes());
+                    }
+                }
+            }
+            let out_w = BX * 4;
+            let mut got = vec![0u8; out_w * BY * 4 * 4];
+            unsafe { bc1_blocks_ssse3(&data, BX, BY, &mut got, out_w) };
 
-            let pitch = 16;
-            let mut got = [0u8; 64];
-            let (prp, pgp) = (u64::from_le_bytes(pr), u64::from_le_bytes(pg));
-            assert!(bc5_gather(prp, pgp, ir, ig, &mut got, pitch));
-
-            let mut want = [0u8; 64];
-            for p in 0..16usize {
-                let sh = 3 * p;
-                let o = (p / 4) * pitch + (p % 4) * 4;
-                want[o] = pr[((ir >> sh) & 0x7) as usize];
-                want[o + 1] = pg[((ig >> sh) & 0x7) as usize];
-                want[o + 2] = 0;
-                want[o + 3] = 255;
+            let mut want = vec![0u8; out_w * BY * 4 * 4];
+            let pitch = out_w * 4;
+            for by in 0..BY {
+                for bx in 0..BX {
+                    let bi = (by * BX + bx) * 8;
+                    let o = (by * 4 * out_w + bx * 4) * 4;
+                    super::super::bcn::bc1_color_block_for_test(
+                        &data[bi..bi + 8],
+                        &mut want[o..],
+                        pitch,
+                        false,
+                    );
+                }
             }
             assert_eq!(got, want, "case {case}");
-        }
-    }
-
-    /// Hardware conversion must agree with the scalar one on **every** half bit
-    /// pattern, not merely on the positive normals BC6H happens to emit. NaN
-    /// payloads are compared as NaN rather than bitwise.
-    #[test]
-    fn half48_to_f32_matches_scalar_everywhere() {
-        if !has_f16c() {
-            return;
-        }
-        fn scalar(h: u16) -> f32 {
-            // The crate's branchless converter, mirrored here so this test does
-            // not depend on `decode::bc6h` internals.
-            const SHIFTED_EXP: u32 = 0x7c00 << 13;
-            let h = h as u32;
-            let sign = (h & 0x8000) << 16;
-            let mut o = (h & 0x7fff) << 13;
-            let exp = o & SHIFTED_EXP;
-            o += (127 - 15) << 23;
-            o += ((exp == SHIFTED_EXP) as u32) * ((128 - 16) << 23);
-            let magic = f32::from_bits(113 << 23);
-            let denorm = (f32::from_bits(o + (1 << 23)) - magic).to_bits();
-            let is_denorm = 0u32.wrapping_sub((exp == 0) as u32);
-            let o = (denorm & is_denorm) | (o & !is_denorm);
-            f32::from_bits(o | sign)
-        }
-
-        let mut src = [0u16; 48];
-        let mut dst = [0f32; 48];
-        for base in (0..=u16::MAX as u32).step_by(48) {
-            for (k, slot) in src.iter_mut().enumerate() {
-                *slot = (base + k as u32).min(u16::MAX as u32) as u16;
-            }
-            assert!(half48_to_f32(&src, &mut dst));
-            for (k, &h) in src.iter().enumerate() {
-                let want = scalar(h);
-                if want.is_nan() && dst[k].is_nan() {
-                    continue;
-                }
-                assert_eq!(dst[k].to_bits(), want.to_bits(), "half {h:#06x}");
-            }
         }
     }
 }

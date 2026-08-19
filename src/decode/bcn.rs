@@ -69,6 +69,29 @@ pub fn decode_bc1(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 }
 
 pub fn decode_bc1_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
+    // One runtime check per surface, not per block. A `#[target_feature]`
+    // function cannot be inlined into a caller that lacks the feature, so
+    // dispatching inside the block loop pays a real call — measured at 27% of
+    // BC1 decode, against a gather worth less than that. Hoisting the boundary
+    // above the loop removes the call and lets the palette build inline into
+    // it. The validation below is the same as `decode_rgba_blocks_into`'s, and
+    // anything it does not cover falls through to that shared path.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
+        let (blocks_x, blocks_y, expected) = block_grid(width, height, 8)?;
+        if data.len() < expected {
+            return Err(Error::TruncatedData);
+        }
+        let out_w = width as usize;
+        check_out_len(out, out_w, height as usize)?;
+        // SAFETY: SSSE3 is checked above. `block_grid` bounds the block count to
+        // `expected <= data.len()`, `check_out_len` bounds `out`, and the shape
+        // is exactly `decode_rgba_blocks_into`'s aligned case.
+        unsafe {
+            crate::decode::simd::bc1_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
+        }
+        return Ok(());
+    }
     decode_rgba_blocks_into(data, width, height, 8, out, |block, dst, pitch| {
         bc1_color_block(block, dst, pitch, false);
     })
@@ -233,24 +256,16 @@ fn check_out_len(out: &[u8], out_w: usize, out_h: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// Decode one BC1 colour block to RGBA8.
+/// The four RGBA palette entries of a BC1 colour block.
 ///
-/// `opaque` forces the four-colour interpretation regardless of endpoint order,
-/// which is what BC2 and BC3 colour blocks require.
-///
-/// Two things the general decoder does that this does not. It walks the index
-/// word with `indices >>= 2` after every pixel, which is a **sixteen-deep serial
-/// dependency chain** — the same shape that dominated BC7 before 0.3.6 — and it
-/// copies each pixel with a bounds-checked four-byte `copy_from_slice`. Reading
-/// each index by computed offset from an immutable `u32` makes all sixteen
-/// independent, and building the palette as four `u32`s turns the copy into a
-/// single word store.
-///
-/// The 565-to-888 expansion constants are the reference implementation's, and
-/// the oracle test asserts bit-identical output across random blocks and both
-/// endpoint orderings.
+/// Split out of [`bc1_color_block`] so the SSSE3 block loop can share it. It is
+/// a plain `#[inline]` function, not a `#[target_feature]` one, which is
+/// deliberate: a plain function inlines into a `#[target_feature]` caller, so
+/// the palette is built in registers there and never round-trips through the
+/// stack. Building it element-wise on the far side of an ABI boundary cost
+/// +14% against the scalar loop it was meant to beat.
 #[inline]
-fn bc1_color_block(blk: &[u8], out: &mut [u8], pitch: usize, opaque: bool) {
+pub(super) fn bc1_palette(blk: &[u8], opaque: bool) -> [u32; 4] {
     let c0 = u16::from_le_bytes([blk[0], blk[1]]) as u32;
     let c1 = u16::from_le_bytes([blk[2], blk[3]]) as u32;
     let (r0, g0, b0) = ((c0 >> 11) & 0x1f, (c0 >> 5) & 0x3f, c0 & 0x1f);
@@ -297,6 +312,33 @@ fn bc1_color_block(blk: &[u8], out: &mut [u8], pitch: usize, opaque: bool) {
         pal[3] = 0;
     }
 
+    pal
+}
+
+#[cfg(test)]
+pub(super) fn bc1_color_block_for_test(blk: &[u8], out: &mut [u8], pitch: usize, opaque: bool) {
+    bc1_color_block(blk, out, pitch, opaque)
+}
+
+/// Decode one BC1 colour block to RGBA8.
+///
+/// `opaque` forces the four-colour interpretation regardless of endpoint order,
+/// which is what BC2 and BC3 colour blocks require.
+///
+/// Two things the general decoder does that this does not. It walks the index
+/// word with `indices >>= 2` after every pixel, which is a **sixteen-deep serial
+/// dependency chain** — the same shape that dominated BC7 before 0.3.6 — and it
+/// copies each pixel with a bounds-checked four-byte `copy_from_slice`. Reading
+/// each index by computed offset from an immutable `u32` makes all sixteen
+/// independent, and building the palette as four `u32`s turns the copy into a
+/// single word store.
+///
+/// The 565-to-888 expansion constants are the reference implementation's, and
+/// the oracle test asserts bit-identical output across random blocks and both
+/// endpoint orderings.
+#[inline]
+fn bc1_color_block(blk: &[u8], out: &mut [u8], pitch: usize, opaque: bool) {
+    let pal = bc1_palette(blk, opaque);
     let idx = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
     // A whole block row per store: one slice range-check instead of four. See
     // `bc5_block_rgba` — this was worth +32% there.
@@ -430,14 +472,6 @@ fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
     }
 }
 
-/// [`bc4_palette_packed`] unpacked for the scalar path, which indexes it as an
-/// array — measured faster than shifting a register (an L1-resident table
-/// pipelines better than a dependent multiply-then-shift chain).
-#[inline(always)]
-fn bc4_palette(a0: u8, a1: u8, is_signed: bool) -> [u8; 8] {
-    bc4_palette_packed(a0, a1, is_signed).to_le_bytes()
-}
-
 /// The sixteen 3-bit indices of a BC4 block, as one immutable word.
 ///
 /// The reference walks these with `indices >>= 3` after every pixel, a
@@ -456,8 +490,19 @@ fn bc4_indices(blk: &[u8]) -> u64 {
 /// the two.
 #[inline]
 fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
-    let pal = bc4_palette(blk[0], blk[1], is_signed);
+    let pal_packed = bc4_palette_packed(blk[0], blk[1], is_signed);
+    let pal = pal_packed.to_le_bytes();
     let idx = bc4_indices(blk);
+
+    // BC4 is BC5 with a zero second channel: the same gather, with an all-zero
+    // green palette and a zero index word, yields (v, 0, 0, 255) per pixel.
+    // Reuses the kernel and its oracle rather than duplicating them.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if out.len() >= 3 * pitch + 16
+        && crate::decode::simd::bc5_gather(pal_packed, 0, idx, 0, out, pitch)
+    {
+        return;
+    }
     // A whole block row per store: one slice range-check instead of four. See
     // `bc5_block_rgba` — this was worth +32% there.
     for row in 0..4usize {
@@ -616,7 +661,7 @@ mod bc45_tests {
 /// for `a0 = 60, a1 = 133` the four-interpolant entry is 74 by division and 75
 /// by weights. The reference implementation makes the same distinction, so
 /// matching it bit-for-bit means keeping both forms. The oracle test caught this
-/// immediately when BC3 was first wired to `bc4_palette`.
+/// immediately when BC3 was first wired to the BC4 palette.
 #[inline(always)]
 fn bc3_alpha_palette(a0: u8, a1: u8) -> [u8; 8] {
     let (a0, a1) = (a0 as u32, a1 as u32);
@@ -659,8 +704,9 @@ fn bc2_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
 /// Decode one BC3 block to RGBA8: a BC4-style interpolated alpha block, then an
 /// opaque-mode colour block.
 ///
-/// The alpha half is literally a BC4 block, so it reuses [`bc4_palette`] and
-/// [`bc4_indices`] — including their independent index reads.
+/// The alpha half is literally a BC4 block, so it reuses [`bc4_indices`] —
+/// including its independent index reads. The palette is BC3's own division
+/// form, not BC4's weight form; see [`bc3_alpha_palette`] for why they differ.
 #[inline]
 fn bc3_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
     bc1_color_block(&blk[8..16], out, pitch, true);
