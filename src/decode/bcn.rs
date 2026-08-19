@@ -744,6 +744,22 @@ fn bc3_alpha_palette(a0: u8, a1: u8) -> [u8; 8] {
 /// the loop to reload — the store-forwarding stall that cost BC1 13.9% before
 /// 0.3.28.
 #[inline(always)]
+/// # A refuted optimisation, recorded so it is not retried
+///
+/// The `base + k*delta` identity that won for BC7, BC6H and the BC4 palette
+/// **loses here**, measured twice: signed **-7.0%** (0/16, z = -3.87) and
+/// unsigned **-6.3%** (0/16, z = -4.00), 512^2 paired.
+///
+/// The form below already has full instruction-level parallelism. `k` is a loop
+/// constant once unrolled, so `(6-k)` and `(k+1)` are compile-time constants and
+/// all six entries depend only on `a0` and `a1` — they issue together. Factoring
+/// to `base + k*delta` trades two constant multiplies for one variable multiply
+/// but **serialises every entry behind computing `base` and `delta` first**, and
+/// this block is latency-bound, not throughput-bound. Same wall as the three
+/// refutations recorded on `bc5_block_rgba`.
+///
+/// The build is ~22% of BC3 decode by ceiling probe, so the headroom is real;
+/// it just is not reachable by reducing the operation count.
 pub(super) fn bc3_alpha_palette_packed(a0: u8, a1: u8) -> u64 {
     let (a0, a1) = (a0 as u32, a1 as u32);
     let mut p = [0u32; 8];

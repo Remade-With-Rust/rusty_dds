@@ -3484,3 +3484,73 @@ Cumulative BC7 encode, 0.3.30 -> 0.3.34, byte-identical throughout:
 |---|---|---|---|
 | alpha-structured | 83.6123 ms | **30.9710 ms** | 14/14, z = +3.74, **2.70x** |
 | default | 33.5752 ms | **22.8795 ms** | 14/14, z = +3.74, **1.47x** |
+
+## §58 — The five-target sweep: three wins, two refutations
+
+| target | ceiling | outcome |
+|---|---|---|
+| BC6H decode | 4.6x above its store floor | **+25.4%** (0.3.36) |
+| encode parallel threshold | never validated | **+44.9%** at 2116 blocks (0.3.37) |
+| BC7 mode 1 | never measured | **+8.0%** on opaque (0.3.38) |
+| BC7 encode colour fits | doubling probe >=13% | **refuted**, see §59 |
+| BC3 decode palette build | ceiling probe ~22% | **refuted**, see §60 |
+
+Both refutations were changes that *worked* — byte-identical, oracle-tested — and
+were dropped because they did not measure. That is the point of the gate.
+
+## §59 — The batched seed fit: a real ceiling with no reachable win
+
+BC7 modes 4 and 5 each fit three endpoint seeds, crossing the
+`#[target_feature]` boundary once per seed and re-widening the same sixteen
+pixels each time. A batched kernel evaluated all three in one crossing with a
+single pixel load, tracking only the minimum distance (the error never depends
+on *which* palette entry wins) and re-scanning only the winner for indices.
+
+It was correct: byte-identical on all three fixtures, oracle-tested against the
+sequential form over 60 000 cases including the identical-candidate tie case.
+
+It did not measure:
+
+| n | fixture | result |
+|---|---|---|
+| 14 | opaque | +2.6%, z = +0.90 |
+| 14 | alpha-structured | +1.3%, z = +1.51 |
+| 10 | default | +2.1%, z = +0.38 |
+| **30** | **opaque** | **-0.6%, z = +0.23, 11 ties** |
+
+Three positive readings at n=10-14 that collapse at n=30. **This session produced
+that pattern four separate times** — a stack "regression" of -9.5%, an allocator
+"asymmetry" of 22%-vs-8%, a Vulkan hitch "inversion" of +16, and now this. The
+harness's low-n spread manufactures both signs and plausible magnitudes.
+
+Reverted: ~130 lines of kernel, an oracle and a const-generic dispatch path, for
+no measurable gain. The ceiling is real; it is simply not reachable by removing
+boundary crossings, which means the cost is inside the fit rather than around it.
+
+## §60 — BC3's palette build: the identity that wins everywhere else, loses here
+
+`bc3_alpha_palette_packed` is ~22% of BC3 decode by ceiling probe. Its
+interpolant `(6-k)*a0 + (k+1)*a1 + 1` factors exactly to `base + k*delta` — the
+identity that won for BC7, BC6H and the BC4 palette, and the division
+distributes over it so nothing rounds differently.
+
+Measured **twice**, both losses:
+
+| form | result |
+|---|---|
+| signed `i32` | **-7.0%**, 0/16, z = -3.87 |
+| unsigned `u32` | **-6.3%**, 0/16, z = -4.00 |
+
+Two mechanisms, and the second is the real one:
+
+1. The signed version pays sign-correction fixup on division by a constant that
+   the unsigned version does not — worth about a point.
+2. **The original already has full ILP.** `k` is a loop constant once unrolled,
+   so `(6-k)` and `(k+1)` are compile-time constants and all six entries depend
+   only on `a0` and `a1` — they issue together. Factoring to `base + k*delta`
+   trades two constant multiplies for one variable multiply but **serialises
+   every entry behind computing `base` and `delta`**. This block is latency-bound.
+
+Same wall as the three refutations already recorded on `bc5_block_rgba`: the
+lever is chain length, not operation count. Recorded on the function itself so it
+is not retried.
