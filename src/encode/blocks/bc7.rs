@@ -506,6 +506,7 @@ pub(super) fn pack_bc7_mode5(
 }
 
 /// BC7 mode 6: single subset, RGBA 7-bit endpoints + P-bits, 4-bit indices.
+
 pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
     let mut best_bits = [0u8; 16];
     let mut best_err = i64::MAX;
@@ -513,20 +514,27 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) 
     let mut have = false;
 
     let (seeds, n_seeds) = bc7_mode6_seeds(pixels);
+    // Keep the winning candidate itself, not just its endpoints: the refine
+    // below starts from this rather than re-deriving it.
+    let mut best_fit: Option<Mode6Fit> = None;
     for &(ep0, ep1) in &seeds[..n_seeds] {
-        if let Some((bits, err)) = try_bc7_mode6(pixels, ep0, ep1, false) {
-            if err < best_err {
-                best_err = err;
-                best_bits = bits;
-                best_seed = (ep0, ep1);
-                have = true;
-            }
+        let f = mode6_base(pixels, ep0, ep1);
+        if f.err < best_err {
+            best_err = f.err;
+            let (bits, _) = f.pack();
+            best_bits = bits;
+            best_seed = (ep0, ep1);
+            best_fit = Some(f);
+            have = true;
         }
     }
     // Skip LS on near-solid blocks — seed endpoints already win.
     let do_ls = rgba_span_sum(pixels) > 8;
     if do_ls {
-        if let Some((bits, err)) = try_bc7_mode6(pixels, best_seed.0, best_seed.1, true) {
+        if let Some(base) = best_fit {
+            let (bits, err) = mode6_refine(pixels, base).pack();
+            if err < best_err {
+            }
             if err <= best_err {
                 best_bits = bits;
                 best_err = err;
@@ -713,18 +721,38 @@ pub(super) fn fit_indices_mode6_exhaustive(pixels: &[[u8; 4]; 16], pal: &[[u8; 4
     (indices, err)
 }
 
-pub(super) fn try_bc7_mode6(
-    pixels: &[[u8; 4]; 16],
-    ep0: [u8; 4],
-    ep1: [u8; 4],
-    refine: bool,
-) -> Option<([u8; 16], i64)> {
+/// One evaluated mode-6 candidate: quantized endpoints, fitted indices, SSE.
+///
+/// Carrying this out of the seed loop is what lets the refine start from the
+/// winner instead of recomputing it — see [`encode_bc7_mode6_inner`].
+#[derive(Clone, Copy)]
+pub(super) struct Mode6Fit {
+    q0: [u8; 4],
+    p0: u8,
+    q1: [u8; 4],
+    p1: u8,
+    indices: [u8; 16],
+    err: i64,
+}
+
+impl Mode6Fit {
+    #[inline]
+    fn pack(&self) -> ([u8; 16], i64) {
+        (
+            pack_bc7_mode6(self.q0, self.p0, self.q1, self.p1, self.indices),
+            self.err,
+        )
+    }
+}
+
+/// Quantize a seed, build its palette, fit indices, canonicalise the anchor.
+pub(super) fn mode6_base(pixels: &[[u8; 4]; 16], ep0: [u8; 4], ep1: [u8; 4]) -> Mode6Fit {
     let (mut q0, mut p0) = quantize_7p(ep0);
     let (mut q1, mut p1) = quantize_7p(ep1);
     let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
     // SSE is accumulated during the index fit — the recon after an endpoint
     // swap + index inversion is identical (W6M symmetry), so no re-walk.
-    let (mut indices, mut err) = fit_indices_mode6(pixels, &pal);
+    let (mut indices, err) = fit_indices_mode6(pixels, &pal);
     if indices[0] > 7 {
         std::mem::swap(&mut q0, &mut q1);
         std::mem::swap(&mut p0, &mut p1);
@@ -732,34 +760,58 @@ pub(super) fn try_bc7_mode6(
             *idx = 15 - *idx;
         }
     }
-
-    // Least-squares refine endpoints given indices (then re-quantize).
-    if refine {
-        if let Some((r0, r1)) = ls_endpoints_mode6(pixels, &indices) {
-            let (nq0, np0) = quantize_7p(r0);
-            let (nq1, np1) = quantize_7p(r1);
-            let npal = palette_mode6(unquantize_7p(nq0, np0), unquantize_7p(nq1, np1));
-            let (mut nidx, nerr) = fit_indices_mode6(pixels, &npal);
-            if nidx[0] > 7 {
-                for idx in nidx.iter_mut() {
-                    *idx = 15 - *idx;
-                }
-                q0 = nq1;
-                p0 = np1;
-                q1 = nq0;
-                p1 = np0;
-            } else {
-                q0 = nq0;
-                p0 = np0;
-                q1 = nq1;
-                p1 = np1;
-            }
-            indices = nidx;
-            err = nerr;
-        }
+    Mode6Fit {
+        q0,
+        p0,
+        q1,
+        p1,
+        indices,
+        err,
     }
+}
 
-    Some((pack_bc7_mode6(q0, p0, q1, p1, indices), err))
+/// Least-squares refine an ALREADY-FITTED candidate.
+///
+/// This used to be the tail of a call that re-derived `base` from the seed
+/// endpoints first — quantize twice, rebuild the palette, and run
+/// `fit_indices_mode6` again — for a seed the search loop had just evaluated.
+/// That redundant fit was **one of every 5.14** the encoder performed, counted
+/// directly. Starting from the winner is byte-identical and simply skips it.
+pub(super) fn mode6_refine(pixels: &[[u8; 4]; 16], base: Mode6Fit) -> Mode6Fit {
+    let Some((r0, r1)) = ls_endpoints_mode6(pixels, &base.indices) else {
+        return base;
+    };
+    let (nq0, np0) = quantize_7p(r0);
+    let (nq1, np1) = quantize_7p(r1);
+    let npal = palette_mode6(unquantize_7p(nq0, np0), unquantize_7p(nq1, np1));
+    let (mut nidx, nerr) = fit_indices_mode6(pixels, &npal);
+    let (q0, p0, q1, p1) = if nidx[0] > 7 {
+        for idx in nidx.iter_mut() {
+            *idx = 15 - *idx;
+        }
+        (nq1, np1, nq0, np0)
+    } else {
+        (nq0, np0, nq1, np1)
+    };
+    Mode6Fit {
+        q0,
+        p0,
+        q1,
+        p1,
+        indices: nidx,
+        err: nerr,
+    }
+}
+
+pub(super) fn try_bc7_mode6(
+    pixels: &[[u8; 4]; 16],
+    ep0: [u8; 4],
+    ep1: [u8; 4],
+    refine: bool,
+) -> Option<([u8; 16], i64)> {
+    let f = mode6_base(pixels, ep0, ep1);
+    let f = if refine { mode6_refine(pixels, f) } else { f };
+    Some(f.pack())
 }
 
 pub(super) fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 4], [u8; 4])> {

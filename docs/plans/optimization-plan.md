@@ -2520,3 +2520,83 @@ worth more than a timing number the machine is deciding.
   a ceiling probe on the remainder has not been run.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
 - **This box needs attention before any further timing round.**
+
+---
+
+## §37 — The encoder's redundant fit, and a decomposition that was wrong twice
+
+§36 found the decoder's `base + w*delta` identity living in the encoder's
+`palette_mode6` and could not measure it. This round went a layer deeper, with
+counters instead of a clock, because the box is still degraded.
+
+### Counters found what timing could not
+
+Instrumenting the BC7 mode-6 search over 21 847 blocks:
+
+| | per block |
+|---|---:|
+| seeds tried | 3.18 |
+| **`fit_indices` calls** | **5.14** |
+| refines run | 98.0% of blocks |
+| refines that improved | 65.9% |
+| seed 0 / seed 1 / seed 2+ wins | 74.3% / 19.3% / **6.4%** |
+
+3.18 seed fits plus ~1.96 from the refine gives 5.14 — and the refine reaches
+that by calling back in with the winning *endpoints*, which re-quantizes them,
+rebuilds the palette and re-runs the fit **for a candidate just evaluated**.
+Carrying the candidate itself into the refine removes it:
+
+**112 239 → 90 833 fits, exactly −21 406 = the refine count. −19.1%.**
+Byte-identical, and every other counter unchanged.
+
+### Then the arithmetic did not close
+
+Removing 19% of what was assumed to be the dominant kernel produced **zero**
+measurable change — ten samples per arm, means 28.6 against 28.5.
+
+Per this file's own rule that indicts the decomposition rather than the code,
+ceiling probes inside mode 6:
+
+| stage | share of BC7 encode |
+|---|---:|
+| `fit_indices` | ~18% |
+| seed search | ~17% |
+| `quantize_7p` | ~11% |
+| `ls_endpoints` | **~0%** |
+
+`fit_indices` is 18%, not dominant. 19% of 18% is **3.4%** — exactly the size of
+effect a ±10% box cannot see. The arithmetic closes, and the null result was
+correct rather than mysterious.
+
+**The assumption that failed was never measured.** "The 16×16 index search must
+be the cost" is plausible, was believed through the whole implementation, and was
+wrong by a factor of three. The ceiling probe that settled it takes one build and
+could have run first.
+
+### The 6.4%
+
+Seeds 2 through 4 win **6.4%** of blocks while costing 1.18 of the 3.18 seed fits
+per block. That is a search-skip-gate candidate worth roughly 6% of encode — but
+it is **not** byte-identical, so it needs the encoder campaign's corpus A/B
+(102 cases, PSNR + payload FNV), not a timing run. Logged, not attempted: the
+mandate for that encoder is faster **and** better, and a quality trade cannot be
+judged on this box either.
+
+### The lesson worth keeping
+
+**A counter and a ceiling probe answer different questions, and this round needed
+both.** The counter proved the work was removed (−21 406 fits, exact). The
+ceiling probe explained why removing it did not show (18%, not 60%). Either alone
+would have misled — the counter into claiming a win, the timing into concluding
+the change did nothing.
+
+On a box that will not hold still, that pairing is the whole method: **count what
+you removed, and bound what it was worth.**
+
+### Still open
+
+- Seed pruning (6.4% win rate) — needs the corpus A/B, not a stopwatch.
+- The seed search itself is ~17% and `quantize_7p` ~11%; neither has had a
+  ceiling probe of its internals.
+- BC6H interpolation (§34) and the BC5 palette chain (§32).
+- **The box.**

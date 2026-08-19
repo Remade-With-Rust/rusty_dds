@@ -3,6 +3,63 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.20 - 2026-08-19
+
+**Encoder: the BC7 mode-6 refine reuses the winning fit.** The search evaluates
+up to five seed candidates, keeps the best, then least-squares refines it - by
+calling back in with the winning *endpoints*, which re-quantized them, rebuilt
+the palette and re-ran `fit_indices_mode6` for a candidate it had just evaluated.
+
+Carrying the evaluated candidate itself into the refine skips that. **Byte-identical
+output**, verified two ways.
+
+### Counted, not timed
+
+This box is degraded (one earlier sample read 59.13 ms against a ~25 ms median),
+so the verdict rests on deterministic counters:
+
+| | before | after |
+|---|---:|---:|
+| `fit_indices_mode6` calls | 112 239 | **90 833** |
+| per block | 5.14 | **4.16** |
+
+The drop is exactly 21 406 - precisely the number of refines - so one redundant
+fit per refined block is gone. **-19.1% of all index fits.** Every other counter
+(blocks, seeds tried, refines run, refines that improved) is unchanged, so the
+search itself behaves identically.
+
+### What that is worth, honestly
+
+Ceiling probes inside the BC7 encode:
+
+| stage | share |
+|---|---:|
+| `fit_indices` | ~18% |
+| seed search | ~17% |
+| `quantize_7p` | ~11% |
+| `ls_endpoints` | ~0% |
+
+So 19% fewer fits is **~3.4% of encode** - real, but under this box's noise
+floor, and no timing improvement is claimed. Ten samples per arm showed no
+separation (means 28.6 against 28.5), which is the expected result for a 3.4%
+effect measured at +/-10%.
+
+### Also
+
+`palette_mode6` now uses the same `base + w * delta` factoring as the decoder:
+`c0 * 64 + 32 + w * (c1 - c0)` is one multiply per component instead of two, 64
+rather than 128 per call, and it is called up to seven times a block. Also
+byte-identical; also unmeasurable here. Confirmed by reading the emitted
+assembly: **`imul` 851 -> 835**.
+
+### Notes
+
+- Byte-identity verified by the frozen-payload tests (`quality_payloads_are_frozen`,
+  `fast_payloads_are_frozen`, `rdo_payloads_are_frozen`) **and** by an explicit
+  before/after payload hash across BC7, BC1, BC3 and BC5U - all four unchanged.
+- Adds `examples/probe_encbytes.rs`, the payload-hash gate used for that check.
+- 97 tests pass.
+
 ## 0.3.19 - 2026-08-19
 
 **BC6H writes a block row per store.** The scatter that widens RGB to RGBA and
