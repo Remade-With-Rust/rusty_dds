@@ -3,6 +3,56 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.33 - 2026-08-19
+
+**BC7 encode +10.1%, by deleting work rather than vectorising it.** The next
+target was the colour fits' 7.95 kernel crossings per block. Counters found two
+redundancies first, and eliminating redundancy comes before vectorising.
+
+### Modes 4 and 5 were computing the same seeds twice
+
+`extrema_opaque`, `channel_minmax_rgb` and `pca_extremes_rgb` are pure functions
+of `pixels`, and at rotation 0 modes 4 and 5 run on the *same* pixels. Counters,
+per block:
+
+```
+extrema=2.00  chan_minmax=2.00  pca=2.00  ls=2.00
+```
+
+Every one computed twice. They are now computed once into a `ColorSeeds` and
+passed to both modes. Rotations get their own set, because rotated pixels are
+different pixels.
+
+(The first attempt to measure this reported `pca=0.00`, which is impossible
+against two visible call sites — `pca_extremes_rgb` lives in `bc1.rs`, so the
+patch that was supposed to instrument it never matched anything. A counter
+reading zero for work that must be happening is a stale instrument, not a
+finding.)
+
+### One fit in eight was re-fitting a seed already fitted
+
+The three seeds frequently coincide — measured **0.78 blocks per block** where
+the PCA seed equals the extrema seed, and 0.26 where the channel min/max seed
+does. Fitting an endpoint pair a second time cannot change anything: the same
+endpoints give the same palette, the same indices and the same error, and the
+guard is a strict `<`. Those **1.04 fits per block** are now skipped, exactly.
+
+512^2, forced serial, pinned, paired CPU samples:
+
+| fixture | before | after | verdict |
+|---|---|---|---|
+| alpha-structured | 39.3880 ms | **35.4004 ms** | 16/16, z = +4.00, **+10.1%** |
+| default | 21.5929 ms | 21.0503 ms | 7/12, z = +1.26, +2.5% (not significant) |
+
+The default fixture barely moves, and that is the mechanism confirming itself:
+mode 4 never runs there, so there is no cross-mode duplication to remove and
+only the duplicate-seed skip applies. **Byte-identical on both fixtures.**
+
+### Still open
+
+The colour fits still cross the SIMD boundary once each. That hoist - the
+original next step - is unchanged and unattempted.
+
 ## 0.3.32 - 2026-08-19
 
 **BC7 encode: +18.5%, by crossing the SIMD boundary 4.2x less often.** And a
