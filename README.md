@@ -82,6 +82,24 @@ CRYTEK GameSDK + 10 USC-SIPI TIFF), pinned, interleaved:
 | BC7 wall (pinned min, 25 cases) | 2364 ms | **1167 ms** (2.03×) |
 | Largest single-case gain | — | **+13.53 dB** (BC7, UI startscreen) |
 
+**Block decode** — every BCn decoder is now vectorised. 512², process-pinned,
+**process CPU time**, 12 paired samples per format with the leading arm alternated,
+against 0.3.27. All byte-identical; each kernel is oracle-tested against the scalar
+twin it replaces.
+
+| Format | 0.3.27 | now | verdict |
+|---|---|---|---|
+| BC1 | 0.1445 ms | **0.0878 ms** | 12/12, z = +3.46, **+39.2%** |
+| BC2 | 0.2471 ms | **0.1019 ms** | 12/12, z = +3.46, **+58.7%** |
+| BC3 | 0.2894 ms | **0.1605 ms** | 12/12, z = +3.46, **+44.5%** |
+| BC4 | 0.1393 ms | **0.1104 ms** | 12/12, z = +3.46, **+20.8%** |
+| BC5 | 0.1551 ms | 0.1547 ms | untouched — flat at z = +0.33 |
+| BC6H | 0.7129 ms | **0.5046 ms** | 12/12, z = +3.46, **+29.2%** |
+
+```sh
+DEC_FMT=bc1 cargo run --release --example probe_dec --manifest-path sim/Cargo.toml
+```
+
 **Rate-distortion optimization** (opt-in, `λ=0` is byte-identical — verified by payload
 hash on all 102 cases). Rate is *measured*: payloads deflated at level 8, the same channel
 a zip-based game archive uses.
