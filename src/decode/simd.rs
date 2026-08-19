@@ -750,6 +750,79 @@ pub(super) unsafe fn bc4_blocks_ssse3(
     }
 }
 
+
+/// Convert one BC6H block's planar halves straight to RGBA `f32` rows, without
+/// ever materialising an intermediate `f32` array.
+///
+/// # The stall this removes
+///
+/// The two-pass shape was: convert 48 halves into an `[f32; 48]` scratch with
+/// 256-bit stores, then build each output row by reading that scratch back with
+/// **scalar four-byte loads**. A vector store feeding a scalar load is this
+/// crate's recurring store-forwarding stall, and a decomposition probe found the
+/// pair costing **34% (conversion) + 29% (widen)** of BC6H decode — against 8%
+/// for the interpolation that 0.3.30 vectorised.
+///
+/// Planar halves (0.3.30) are what make the fusion cheap: eight reds, eight
+/// greens and eight blues are each one contiguous 128-bit load, so `vcvtph2ps`
+/// yields three vectors of eight floats that transpose to eight RGBA pixels with
+/// four unpacks, four shuffles and four `permute2f128`s. Alpha is a constant
+/// `1.0` vector, never loaded.
+///
+/// Two groups of eight pixels cover the block; group 0 is rows 0-1 and group 1
+/// is rows 2-3, because planar pixel order is row-major.
+///
+/// Returns `false` when F16C/AVX are absent, so the caller keeps its scalar
+/// two-pass path.
+///
+/// # Safety
+///
+/// `dst` must have room for four rows of sixteen `f32` at `pitch` stride, i.e.
+/// `3 * pitch + 16` elements.
+pub(super) unsafe fn bc6h_planar_to_rgba(src: &[u16; 48], dst: *mut f32, pitch: usize) -> bool {
+    if !has_f16c() {
+        return false;
+    }
+    bc6h_planar_to_rgba_f16c(src, dst, pitch);
+    true
+}
+
+#[target_feature(enable = "f16c,avx")]
+unsafe fn bc6h_planar_to_rgba_f16c(src: &[u16; 48], dst: *mut f32, pitch: usize) {
+    use core::arch::x86_64::{
+        _mm256_cvtph_ps, _mm256_permute2f128_ps, _mm256_set1_ps, _mm256_shuffle_ps,
+        _mm256_storeu_ps, _mm256_unpackhi_ps, _mm256_unpacklo_ps,
+    };
+    let one = _mm256_set1_ps(1.0);
+    for g in 0..2usize {
+        let ld = |ch: usize| {
+            _mm256_cvtph_ps(_mm_loadu_si128(
+                src.as_ptr().add(ch * 16 + g * 8) as *const __m128i,
+            ))
+        };
+        let (rf, gf, bf) = (ld(0), ld(1), ld(2));
+
+        // 8x4 transpose: r0g0r1g1 / r2g2r3g3 / b0a0b1a1 / b2a2b3a3 per lane.
+        let t0 = _mm256_unpacklo_ps(rf, gf);
+        let t1 = _mm256_unpackhi_ps(rf, gf);
+        let t2 = _mm256_unpacklo_ps(bf, one);
+        let t3 = _mm256_unpackhi_ps(bf, one);
+        // Each `q` now holds one pixel per 128-bit lane: q0 = px0 | px4, etc.
+        let q0 = _mm256_shuffle_ps(t0, t2, 0x44);
+        let q1 = _mm256_shuffle_ps(t0, t2, 0xEE);
+        let q2 = _mm256_shuffle_ps(t1, t3, 0x44);
+        let q3 = _mm256_shuffle_ps(t1, t3, 0xEE);
+
+        // Lane-lows are the first row of the group, lane-highs the second.
+        let row = dst.add(g * 2 * pitch);
+        _mm256_storeu_ps(row, _mm256_permute2f128_ps(q0, q1, 0x20));
+        _mm256_storeu_ps(row.add(8), _mm256_permute2f128_ps(q2, q3, 0x20));
+        let row = row.add(pitch);
+        _mm256_storeu_ps(row, _mm256_permute2f128_ps(q0, q1, 0x31));
+        _mm256_storeu_ps(row.add(8), _mm256_permute2f128_ps(q2, q3, 0x31));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,6 +1116,88 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The fused convert-and-widen must be bit-identical to the two-pass path it
+    /// replaces, **exhaustively over the domain BC6H can actually produce**.
+    ///
+    /// That domain is `0 ..= 0x7BFF`. `bc6h_mode11_half` emits
+    /// `((v * 31) >> 6) as u16` for a non-negative `v <= 0xFFFF`, so the result
+    /// is at most 31 743 — the largest *finite* half — and never negative. The
+    /// encoder clamps to the same `0x7BFF`. BC6H therefore never produces a NaN,
+    /// an infinity, or a negative half, and the exponent field is never all-ones.
+    ///
+    /// This matters: over the FULL `u16` range the in-house scalar
+    /// [`super::super::bc6h::half_to_f32`] and hardware `vcvtph2ps` disagree on
+    /// NaN payloads, which is why an earlier version of this test failed. That
+    /// disagreement is real but unreachable, and testing it would have gated a
+    /// correct kernel on values the codec cannot emit.
+    ///
+    /// 31 744 values is small enough to sweep completely, so this is exhaustive
+    /// rather than sampled — and because the uniform sweep puts every value
+    /// through every one of the 48 lane positions, it also covers lane
+    /// placement. A randomised in-domain pass then mixes distinct values across
+    /// lanes to catch a transpose that only shows with unequal channels.
+    ///
+    /// It doubles as the first oracle [`half48_to_f32`] has ever had: proving
+    /// `vcvtph2ps` equals the scalar converter across the reachable domain
+    /// covers the two-pass path too.
+    #[test]
+    fn bc6h_planar_to_rgba_matches_two_pass() {
+        if !has_f16c() {
+            return;
+        }
+        const PITCH: usize = 40;
+        const MAX: u32 = 0x7BFF; // largest half BC6H can emit
+
+        let check = |src: &[u16; 48], label: &str| {
+            let mut got = vec![0f32; 3 * PITCH + 16];
+            unsafe { assert!(bc6h_planar_to_rgba(src, got.as_mut_ptr(), PITCH)) };
+            let mut want = vec![0f32; 3 * PITCH + 16];
+            for p in 0..16usize {
+                let o = (p / 4) * PITCH + (p % 4) * 4;
+                want[o] = super::super::bc6h::half_to_f32(src[p]);
+                want[o + 1] = super::super::bc6h::half_to_f32(src[16 + p]);
+                want[o + 2] = super::super::bc6h::half_to_f32(src[32 + p]);
+                want[o + 3] = 1.0;
+            }
+            for (i, (a, b)) in got.iter().zip(want.iter()).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "{label}, element {i}");
+            }
+        };
+
+        // Exhaustive over the reachable domain, every value in every lane.
+        for v in 0..=MAX {
+            check(&[v as u16; 48], &format!("uniform {v:#06x}"));
+        }
+
+        // Distinct values across lanes, to catch a transpose the uniform sweep
+        // cannot see.
+        let mut state = 0x6b6b_f00d_1234_5678u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..20_000u32 {
+            let mut src = [0u16; 48];
+            match case {
+                // Every lane a different value, in order: pins the transpose.
+                0 => {
+                    for (i, v) in src.iter_mut().enumerate() {
+                        *v = (i as u16 + 1) * 97;
+                    }
+                }
+                1 => src = [MAX as u16; 48],
+                _ => {
+                    for v in src.iter_mut() {
+                        *v = (next() % (MAX as u64 + 1)) as u16;
+                    }
+                }
+            }
+            check(&src, &format!("case {case}"));
         }
     }
 }

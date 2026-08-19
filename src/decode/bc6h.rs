@@ -52,6 +52,38 @@ pub fn decode_bc6h_into(
                     }
                 }
             }
+            // Whole blocks skip the f32 scratch entirely: converting and
+            // widening in registers removes a 256-bit-store / 4-byte-load
+            // round trip that a decomposition probe measured at 34% + 29% of
+            // BC6H decode. Edge blocks keep the two-pass path below.
+            //
+            // This does NOT contradict the refuted fusion recorded below. That
+            // one fused the conversion into the *strided scalar scatter*, which
+            // de-vectorised the conversion. This vectorises the scatter instead,
+            // which planar halves (0.3.30) made possible and interleaved ones
+            // did not.
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            {
+                let px0 = bx * 4;
+                let py0 = by * 4;
+                if py0 + 4 <= h && px0 + 4 <= w {
+                    let d = (py0 * w + px0) * 4;
+                    let pitch = w * 4;
+                    // SAFETY: the bounds above put all four rows inside `out`;
+                    // `d + 3 * pitch + 16 <= out.len()` follows from
+                    // `py0 + 4 <= h` and `px0 + 4 <= w`.
+                    if unsafe {
+                        crate::decode::simd::bc6h_planar_to_rgba(
+                            &scratch,
+                            out.as_mut_ptr().add(d),
+                            pitch,
+                        )
+                    } {
+                        continue;
+                    }
+                }
+            }
+
             // Convert in one tight straight-line pass, NOT folded into the
             // strided scatter below. Folding them looks like the obvious win —
             // one pass instead of two — and MEASURED SLOWER (1024^2 24-thread:
@@ -311,7 +343,7 @@ pub fn decode_bc6h(
 /// Exhaustively verified against the reference for all 65 536 inputs by
 /// `half_to_f32_matches_reference_for_every_bit_pattern`.
 #[inline(always)]
-fn half_to_f32(h: u16) -> f32 {
+pub(super) fn half_to_f32(h: u16) -> f32 {
     const SHIFTED_EXP: u32 = 0x7c00 << 13;
     let h = h as u32;
     let sign = (h & 0x8000) << 16;

@@ -3,6 +3,61 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.36 - 2026-08-19
+
+**BC6H decode +25.4%: the sixth store-forwarding stall.** A decomposition probe
+over the *current* tree, not the one the last round measured:
+
+| stage | share of BC6H decode |
+|---|---|
+| mode-11 interpolation | ~8% (vectorised in 0.3.30) |
+| **half-to-f32 conversion** | **~34%** |
+| **RGB-to-RGBA widen and scatter** | **~29%** |
+| stores and block loop | ~22% |
+
+The stage 0.3.30 optimised is now the *smallest* piece, and 34% for six
+`vcvtph2ps` per block does not close arithmetically — six pipelined vector
+instructions cannot cost a third of a decode. That is a stall, not work.
+
+The chain was: interpolation writes `scratch` with vector stores, the converter
+reads it and writes an `[f32; 48]` with 256-bit stores, and the widen reads that
+back with **scalar four-byte loads**. Vector store feeding a scalar load, for the
+sixth time in this crate.
+
+Whole blocks now skip the f32 scratch entirely. The planar layout introduced in
+0.3.30 is what makes it cheap: eight reds, greens and blues are each one
+contiguous 128-bit load, so `vcvtph2ps` yields three vectors that transpose to
+eight RGBA pixels with four unpacks, four shuffles and four `permute2f128`s.
+Alpha is a constant `1.0` vector, never loaded. Edge blocks keep the two-pass
+path.
+
+**This does not contradict the fusion refuted earlier in `bc6h.rs`.** That one
+folded the conversion into the *strided scalar scatter*, which de-vectorised the
+conversion; this vectorises the scatter instead. Interleaved halves made the
+first shape the only one available — planar made this one possible.
+
+512^2, pinned, 16 paired CPU samples: **0.5737 ms against 0.7690, 16/16 wins,
+z = +4.00, +25.4%.**
+
+### The oracle, and a domain that mattered
+
+The kernel is verified **exhaustively over the domain BC6H can actually
+produce** — `0 ..= 0x7BFF`, because `((v * 31) >> 6) as u16` cannot exceed
+31 743, the largest finite half, and cannot go negative. BC6H never emits a NaN,
+an infinity or a negative half.
+
+A first version of the oracle swept the full `u16` range and **failed**. The
+cause was not the kernel: over the unreachable part of that range the in-house
+scalar converter and hardware `vcvtph2ps` disagree on **NaN payloads**. Testing
+it would have gated a correct kernel on values the codec cannot emit. The domain
+is only 31 744 values, so the test now sweeps all of them — and because the
+uniform sweep puts every value through all 48 lane positions, it covers lane
+placement too.
+
+That also gives `half48_to_f32` **the first oracle it has ever had**: proving
+`vcvtph2ps` equals the scalar converter across the reachable domain covers the
+two-pass path as well.
+
 ## 0.3.35 - 2026-08-19
 
 **BC4 decode +40.4%, BC5 +22.0% — same kernel, moved dispatch.** The last two
