@@ -27,7 +27,8 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_set_epi32, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
+    __m128i, _mm_add_epi16, _mm_and_si128, _mm_cvtsi64_si128, _mm_loadl_epi64,
+    _mm_or_si128, _mm_set1_epi32, _mm_set_epi32, _mm_unpacklo_epi64, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
     _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
     _mm_set_epi64x as _set64, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
     _mm_unpacklo_epi16, _mm_unpacklo_epi8,
@@ -417,6 +418,172 @@ pub(super) unsafe fn bc1_blocks_ssse3(
     }
 }
 
+
+/// Per-pixel mask keeping RGB and clearing alpha, so a decoded alpha byte can be
+/// `or`ed straight in.
+const RGB_MASK: i32 = 0x00ff_ffff;
+
+/// Two BC2 alpha pixels, indexed by the byte holding their two 4-bit values.
+///
+/// Laid out at the alpha positions of two RGBA pixels with the colour bytes
+/// zeroed, so `unpacklo_epi64` of two of these is a whole row's alpha, ready to
+/// `or` into the colour vector. `* 17` is the reference's 4-bit-to-8-bit scale,
+/// exactly `0x0F -> 0xFF`.
+const fn build_bc2_alpha() -> [[u8; 8]; 256] {
+    let mut t = [[0u8; 8]; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        t[b][3] = ((b & 0x0f) * 17) as u8;
+        t[b][7] = (((b >> 4) & 0x0f) * 17) as u8;
+        b += 1;
+    }
+    t
+}
+
+static BC2_ALPHA: [[u8; 8]; 256] = build_bc2_alpha();
+
+/// `pshufb` selectors for two BC3 alpha pixels, indexed by the six bits holding
+/// their two 3-bit palette indices.
+///
+/// `0x80` makes `pshufb` emit zero, so the colour bytes come out clear and only
+/// the alpha positions carry a palette entry. Six bits rather than twelve keeps
+/// the table at 512 bytes instead of 64 KiB — two loads and an `unpacklo_epi64`
+/// per row are far cheaper than leaving L1.
+const fn build_bc3_sel() -> [[u8; 8]; 64] {
+    let mut t = [[0x80u8; 8]; 64];
+    let mut b = 0usize;
+    while b < 64 {
+        t[b][3] = (b & 0x7) as u8;
+        t[b][7] = ((b >> 3) & 0x7) as u8;
+        b += 1;
+    }
+    t
+}
+
+static BC3_SEL: [[u8; 8]; 64] = build_bc3_sel();
+
+/// Decode a whole BC2 surface: BC1 colour, with 4-bit alpha folded in before the
+/// store.
+///
+/// The scalar path decodes colour, stores four RGBA words per row, and then
+/// performs **sixteen single-byte read-modify-writes** back into those same
+/// words. That is a store-forwarding hazard per pixel on top of a doubled store
+/// stream, and a ceiling probe put it at **37% of BC2 decode** (0.2305 ms
+/// against 0.1445 with the alpha pass stubbed). Merging the alpha into the
+/// colour vector makes the block one store per row again.
+///
+/// # Safety
+///
+/// As [`bc1_blocks_ssse3`], with sixteen-byte blocks.
+#[target_feature(enable = "ssse3")]
+pub(super) unsafe fn bc2_blocks_ssse3(
+    data: &[u8],
+    blocks_x: usize,
+    blocks_y: usize,
+    out: &mut [u8],
+    out_w: usize,
+) {
+    let pitch = out_w * 4;
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    let keep = _mm_set1_epi32(RGB_MASK);
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 16;
+            let blk = core::slice::from_raw_parts(src.add(bi), 16);
+            // `true`: BC2 colour blocks are always four-colour, whatever the
+            // endpoint order.
+            let pal = super::bcn::bc1_palette(&blk[8..16], true);
+            let p = _mm_set_epi32(pal[3] as i32, pal[2] as i32, pal[1] as i32, pal[0] as i32);
+            let idx = u32::from_le_bytes([blk[12], blk[13], blk[14], blk[15]]);
+            let o = (by * 4 * out_w + bx * 4) * 4;
+            for row in 0..4usize {
+                let colour = _mm_shuffle_epi8(
+                    p,
+                    _mm_loadu_si128(
+                        BC1_SEL[((idx >> (8 * row)) & 0xff) as usize].as_ptr() as *const __m128i
+                    ),
+                );
+                let alpha = _mm_unpacklo_epi64(
+                    _mm_loadl_epi64(
+                        BC2_ALPHA[blk[row * 2] as usize].as_ptr() as *const __m128i
+                    ),
+                    _mm_loadl_epi64(
+                        BC2_ALPHA[blk[row * 2 + 1] as usize].as_ptr() as *const __m128i
+                    ),
+                );
+                _mm_storeu_si128(
+                    dst.add(o + row * pitch) as *mut __m128i,
+                    _mm_or_si128(_mm_and_si128(colour, keep), alpha),
+                );
+            }
+        }
+    }
+}
+
+/// Decode a whole BC3 surface: BC1 colour, with an interpolated alpha block
+/// gathered by a second `pshufb` and folded in before the store.
+///
+/// Same defect as BC2 — sixteen byte read-modify-writes over the colour words,
+/// measured at **26% of BC3 decode** (0.2734 ms against 0.2031 stubbed) — and
+/// the same fix. The alpha palette is eight bytes, so it rides in the low half
+/// of a register and `pshufb` selects from it directly.
+///
+/// # Safety
+///
+/// As [`bc1_blocks_ssse3`], with sixteen-byte blocks.
+#[target_feature(enable = "ssse3")]
+pub(super) unsafe fn bc3_blocks_ssse3(
+    data: &[u8],
+    blocks_x: usize,
+    blocks_y: usize,
+    out: &mut [u8],
+    out_w: usize,
+) {
+    let pitch = out_w * 4;
+    let src = data.as_ptr();
+    let dst = out.as_mut_ptr();
+    let keep = _mm_set1_epi32(RGB_MASK);
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 16;
+            let blk = core::slice::from_raw_parts(src.add(bi), 16);
+            let pal = super::bcn::bc1_palette(&blk[8..16], true);
+            let p = _mm_set_epi32(pal[3] as i32, pal[2] as i32, pal[1] as i32, pal[0] as i32);
+            let cidx = u32::from_le_bytes([blk[12], blk[13], blk[14], blk[15]]);
+            // One `movq` from a GPR, not a spilled array.
+            let apal = _mm_cvtsi64_si128(super::bcn::bc3_alpha_palette_packed(blk[0], blk[1]) as i64);
+            let aidx = u64::from_le_bytes([
+                blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7],
+            ]) >> 16;
+            let o = (by * 4 * out_w + bx * 4) * 4;
+            for row in 0..4usize {
+                let colour = _mm_shuffle_epi8(
+                    p,
+                    _mm_loadu_si128(
+                        BC1_SEL[((cidx >> (8 * row)) & 0xff) as usize].as_ptr() as *const __m128i
+                    ),
+                );
+                // Twelve index bits per row, split into two six-bit lookups.
+                let sh = 12 * row;
+                let sel = _mm_unpacklo_epi64(
+                    _mm_loadl_epi64(
+                        BC3_SEL[((aidx >> sh) & 0x3f) as usize].as_ptr() as *const __m128i
+                    ),
+                    _mm_loadl_epi64(
+                        BC3_SEL[((aidx >> (sh + 6)) & 0x3f) as usize].as_ptr() as *const __m128i
+                    ),
+                );
+                let alpha = _mm_shuffle_epi8(apal, sel);
+                _mm_storeu_si128(
+                    dst.add(o + row * pitch) as *mut __m128i,
+                    _mm_or_si128(_mm_and_si128(colour, keep), alpha),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +710,88 @@ mod tests {
                 }
             }
             assert_eq!(got, want, "case {case}");
+        }
+    }
+
+    /// Both surface loops must be byte-identical to their scalar block
+    /// decoders. BC2 exercises the full 4-bit alpha byte range; BC3 exercises
+    /// both alpha-palette branches (`a0 > a1` and its transparent-black twin).
+    #[test]
+    fn bc23_blocks_ssse3_match_scalar() {
+        if !has_pshufb() {
+            return;
+        }
+        let mut state = 0x0bad_c0de_1234_5678u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const BX: usize = 2;
+        const BY: usize = 2;
+        const N: usize = BX * BY * 16;
+        for case in 0..20_000u32 {
+            let mut data = [0u8; N];
+            match case {
+                0 => {}
+                1 => data.iter_mut().for_each(|x| *x = 0xff),
+                // a0 <= a1 in every block: the six-entry branch with index 6
+                // transparent and index 7 opaque.
+                2 => {
+                    for b in 0..BX * BY {
+                        data[b * 16] = 3;
+                        data[b * 16 + 1] = 200;
+                    }
+                }
+                // c0 == c1: the colour half's degenerate case, which BC2 and BC3
+                // must still read as four-colour.
+                3 => {
+                    for b in 0..BX * BY {
+                        data[b * 16 + 8..b * 16 + 12]
+                            .copy_from_slice(&[0x34, 0x12, 0x34, 0x12]);
+                    }
+                }
+                _ => {
+                    for c in data.chunks_exact_mut(8) {
+                        c.copy_from_slice(&next().to_le_bytes());
+                    }
+                }
+            }
+            let out_w = BX * 4;
+            let pitch = out_w * 4;
+            let len = out_w * BY * 4 * 4;
+            for which in 0..2 {
+                let mut got = vec![0u8; len];
+                unsafe {
+                    if which == 0 {
+                        bc2_blocks_ssse3(&data, BX, BY, &mut got, out_w)
+                    } else {
+                        bc3_blocks_ssse3(&data, BX, BY, &mut got, out_w)
+                    }
+                }
+                let mut want = vec![0u8; len];
+                for by in 0..BY {
+                    for bx in 0..BX {
+                        let bi = (by * BX + bx) * 16;
+                        let o = (by * 4 * out_w + bx * 4) * 4;
+                        if which == 0 {
+                            super::super::bcn::bc2_block_rgba_for_test(
+                                &data[bi..bi + 16],
+                                &mut want[o..],
+                                pitch,
+                            );
+                        } else {
+                            super::super::bcn::bc3_block_rgba_for_test(
+                                &data[bi..bi + 16],
+                                &mut want[o..],
+                                pitch,
+                            );
+                        }
+                    }
+                }
+                assert_eq!(got, want, "case {case}, {}", if which == 0 { "bc2" } else { "bc3" });
+            }
         }
     }
 }

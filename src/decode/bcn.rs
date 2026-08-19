@@ -104,6 +104,22 @@ pub fn decode_bc2(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 }
 
 pub fn decode_bc2_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
+    // Dispatched once per surface, not once per block — see `decode_bc1_into`.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
+        let (blocks_x, blocks_y, expected) = block_grid(width, height, 16)?;
+        if data.len() < expected {
+            return Err(Error::TruncatedData);
+        }
+        let out_w = width as usize;
+        check_out_len(out, out_w, height as usize)?;
+        // SAFETY: SSSE3 checked above; `block_grid` and `check_out_len` bound
+        // the input and output exactly as the aligned path below does.
+        unsafe {
+            crate::decode::simd::bc2_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
+        }
+        return Ok(());
+    }
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
         bc2_block_rgba(block, dst, pitch);
     })
@@ -116,6 +132,22 @@ pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 }
 
 pub fn decode_bc3_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
+    // Dispatched once per surface, not once per block — see `decode_bc1_into`.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
+        let (blocks_x, blocks_y, expected) = block_grid(width, height, 16)?;
+        if data.len() < expected {
+            return Err(Error::TruncatedData);
+        }
+        let out_w = width as usize;
+        check_out_len(out, out_w, height as usize)?;
+        // SAFETY: SSSE3 checked above; `block_grid` and `check_out_len` bound
+        // the input and output exactly as the aligned path below does.
+        unsafe {
+            crate::decode::simd::bc3_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
+        }
+        return Ok(());
+    }
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
         bc3_block_rgba(block, dst, pitch);
     })
@@ -664,6 +696,17 @@ mod bc45_tests {
 /// immediately when BC3 was first wired to the BC4 palette.
 #[inline(always)]
 fn bc3_alpha_palette(a0: u8, a1: u8) -> [u8; 8] {
+    bc3_alpha_palette_packed(a0, a1).to_le_bytes()
+}
+
+/// The same eight entries as one `u64`.
+///
+/// The SSSE3 loop needs them in a vector register, and a `u64` gets there with a
+/// single `movq`. Returning `[u8; 8]` would make the caller spill the array for
+/// the loop to reload — the store-forwarding stall that cost BC1 13.9% before
+/// 0.3.28.
+#[inline(always)]
+pub(super) fn bc3_alpha_palette_packed(a0: u8, a1: u8) -> u64 {
     let (a0, a1) = (a0 as u32, a1 as u32);
     let mut p = [0u32; 8];
     p[0] = a0;
@@ -679,10 +722,11 @@ fn bc3_alpha_palette(a0: u8, a1: u8) -> [u8; 8] {
         p[6] = 0;
         p[7] = 255;
     }
-    [
-        p[0] as u8, p[1] as u8, p[2] as u8, p[3] as u8, p[4] as u8, p[5] as u8, p[6] as u8,
-        p[7] as u8,
-    ]
+    let mut packed = 0u64;
+    for (k, v) in p.iter().enumerate() {
+        packed |= (*v as u64 & 0xff) << (8 * k);
+    }
+    packed
 }
 
 /// Decode one BC2 block to RGBA8: explicit 4-bit alpha, then an opaque-mode
@@ -716,6 +760,16 @@ fn bc3_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
         let o = (p / 4) * pitch + (p % 4) * 4;
         out[o + 3] = pal[((idx >> (3 * p)) & 0x7) as usize];
     }
+}
+
+#[cfg(test)]
+pub(super) fn bc2_block_rgba_for_test(blk: &[u8], out: &mut [u8], pitch: usize) {
+    bc2_block_rgba(blk, out, pitch)
+}
+
+#[cfg(test)]
+pub(super) fn bc3_block_rgba_for_test(blk: &[u8], out: &mut [u8], pitch: usize) {
+    bc3_block_rgba(blk, out, pitch)
 }
 
 #[cfg(test)]

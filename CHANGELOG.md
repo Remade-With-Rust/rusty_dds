@@ -3,6 +3,44 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.29 - 2026-08-19
+
+**BC2 and BC3 decode get SIMD: 2.43x and 1.90x.** The last two scalar LDR block
+decoders, and the same defect in both.
+
+Each decoded colour, stored four RGBA words per row, and then performed
+**sixteen single-byte read-modify-writes back into those same words** to lay in
+alpha - a store-forwarding hazard per pixel on top of a doubled store stream.
+Ceiling probes: **37% of BC2 decode** (0.2305 ms against 0.1445 with the alpha
+pass stubbed) and **26% of BC3** (0.2734 against 0.2031).
+
+Both now merge alpha into the colour vector before a single store per row, on
+the surface-scope dispatch 0.3.28 established:
+
+- **BC2** looks its 4-bit alpha up two pixels at a time from a 2 KiB table laid
+  out at the alpha byte positions with the colour bytes zeroed, so a row is two
+  loads, an `unpacklo_epi64` and an `or`.
+- **BC3** gathers its interpolated alpha with a second `pshufb`. The palette is
+  eight bytes, so it rides in the low half of a register; `bc3_alpha_palette` now
+  has a packed `u64` twin so it arrives by one `movq` rather than through a
+  spilled array - the stall that cost BC1 13.9%. Twelve index bits per row split
+  into two six-bit lookups, keeping the selector table at 512 bytes rather than
+  the 64 KiB a twelve-bit table would need.
+
+512^2, pinned, 16 paired CPU samples each, alternating leading arm:
+
+| format | before | after | verdict |
+|---|---|---|---|
+| BC2 | 0.2329 ms | **0.0957 ms** | 16/16, z = +4.00, **+58.9%** |
+| BC3 | 0.2712 ms | **0.1430 ms** | 16/16, z = +4.00, **+47.3%** |
+
+BC1 re-measured flat (z = -0.58) confirming the shared colour path was not
+disturbed. Byte-identical; both loops are oracle-tested against their scalar
+block decoders over 20 000 random surfaces including both alpha-palette
+branches and the degenerate `c0 == c1` colour case.
+
+Every LDR block decoder - BC1, BC2, BC3, BC4, BC5, BC7 - is now vectorised.
+
 ## 0.3.28 - 2026-08-19
 
 **BC1 and BC4 decode get SIMD.** Two of the four remaining scalar decoders, and
