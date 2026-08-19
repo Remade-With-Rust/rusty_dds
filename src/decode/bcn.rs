@@ -386,7 +386,7 @@ fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
     // because `65536 * e0` has sixteen zero low bits and an arithmetic shift
     // right is a floor division. One multiply per entry, and `delta` is shared.
     let delta = e1 - e0;
-    let b = |v: i32| ((v as u8) as u64);
+    let b = |v: i32| (v as u8) as u64;
 
     // Written as a balanced OR tree over independent terms, NOT accumulated in a
     // loop. `packed |= x << (8*k)` around a loop is an eight-deep serial
@@ -1092,7 +1092,6 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1171,7 +1170,6 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1260,7 +1258,6 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1457,7 +1454,6 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1471,8 +1467,8 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
             out[o + map[3]] = ((base[3] + walpha * delta[3]) >> 6) as u8;
         }
-        return true;
     }
+    true
 }
 
 #[cfg(test)]
@@ -1666,7 +1662,6 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1748,7 +1743,6 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1958,7 +1952,6 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -1972,8 +1965,8 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
             out[o + map[3]] = ((base[3] + wa * delta[3]) >> 6) as u8;
         }
-        return true;
     }
+    true
 }
 
 #[cfg(test)]
@@ -2247,7 +2240,6 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
                 &mut out[o..o + 8],
             );
         }
-        return true;
     }
 
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
@@ -2260,8 +2252,8 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             out[o + 2] = ((base[2] + w * delta[2]) >> 6) as u8;
             out[o + 3] = ((base[3] + w * delta[3]) >> 6) as u8;
         }
-        return true;
     }
+    true
 }
 
 #[cfg(test)]

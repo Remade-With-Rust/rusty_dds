@@ -27,7 +27,7 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_loadl_epi64, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
+    __m128i, _mm_add_epi16, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
     _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
     _mm_set_epi64x as _set64, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
     _mm_unpacklo_epi16, _mm_unpacklo_epi8,
@@ -175,9 +175,9 @@ pub(super) fn has_ssse3() -> bool {
 ///
 /// Zen 3 is family 0x19; Zen 1 and Zen 2 are 0x17. Anything not AMD is fine.
 fn has_fast_pdep() -> bool {
-    // SAFETY: `__cpuid` is available on all x86_64. Leaves 0 and 1 are
-    // architecturally defined and supported everywhere; no memory is touched.
-    let (vendor, family) = unsafe {
+    // `__cpuid` is safe on x86_64: leaves 0 and 1 are architecturally defined
+    // and supported everywhere, and it touches no memory.
+    let (vendor, family) = {
         let v = core::arch::x86_64::__cpuid(0);
         let f = core::arch::x86_64::__cpuid(1);
         ((v.ebx, v.edx, v.ecx), f.eax)
