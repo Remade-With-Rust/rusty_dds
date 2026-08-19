@@ -3,6 +3,53 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.13 - 2026-08-19
+
+**BC5 writes a block row per store.** 0.3.12 left BC5 as the one BCn format that
+did not improve. Decomposing where its time went, rather than guessing, found
+the cause.
+
+### Where BC5 time goes
+
+Stubbing each stage in turn:
+
+| probe | Mpx/s | implies |
+|---|---:|---|
+| full | 314.4 | - |
+| palette build removed | 372.4 | palette ~16% |
+| per-pixel index reads removed | 576.6 | index + palette gather ~45% |
+
+BC5 performs two index extractions and two palette lookups per pixel where BC4
+does one of each, which is why it sat at 314 against BC4's 588.
+
+### The fix
+
+Writing a whole block row in one store - four bytes x four pixels - instead of
+four separately range-checked four-byte stores.
+
+Ten samples per arm, alternating order:
+
+| format | before | after | |
+|---|---:|---:|---|
+| **BC5U** | 291.4 Mpx/s | **392.4** | **+34.7%**, no overlap |
+| BC1 | 582.7 | 626.9 | +7.6%, overlapping - not resolvable |
+| BC4U | 581.6 | 578.5 | neutral |
+
+Only BC5 improves decisively. Its two-channel word build evidently blocks a store
+coalescing that LLVM already performs for the single-channel formats, so BC5 was
+the only one still paying four range-checks per row. The change is applied
+uniformly anyway - identical shape, no regression anywhere.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC5U 451.2 vs 59.2 Mpx/s
+(7.62x)**, up from 5.53x; 6.61x across all formats.
+
+### Notes
+
+- Decode output is unchanged, bit for bit; the BC4/BC5 oracle tests (30 000
+  blocks each, signed and unsigned) pass unchanged.
+- Both the SIMD path (93 tests) and the scalar fallback (88 tests,
+  `--no-default-features`) pass.
+
 ## 0.3.12 - 2026-08-19
 
 **BC1 through BC5 now decode in-house.** The same serial dependency chain that

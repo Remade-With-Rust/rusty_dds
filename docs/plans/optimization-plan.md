@@ -1938,3 +1938,69 @@ connection was structural, not textual, and grep does not find that.
   diagnosed.
 - BC2 and BC3 have no real-content measurement — our packs contain neither.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §29 — BC5, the loose end, closed by decomposition
+
+§28 shipped BC1-BC5 in-house and left one honest gap: BC5 was neutral, with 40%
+of its call in block decode by the ceiling measurement and no explanation.
+
+### Decompose before guessing
+
+Rather than propose a fix, each stage was stubbed in turn:
+
+| probe | Mpx/s | implies |
+|---|---:|---|
+| full | 314.4 | — |
+| palette build removed | 372.4 | palette ≈ 16% |
+| per-pixel index reads removed | 576.6 | index + gather ≈ **45%** |
+
+That also explains BC5's standing against BC4 without any further work: BC5 does
+**two** index extractions and **two** palette gathers per pixel where BC4 does one
+of each, and it runs at 314 against BC4's 588 — almost exactly the ratio.
+
+### The fix, and the surprise in it
+
+The obvious reading of "45% is the gather" points at `pshufb`, which is a
+16-entry byte lookup in one instruction and is exactly the shape of an 8-entry
+palette gather. That is SSSE3, needs runtime detection, and is a day of work.
+
+The cheap thing first: write a whole **block row** in one store rather than four
+separately range-checked four-byte stores. Ten samples per arm:
+
+| format | before | after | |
+|---|---:|---:|---|
+| **BC5U** | 291.4 Mpx/s | **392.4** | **+34.7%**, no overlap |
+| BC1 | 582.7 | 626.9 | +7.6%, overlapping |
+| BC4U | 581.6 | 578.5 | neutral |
+
+**Only BC5 moved.** The same edit, the same shape, applied to three formats, and
+two of them do not care. The explanation that fits: LLVM already coalesces the
+four stores for the single-channel formats, and BC5's two-channel word build —
+two gathers and a shift feeding one word — has enough dependency depth that it
+does not. BC5 was the only format still paying four range-checks per row.
+
+Against DirectXTex: **BC5U 451.2 vs 59.2 Mpx/s — 7.62x**, up from 5.53x.
+
+### The lesson worth keeping
+
+**Decomposition names the stage; it does not name the fix.** The probe correctly
+said "45% is index-and-gather", and the obvious inference — vectorise the gather —
+would have been a day of SSSE3 work with runtime detection. The actual win was in
+the *stores*, which the decomposition had not even isolated, and it took twenty
+minutes.
+
+Corollary, and it is the same shape as §27's compiler-folding refutations:
+**identical edits do not have identical effects across similar code**, because
+what the optimiser has already done differs. Three formats, one change, one clear
+win, one weak, one nothing. Measure each; do not extrapolate from the one that
+worked.
+
+### Still open
+
+- The gather itself is still ~45% of BC5 and untouched. A `pshufb` palette lookup
+  remains available and is now the largest identified BCn win — but it needs the
+  ceiling measured first (post-row-store), which this round did not redo.
+- BC2 and BC3 still have no real-content measurement; our packs contain neither.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
