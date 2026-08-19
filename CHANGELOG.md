@@ -3,6 +3,43 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.5 — 2026-08-18
+
+**A specialised BC7 mode-6 block decoder.** Mode 6 is **87.8%** of the blocks in
+a real 192-texture pack: one subset, so no partition-table lookup and no
+per-pixel subset branch; RGBA 7.7.7.7 endpoints with one p-bit each; sixteen
+contiguous 4-bit indices. The general decoder pays a bitstream reader, a
+partition lookup and an index-width branch *per pixel* to stay general across
+all eight modes. For mode 6 all of that is loop-invariant.
+
+Anything that is not mode 6 falls through to the general decoder untouched.
+
+### Performance
+
+ABAB against the previous code, serial, into a recycled buffer:
+
+| surface | general | mode-6 path | |
+|---|---:|---:|---|
+| 1024^2 | 707-771 Mpx/s | 727-811 Mpx/s | no change |
+| 256^2 | 201-206 | 235-242 | **+17%** |
+| 128^2 | 200-203 | 242-258 | **+24%** |
+| 64^2 | 196-220 | 254-261 | **+23%** |
+
+At 1024^2 BC7 decode is **memory-bandwidth bound** — it scales only 3.7x on 24
+cores — so no amount of saved ALU work shows up there. The gain is real once the
+surface fits in cache, which is where a streamer decoding full mip chains spends
+most of its decode time.
+
+Against Microsoft DirectXTex at 1024^2, cooked pack: BC7 **392.0 vs 59.1 Mpx/s**,
+and **5.35x** across all formats.
+
+### Notes
+
+- Verified bit-identical to the general decoder on **20 000** randomised mode-6
+  blocks plus the all-zero and all-ones payloads, and every non-mode-6 encoding
+  is declined rather than mis-decoded.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.4 — 2026-08-18
 
 **The full decode matrix against DirectXTex.** 0.3.3 compared HDR decode 1:1 and

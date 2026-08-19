@@ -1178,3 +1178,86 @@ measurement found a migration hazard nobody was looking for.
   partition lookup, and the 16-pixel interpolation vectorises.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §20 — A specialised BC7 mode-6 decoder, and a measurement that nearly lied
+
+§19 named BC7 as the thinnest lead and a custom block decoder as the way to widen
+it. This is that decoder — and the more useful output is what the measurement did
+on the way.
+
+### Specialise what exists
+
+Mode histogram over a real 192-texture pack (BC7's mode is unary-coded in the low
+bits of byte 0):
+
+| mode | share | shape |
+|---|---:|---|
+| 6 | **87.79%** | 1 subset, RGBA 7.7.7.7, 4-bit indices |
+| 5 | 9.36% | 1 subset, rotation, RGB 7.7.7 A8 |
+| 1 | 2.85% | 2 subsets, 6-bit partition |
+| | **97.15%** | single-subset (4,5,6) |
+
+Mode 6 is the simplest shape BC7 has and nearly nine blocks in ten. The general
+decoder carries a bitstream reader, a partition-table lookup and an index-width
+branch **per pixel** so it can handle all eight modes; in mode 6 every one of
+those is loop-invariant. The fast path reads the block as one `u128`, extracts
+eight 7-bit components and two p-bits with shifts, and interpolates sixteen
+pixels. Non-mode-6 blocks are declined and fall through untouched.
+
+Correctness is not argued, it is tested: **20 000 randomised mode-6 blocks** plus
+the all-zero and all-ones payloads, asserted bit-identical to `bcdec_rs`, and
+every non-mode-6 encoding asserted declined rather than mis-decoded.
+
+### The measurement that nearly lied
+
+The first ABAB said **+19%**. Running it again with the arms reversed said
+**+3.5%**.
+
+The difference was cold start. In the first sequence the OLD arm always ran
+second, and its samples climbed run over run — 365 → 396 → 432 Mpx/s — while NEW
+sat flat at 438-460. Those early OLD numbers were measuring a cold page cache,
+not a slower decoder. **A 19% headline was one commit away.**
+
+§18 already recorded getting a comparison wrong by trusting a remembered number.
+This is the next layer: the A/B was real, same session, same box, back to back —
+and still wrong, because arm order was fixed. Alternating the order is not
+ceremony, it is the only thing that separates the change from the schedule.
+
+### What the honest numbers say
+
+Serial, into a recycled buffer, both orders pooled:
+
+| surface | general | mode-6 path | |
+|---|---:|---:|---|
+| 1024² | 707-771 Mpx/s | 727-811 Mpx/s | no change |
+| 512² | 292-321 | 308-312 | no change |
+| **256²** | 201-206 | **235-242** | **+17%** |
+| **128²** | 200-203 | **242-258** | **+24%** |
+| **64²** | 196-220 | **254-261** | **+23%** |
+
+**The win is real, and it is invisible at 1024².** §15 established BC7 decode
+scales only 3.7× on 24 cores, which is the signature of a memory-bandwidth
+limit. Saving ALU work against a bandwidth ceiling buys nothing. Once the
+surface fits in cache the decoder is the limit again and the specialisation
+shows at ~20%.
+
+That is not a niche case. **A full mip chain is mostly small surfaces**, so a
+streamer decoding chains spends most of its decode time in exactly the range
+where this pays — and almost none at the size where it does not.
+
+### The lesson worth keeping
+
+An optimisation can be simultaneously real and unmeasurable, depending entirely
+on which size you test. Had this been benchmarked only at 1024² — the size every
+previous round in this file used for BC7 — it would have been reported as **no
+effect and reverted**. The bottleneck moved, and the benchmark did not follow it.
+
+### Still open
+
+- **Mode 5** (9.4%) would take single-subset coverage to 97%. Given the
+  bandwidth finding, expect it to matter only in the same cache-resident range,
+  and worth roughly a ninth of what mode 6 was.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
