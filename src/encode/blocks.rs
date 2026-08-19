@@ -323,3 +323,9 @@ impl BitWriter {
         out
     }
 }
+
+/// Runtime AVX2 check, re-exported for encoders outside this module.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(crate) fn simd_avx2() -> bool {
+    simd::has_avx2()
+}

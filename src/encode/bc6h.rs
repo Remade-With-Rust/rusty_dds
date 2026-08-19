@@ -98,6 +98,16 @@ fn palette(qw: [i32; 3], qx: [i32; 3]) -> [[i32; 3]; 16] {
 
 /// Fit indices for one palette; returns (indices, SSE in half-bits domain).
 fn fit(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::encode::blocks::simd_avx2() {
+        // SAFETY: guarded by the runtime check above.
+        return unsafe { fit_avx2(halves, pal) };
+    }
+    fit_scalar(halves, pal)
+}
+
+/// Scalar twin and oracle for [`fit_avx2`].
+fn fit_scalar(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
     let mut idx = [0u8; 16];
     let mut err = 0i64;
     for (i, px) in halves.iter().enumerate() {
@@ -118,6 +128,149 @@ fn fit(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
         err += be;
     }
     (idx, err)
+}
+
+/// Sixteen pixels against a sixteen-entry palette, in registers.
+///
+/// This search is **~73% of BC6H encode** by ceiling probe (4.0 ms against 1.1
+/// with it stubbed) and was entirely scalar: 16 x 16 x 3 operations per fit.
+///
+/// # Why 32-bit lanes are enough
+///
+/// The values are half bits, so a channel difference reaches +/-31 775 and its
+/// square 1.01e9 — which fits `i32`. The sum of three reaches **3.03e9**, which
+/// does not fit `i32` but does fit **`u32`** (4.29e9). The sums are therefore
+/// kept as `u32` bit patterns and compared with a sign-bias, which is exact.
+/// Only the final accumulation across sixteen pixels needs `i64`, and that is
+/// done once after extraction.
+///
+/// Selection matches the scalar twin: strict `<` keeps the lowest index on ties,
+/// and `cmpgt(best, cur)` on biased values is exactly `cur < best` unsigned.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn fit_avx2(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
+    use std::arch::x86_64::*;
+
+    // Structure-of-arrays once per fit, not once per palette entry.
+    let mut ch = [[0i32; 16]; 3];
+    for (i, px) in halves.iter().enumerate() {
+        ch[0][i] = px[0];
+        ch[1][i] = px[1];
+        ch[2][i] = px[2];
+    }
+    let ld = |c: usize, h: usize| _mm256_loadu_si256(ch[c].as_ptr().add(h * 8) as *const __m256i);
+    let (r0, r1) = (ld(0, 0), ld(0, 1));
+    let (g0, g1) = (ld(1, 0), ld(1, 1));
+    let (b0, b1) = (ld(2, 0), ld(2, 1));
+
+    let bias = _mm256_set1_epi32(i32::MIN);
+    // Biased u32::MAX, i.e. "no candidate yet".
+    let mut best0 = _mm256_set1_epi32(i32::MAX);
+    let mut best1 = _mm256_set1_epi32(i32::MAX);
+    let mut idx0 = _mm256_setzero_si256();
+    let mut idx1 = _mm256_setzero_si256();
+
+    for (k, p) in pal.iter().enumerate() {
+        let pr = _mm256_set1_epi32(p[0]);
+        let pg = _mm256_set1_epi32(p[1]);
+        let pb = _mm256_set1_epi32(p[2]);
+        let kv = _mm256_set1_epi32(k as i32);
+
+        let sq = |r: __m256i, g: __m256i, b: __m256i| {
+            let dr = _mm256_sub_epi32(pr, r);
+            let dg = _mm256_sub_epi32(pg, g);
+            let db = _mm256_sub_epi32(pb, b);
+            // Each square fits i32; the sum is read as u32 below.
+            _mm256_add_epi32(
+                _mm256_add_epi32(_mm256_mullo_epi32(dr, dr), _mm256_mullo_epi32(dg, dg)),
+                _mm256_mullo_epi32(db, db),
+            )
+        };
+        let c0 = _mm256_xor_si256(sq(r0, g0, b0), bias);
+        let c1 = _mm256_xor_si256(sq(r1, g1, b1), bias);
+
+        let m0 = _mm256_cmpgt_epi32(best0, c0);
+        let m1 = _mm256_cmpgt_epi32(best1, c1);
+        best0 = _mm256_blendv_epi8(best0, c0, m0);
+        best1 = _mm256_blendv_epi8(best1, c1, m1);
+        idx0 = _mm256_blendv_epi8(idx0, kv, m0);
+        idx1 = _mm256_blendv_epi8(idx1, kv, m1);
+    }
+
+    let mut e = [0i32; 16];
+    let mut ix = [0i32; 16];
+    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, _mm256_xor_si256(best0, bias));
+    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, _mm256_xor_si256(best1, bias));
+    _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx0);
+    _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx1);
+
+    let mut idx = [0u8; 16];
+    let mut err = 0i64;
+    for i in 0..16 {
+        idx[i] = ix[i] as u8;
+        err += e[i] as u32 as i64;
+    }
+    (idx, err)
+}
+
+#[cfg(test)]
+mod fit_oracle {
+    use super::{fit, fit_scalar};
+
+    /// The vector fit must match the scalar one exactly, including the tie-break
+    /// (lowest index wins) and the wide half-bit range where a 32-bit signed sum
+    /// would overflow but the unsigned one does not.
+    #[test]
+    fn fit_matches_scalar() {
+        let mut state = 0x6bc6_7777_3333_9999u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut halves = [[0i32; 3]; 16];
+            let mut pal = [[0i32; 3]; 16];
+            match case {
+                // Widest possible separation: exercises the u32 sum.
+                0 => {
+                    for h in halves.iter_mut() {
+                        *h = [0, 0, 0];
+                    }
+                    for p in pal.iter_mut() {
+                        *p = [31775, 31775, 31775];
+                    }
+                }
+                // Duplicate palette entries: the tie-break is the whole question.
+                1 => {
+                    for (i, h) in halves.iter_mut().enumerate() {
+                        *h = [i as i32 * 2000, 100, 7];
+                    }
+                    for p in pal.iter_mut() {
+                        *p = [500, 100, 7];
+                    }
+                }
+                _ => {
+                    for h in halves.iter_mut() {
+                        *h = [
+                            (next() % 31776) as i32,
+                            (next() % 31776) as i32,
+                            (next() % 31776) as i32,
+                        ];
+                    }
+                    for p in pal.iter_mut() {
+                        *p = [
+                            (next() % 31776) as i32,
+                            (next() % 31776) as i32,
+                            (next() % 31776) as i32,
+                        ];
+                    }
+                }
+            }
+            assert_eq!(fit(&halves, &pal), fit_scalar(&halves, &pal), "case {case}");
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]

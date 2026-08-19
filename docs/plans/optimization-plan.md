@@ -3152,3 +3152,82 @@ format in the matrix now has a vectorised inner fit.
 - BC6H encode has never been examined at all.
 - BC6H decode interpolation (§34) and the BC5 decode palette chain (§32), both
   latency-shaped.
+
+---
+
+## §46 — The format nobody vectorised, and a kernel LLVM had already written
+
+Two targets, opposite outcomes, and the difference was visible before either was
+written — in one case only after.
+
+### Refuted: SIMD `palette_mode6`
+
+The last per-fit helper without a vector form. Built it: 16 lanes hold four
+palette entries, four rounds instead of 64 scalar multiply-shifts, the same range
+argument the decoder proved.
+
+**Neutral.** 7/12 paired wins, z = +0.58, 0.00% median, 8 ties. LLVM already
+auto-vectorises it — sixteen independent iterations over four channels with no
+carried dependency is exactly what the auto-vectoriser is good at — and the
+§42 ceiling probe had already put the whole function inside the noise. Reverted.
+
+**The hand-written kernels that paid all had something the vectoriser could not
+do**: a cross-iteration running minimum with index tracking (§43, §44, §45), or a
+gather (§30). `palette_mode6` has neither. That is the discriminator, and it is
+checkable by reading the loop rather than by writing the kernel.
+
+### BC6H encode had no SIMD at all
+
+`grep` for any intrinsic in `src/encode/bc6h.rs`: **zero**. And its index fit is
+the exact twin of the BC7 mode-6 one — sixteen pixels, sixteen entries, three
+channels — written entirely scalar, 768 operations per fit.
+
+Ceiling probe: **~73% of BC6H encode** (4.0 ms against 1.1 stubbed). The largest
+single share this campaign has measured.
+
+**1.9531 ms against 3.9062, 16/16 paired wins, z = +4.00, +50.00%,
+byte-identical.** A clean 2x.
+
+### The range analysis that made it fit
+
+Half bits reach 31 775, so a squared difference reaches 1.01e9 — inside `i32` —
+but **the sum of three reaches 3.03e9**, which overflows `i32` and fits `u32`.
+Keeping the sums as `u32` bit patterns and comparing with a sign-bias is exact,
+and only the accumulation across sixteen pixels needs `i64` — once, after
+extraction.
+
+Getting that wrong would have produced silently negative errors and a wrong
+palette choice on the widest blocks only, which is why the oracle pins the
+maximum-separation case explicitly rather than trusting random inputs to find it.
+
+### The lesson worth keeping
+
+**"Has no SIMD" and "needs SIMD" are different claims, and only a ceiling probe
+separates them.** BC6H had none and needed it badly (73%). `palette_mode6` had
+none and did not need it at all (auto-vectorised, inside the noise). Both were
+found by the same grep; only measurement told them apart, and writing the wrong
+one cost a full round.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | -19.1% fits |
+| 0.3.21 | residual-error seed gate | +8.33% |
+| 0.3.22 | `quantize_7p` table | +7.26% |
+| 0.3.23 | statistics hoist | +2.67% |
+| 0.3.24 | register-resident BC7 index fit | +9.23% |
+| 0.3.25 | register-resident BC1/BC3 colour fit | +37.5% / +26.1% |
+| 0.3.26 | vectorised BC4/BC5 alpha scan | +19.6% |
+| **0.3.27** | **vectorised BC6H fit** | **+50.0%** |
+
+Eight releases, seven byte-identical, **zero of 102 corpus cases worse**. Every
+format in the matrix now has a vectorised inner fit, BC6H included.
+
+### Still open
+
+- A full-matrix re-baseline against 0.3.19 on a quiet box. Every figure above is
+  paired against its immediate predecessor; no cumulative number has been
+  measured and none should be quoted.
+- BC6H decode interpolation (§34) and the BC5 decode palette chain (§32), both
+  latency-shaped.

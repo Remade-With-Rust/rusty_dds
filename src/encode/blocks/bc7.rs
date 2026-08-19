@@ -721,6 +721,12 @@ pub(super) fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
         c1[2] as i32 - c0[2] as i32,
         c1[3] as i32 - c0[3] as i32,
     ];
+    // A hand-written AVX2 palette builder was tried here and measured NEUTRAL
+    // (7/12 paired wins, z = +0.58, 0.00% median, 8 ties). LLVM already
+    // auto-vectorises this loop — it is sixteen independent iterations over four
+    // channels with no carried dependency — and a ceiling probe had already put
+    // the whole function inside the noise. Do not re-add intrinsics here without
+    // a number.
     let mut pal = [[0u8; 4]; 16];
     for (k, &w) in W6M.iter().enumerate() {
         let w = w as i32;

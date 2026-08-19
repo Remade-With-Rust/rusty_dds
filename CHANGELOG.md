@@ -3,6 +3,40 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.27 - 2026-08-19
+
+**BC6H encode gets SIMD, and doubles.** It had none - `grep` for any intrinsic in
+`src/encode/bc6h.rs` returned zero. Its index fit is the exact twin of the BC7
+mode-6 one: sixteen pixels against a sixteen-entry palette, three channels,
+entirely scalar.
+
+A ceiling probe put that search at **~73% of BC6H encode** (4.0 ms against 1.1
+with it stubbed) - the largest single share measured anywhere in this campaign.
+
+BC6H encode, 256^2, pinned, 16 paired CPU samples: **median 1.9531 ms against
+3.9062, 16/16 wins, z = +4.00, +50.00%.** A clean 2x, **byte-identical**.
+
+### Why 32-bit lanes suffice
+
+The values are half bits, so a channel difference reaches +/-31 775 and its square
+1.01e9 - inside `i32`. The sum of three reaches **3.03e9**, which overflows `i32`
+but fits **`u32`** (4.29e9). The sums are kept as `u32` bit patterns and compared
+with a sign-bias, which is exact; only the final accumulation over sixteen pixels
+needs `i64`, once, after extraction.
+
+A new oracle checks 60 000 cases against the scalar twin, including the widest
+possible separation (where a signed 32-bit sum would overflow) and duplicate
+palette entries (where the lowest-index tie-break is the whole question).
+
+### Refuted: a SIMD `palette_mode6`
+
+Written and measured **neutral** - 7/12 paired wins, z = +0.58, 0.00% median, 8
+ties. LLVM already auto-vectorises that loop (sixteen independent iterations over
+four channels, no carried dependency), and a ceiling probe had put the whole
+function inside the noise. Reverted, with the numbers recorded at the site.
+
+- 100 tests pass.
+
 ## 0.3.26 - 2026-08-19
 
 **A vectorised nearest-palette scan for BC4/BC5 alpha.** The alpha path had no
