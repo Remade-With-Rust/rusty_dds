@@ -2143,3 +2143,83 @@ that happens to be invisible.
   round on BC5.
 - BC2 and BC3 still have no real-content measurement; our packs contain neither.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §32 — The stale ceiling, and a probe that lied the same way twice
+
+§31 ended by refusing to quote a remaining gap, because the ~789 Mpx/s ceiling
+had been measured against the *scalar* BC5 kernel and never re-run after the SIMD
+work. Re-running it moved the target completely.
+
+### The target moved
+
+Stage-by-stage against the current kernel:
+
+| probe | Mpx/s | share |
+|---|---:|---:|
+| full | ~572 | — |
+| `pshufb` gather removed | ~641 | ~18% |
+| `pdep` index unpack removed | ~601 | ~13% |
+| **palette interpolation removed** | **~847** | **~32%** |
+
+The two things this thread spent three rounds optimising are now the *small*
+parts. The palette build — untouched since §28 and never suspected — is the
+largest single cost, precisely **because** everything around it got faster. A
+ceiling is a statement about one moment in a kernel's life, and it expires the
+moment you act on it.
+
+### The probe lied the same way twice
+
+The first palette probe substituted **constant** palettes and reported ~791
+against ~524 full. That number was wrong: constant palettes let LLVM hoist the
+entire computation out of the block loop and constant-fold into the shuffle. The
+honest probe keeps the palette **block-dependent** but trivial:
+
+```rust
+let pr_packed = u64::from_le_bytes([blk[0]; 8]);   // cannot be hoisted
+```
+
+This is the identical error §30 recorded — a probe that replaced a lookup index
+with a loop constant and folded away both the load and its arithmetic. **I wrote
+that lesson down and then made the same mistake one section later.** The failure
+mode is specific and worth naming precisely: *substituting a constant does not
+remove one stage, it removes every stage upstream of it.* When probing, replace
+with something cheap that still **depends on the input**.
+
+### One weak win, two refutations
+
+The packing loop carried both defects already fixed twice in this kernel — an
+eight-deep serial OR chain, reading back a stack array. Rewritten as a balanced
+tree over independent terms: **BC5U +5.5%, BC4U +5.6%**, positive in both but
+with overlapping arms. Reported as weak, kept as strictly less work.
+
+**32% is still uncaptured**, and two attacks on it failed:
+
+- **Branchless endpoint selection.** `e0 > e1` is data-dependent per block and
+  evaluated twice per BC5 block, so a mispredict was the obvious suspect — and
+  this file already records a campaign where removing a mispredict was worth 35%.
+  Computing both weight sets and masking measured **neutral** (BC5 625.6 vs
+  609.3, BC4 680.5 vs 685.3).
+- The 65536-sum identity (§31), halving the multiplies per entry: also neutral.
+
+So the palette's cost is neither its branch nor its multiply count. That is a
+genuinely open question rather than a to-do, and the next attempt should isolate
+*within* the palette build before writing anything.
+
+### Where things stand
+
+Against DirectXTex: **BC4U 9.15x, BC5U 11.29x, BC7 10.06x — 7.88x overall.**
+
+### The lesson worth keeping
+
+**A ceiling measurement has a shelf life of exactly one optimisation.** Every
+round in this thread invalidated the ceiling that justified it, and quoting a
+stale one is how §31 nearly reported a 27% gap that had already moved elsewhere.
+Re-measure before each round, not once per thread.
+
+### Still open
+
+- The palette interpolation, ~32% of BC5 and resistant to two attacks.
+- BC2 and BC3 have no real-content measurement; our packs contain neither.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.

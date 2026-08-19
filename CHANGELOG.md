@@ -3,6 +3,64 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.16 - 2026-08-19
+
+**BC4/BC5 palette packing without the serial chain.** Re-measuring the ceiling
+against the SIMD kernel - rather than the stale scalar figure - moved the target
+onto the palette build, which had become the largest remaining cost precisely
+because everything around it got faster.
+
+The packing loop carried both defects already fixed elsewhere in this kernel:
+
+```rust
+for (k, v) in p.iter().enumerate() { packed |= (...) << (8 * k); }
+```
+
+an eight-deep serial dependency chain on `packed`, reading back a `[i32; 8]` that
+had just been stored to the stack. Rewritten as a balanced OR tree over
+independent terms with no intermediate array.
+
+Eight samples per arm, alternating order: **BC5U 563.9 -> 595.1 Mpx/s (+5.5%)**,
+**BC4U 661.8 -> 699.1 (+5.6%)**. Positive in both formats, but the arms overlap -
+this is a weak result reported as one.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC5U 878.5 vs 77.8 Mpx/s
+(11.29x)**, **BC4U 976.7 vs 106.8 (9.15x)**, **BC7 726.9 vs 72.2 (10.06x)**, and
+**7.88x** across all formats.
+
+### What the ceiling actually says now
+
+Stage-by-stage against the SIMD kernel:
+
+| probe | Mpx/s | share |
+|---|---:|---:|
+| full | ~572 | - |
+| `pshufb` gather removed | ~641 | ~18% |
+| `pdep` index unpack removed | ~601 | ~13% |
+| **palette interpolation removed** | **~847** | **~32%** |
+
+The palette probe is block-dependent by construction, because an earlier version
+that substituted *constant* palettes let the compiler hoist the whole computation
+out of the block loop and reported a far larger figure. A probe that removes more
+than it names measures the wrong thing.
+
+**32% remains uncaptured.** Two attempts failed and are recorded at the site:
+
+- **Branchless endpoint selection.** The `e0 > e1` test is data-dependent per
+  block and taken twice per BC5 block, so a mispredict looked like the obvious
+  culprit. Computing both weight sets and selecting with a mask measured
+  **neutral**: BC5 625.6 vs 609.3 Mpx/s, BC4 680.5 vs 685.3.
+- The `65536`-sum identity from 0.3.15, which halves the multiplies per entry,
+  was likewise neutral.
+
+Whatever the palette costs, it is not the branch and not the multiply count.
+
+### Notes
+
+- Decode output is unchanged, bit for bit; the BC4/BC5 oracles (30 000 blocks
+  each, signed and unsigned) pass unchanged.
+- SIMD path 94 tests, scalar fallback 88 (`--no-default-features`).
+
 ## 0.3.15 - 2026-08-19
 
 **BC4/BC5 palettes are built in a register.** 0.3.14 found a store-forwarding

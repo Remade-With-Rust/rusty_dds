@@ -1,6 +1,6 @@
 [package]
 name = "rusty_dds"
-version = "0.3.15"
+version = "0.3.16"
 authors = [
     "Mike Dilger <mike@optcomp.nz>",
     "Remade With Rust / Mata Network",

@@ -377,41 +377,57 @@ fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
         (a0 as i32, a1 as i32)
     };
 
-    // The weight pairs sum to exactly 65536 — W6[5-k] + W6[k] == 65536, and
-    // likewise for W4 — so
+    // The weight pairs sum to exactly 65536 — `W6[5-k] + W6[k] == 65536`, and
+    // likewise `W4` — so
     //
     //     (W[n-k]*e0 + W[k]*e1 + 32768) >> 16
     //       ==  e0 + ((W[k]*(e1 - e0) + 32768) >> 16)
     //
-    // because 65536*e0 has sixteen zero low bits and an arithmetic shift right
-    // is a floor division. One multiply per entry instead of two, and `delta` is
-    // shared across all of them. Same identity as the BC7 interpolation in
-    // `bc7_bd3`; the oracle tests cover both endpoint orderings and signedness.
+    // because `65536 * e0` has sixteen zero low bits and an arithmetic shift
+    // right is a floor division. One multiply per entry, and `delta` is shared.
     let delta = e1 - e0;
-    let mut p = [0i32; 8];
-    p[0] = e0;
-    p[1] = e1;
+    let b = |v: i32| ((v as u8) as u64);
+
+    // Written as a balanced OR tree over independent terms, NOT accumulated in a
+    // loop. `packed |= x << (8*k)` around a loop is an eight-deep serial
+    // dependency chain, and the `[i32; 8]` it read from was a stack round trip
+    // on top of that — the same two defects fixed in the index unpack and the
+    // palette handoff. The palette build measured at ~34% of the BC5 block once
+    // the gather and index unpack were fast.
+    let pack = |v: [i32; 8]| {
+        let lo = b(v[0]) | (b(v[1]) << 8) | (b(v[2]) << 16) | (b(v[3]) << 24);
+        let hi = b(v[4]) | (b(v[5]) << 8) | (b(v[6]) << 16) | (b(v[7]) << 24);
+        lo | (hi << 32)
+    };
+    let interp = |w: i32| e0 + ((w * delta + 32768) >> 16);
+
+    // The branch on `e0 > e1` was rewritten branchless (compute both weight
+    // sets, select with a mask) and measured NEUTRAL: BC5 625.6 vs 609.3 Mpx/s,
+    // BC4 680.5 vs 685.3, eight samples per arm. Whatever the palette costs, it
+    // is not this mispredict. Reverted; do not re-try without a number.
     if e0 > e1 {
-        for k in 0..6 {
-            p[2 + k] = e0 + ((W6[k] * delta + 32768) >> 16);
-        }
+        pack([
+            e0,
+            e1,
+            interp(W6[0]),
+            interp(W6[1]),
+            interp(W6[2]),
+            interp(W6[3]),
+            interp(W6[4]),
+            interp(W6[5]),
+        ])
     } else {
-        for k in 0..4 {
-            p[2 + k] = e0 + ((W4[k] * delta + 32768) >> 16);
-        }
-        p[6] = if is_signed { -127 } else { 0 };
-        p[7] = if is_signed { 127 } else { 255 };
+        pack([
+            e0,
+            e1,
+            interp(W4[0]),
+            interp(W4[1]),
+            interp(W4[2]),
+            interp(W4[3]),
+            if is_signed { -127 } else { 0 },
+            if is_signed { 127 } else { 255 },
+        ])
     }
-    // Packed into one `u64` rather than returned as `[u8; 8]`. The array form
-    // is built by eight narrow stores to the stack, and the SIMD path then reads
-    // it back with one wide load — a store-forwarding stall, the same one that
-    // cost 13 points on the index unpack. A `u64` stays in a register and reaches
-    // the vector unit through `movq`.
-    let mut packed = 0u64;
-    for (k, v) in p.iter().enumerate() {
-        packed |= ((*v as u8) as u64) << (8 * k);
-    }
-    packed
 }
 
 /// [`bc4_palette_packed`] unpacked for the scalar path, which indexes it as an
