@@ -71,11 +71,37 @@ pub fn decode_bc6h_into(
                 let n = (w - px0).min(4);
                 let s = row * 4 * 3;
                 let d = (y * w + px0) * 4;
-                for i in 0..n {
-                    out[d + i * 4] = fscratch[s + i * 3];
-                    out[d + i * 4 + 1] = fscratch[s + i * 3 + 1];
-                    out[d + i * 4 + 2] = fscratch[s + i * 3 + 2];
-                    out[d + i * 4 + 3] = 1.0;
+                if n == 4 {
+                    // A whole block row per store: one slice range-check instead
+                    // of sixteen indexed writes. The RGB-to-RGBA widen and the
+                    // stride change happen while building the row, which is a
+                    // register-resident array, not while addressing `out`.
+                    let px = [
+                        fscratch[s],
+                        fscratch[s + 1],
+                        fscratch[s + 2],
+                        1.0,
+                        fscratch[s + 3],
+                        fscratch[s + 4],
+                        fscratch[s + 5],
+                        1.0,
+                        fscratch[s + 6],
+                        fscratch[s + 7],
+                        fscratch[s + 8],
+                        1.0,
+                        fscratch[s + 9],
+                        fscratch[s + 10],
+                        fscratch[s + 11],
+                        1.0,
+                    ];
+                    out[d..d + 16].copy_from_slice(&px);
+                } else {
+                    for i in 0..n {
+                        out[d + i * 4] = fscratch[s + i * 3];
+                        out[d + i * 4 + 1] = fscratch[s + i * 3 + 1];
+                        out[d + i * 4 + 2] = fscratch[s + i * 3 + 2];
+                        out[d + i * 4 + 3] = 1.0;
+                    }
                 }
             }
         }

@@ -2359,3 +2359,75 @@ costs one build and it now runs first.
   shortening the chain, not vectorising it.
 - The BC5 palette chain (§32), same shape, same open question.
 - BC2 and BC3 have no real-content measurement; our packs contain neither.
+
+---
+
+## §35 — Downstream, and two ways a probe can lie
+
+§34 left BC6H with the interpolation ruled out (latency-shaped) and the
+conversion done. Downstream of both sits the **scatter**: widen RGB to RGBA,
+change stride, sixteen separately range-checked indexed writes per block row.
+
+The arithmetic pointed at it. Block-decode-removed was 227 Mpx/s against 120
+full, so conversion plus scatter is ~53% of the call; the conversion measured
+~19%. The remainder is the scatter.
+
+### Lie #1 — the dead-store probe
+
+The doubling probe was reached for first, and it was **invalid**:
+
+```rust
+out[d + i * 4] = fscratch[s + i * 3];   // written
+out[d + i * 4] = fscratch[s + i * 3];   // "doubled" — and deleted by LLVM
+```
+
+Writing the same value twice to the same address is dead-store eliminated. The
+duplicate never existed, so the probe measured nothing and reported ~7%.
+
+**The doubling probe has a precondition the subtraction probe does not: the
+duplicated work must be observable.** For arithmetic feeding a value, XOR-ing the
+second copy with zero preserves it. For *stores*, nothing preserves them —
+duplicate stores to one address are removable by definition. Doubling is not a
+universal instrument.
+
+### Lie #2 — the cold arm, again
+
+The row-store change was then measured directly. The first ABBA reported
+**+34.5%**, matching BC5's §29 result almost exactly, which made it feel
+confirmed rather than suspicious. A re-run contradicted it — and one arm spanned
+**75.7 to 132.4 Mpx/s**, so the box was disturbed.
+
+Per §20's rule, a verdict that flips on re-measurement is the instrument deciding
+the answer. Interference only ever slows a sample, so robust statistics over 9
+NEW against 18 OLD:
+
+| estimator | NEW | OLD | |
+|---|---:|---:|---:|
+| max | 140.9 | 131.3 | +7.3% |
+| p75 | 134.9 | 125.2 | +7.8% |
+| median | 122.7 | 117.6 | +4.3% |
+
+**+5-8%, not +34.5%.** All three agree in sign, which is why it ships; the
+magnitude is a range because the box did not permit better. The peer run in the
+same conditions had every absolute number down ~25%, so only ratios were read
+from it.
+
+### The lesson worth keeping
+
+**A result that matches a previous win is the easiest kind to believe and the
+one most worth re-running.** +34.5% here against +34.7% in BC5, same change, same
+shape — it looked like confirmation. It was a cold arm. Prior expectation makes a
+number *more* dangerous, not less, because it suppresses the instinct to check.
+
+And: **when the box is bad, change the estimator rather than the conclusion.**
+Max and p75 over many samples extract a real signal from a contaminated run,
+where a mean would have reported whatever the interference decided. What must not
+happen is quoting the clean-looking first number.
+
+### Still open
+
+- BC6H's interpolation, ~23% of the call and latency-shaped (§34).
+- The BC5 palette chain (§32), same shape.
+- BC2 and BC3 have no real-content measurement.
+- **This box needs re-checking before the next timing round** — two consecutive
+  rounds have now been degraded by interference.

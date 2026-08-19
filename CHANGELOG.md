@@ -3,6 +3,49 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.19 - 2026-08-19
+
+**BC6H writes a block row per store.** The scatter that widens RGB to RGBA and
+changes stride did sixteen separately range-checked indexed writes per block row.
+Building the row as a register-resident array and writing it once leaves one
+range check.
+
+Same change that was worth +34.7% in BC5 (0.3.13). Here it is smaller.
+
+### Measurement quality, stated plainly
+
+The box was disturbed during this round - one arm spanned 75.7 to 132.4 Mpx/s,
+and a first ABBA reported **+34.5%** which a re-run then contradicted. Per the
+campaign's own rule, a verdict that flips on re-measurement is the instrument
+deciding the answer, not noise to average.
+
+Interference only ever slows a sample, so the estimate uses robust statistics
+over 9 NEW against 18 OLD samples:
+
+| estimator | NEW | OLD | |
+|---|---:|---:|---:|
+| max | 140.9 | 131.3 | +7.3% |
+| p75 | 134.9 | 125.2 | +7.8% |
+| median | 122.7 | 117.6 | +4.3% |
+
+**+5-8%, not the +34.5% the first reading showed** - that arm was cold. All three
+estimators agree in sign, which is the basis for keeping it; the magnitude is
+reported as a range because the box did not permit better.
+
+The peer comparison run in the same conditions shows every absolute number down
+~25% from 0.3.18's measurement, so only the ratios are meaningful: **BC6H 4.58x**,
+8.44x across formats, both consistent with 0.3.18 within the noise this box was
+producing.
+
+### Notes
+
+- A doubling probe on the scatter was attempted first and was **invalid**:
+  writing the same value twice to the same address is dead-store eliminated, so
+  the duplicate never existed. Recorded because the probe looked reasonable.
+- Non-aligned surfaces keep the per-pixel path; only full four-pixel rows take
+  the block-row store.
+- Decode output is unchanged, bit for bit. SIMD path 97 tests, scalar fallback 90.
+
 ## 0.3.18 - 2026-08-19
 
 **Hardware half-float conversion for BC6H.** `vcvtph2ps` converts eight halves
