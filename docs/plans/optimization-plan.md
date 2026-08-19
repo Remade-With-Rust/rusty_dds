@@ -3319,3 +3319,55 @@ a change that looked not-worth-doing into +30.4%.
 
 The rule this earns: a probe that dispatches on format must be audited per
 format, and an allocating entry point never belongs in a hot loop — in any arm.
+
+## §51 — BC7 modes 4 and 5: the fifth time the same fit shape appeared
+
+Modes 4 and 5 carried four nearest-palette scans: two colour (16 pixels x 4 RGB)
+and two alpha (16 samples x 8 and x 4). Reading them side by side with
+`bc1_fit_4color_scalar` showed the colour scan is **character-for-character
+identical** — same `sqr_rgb`, same strict `<`, same lowest-index tie-break — and
+mode 4's alpha scan is exactly BC4/BC5's.
+
+So no kernel was written. Both colour fits route through
+`bc1_fit_4color_avx2` and both alpha fits through `alpha_fit_avx2`, inheriting
+oracles of 200 000 cases each. Mode 5's four-entry alpha palette pads entries
+4..8 with entry 0, which is exact: **under a strict `<` tie-break a later
+duplicate can never win**, so scanning eight is scanning four.
+
+**+18.7%** on BC7 encode (16/16, z = +4.00), byte-identical, confirmed at +19.9%
+on a second run. BC1 and BC3 encode flat.
+
+The lesson worth keeping is the search, not the edit: before writing a kernel,
+diff the candidate loop against every fit already in the crate. Five of the
+campaign's kernels are now shared across formats that look unrelated on the
+surface — BC4 decode through BC5's gather, BC2/BC3 decode through BC1's, and now
+BC7 modes 4/5 through BC1's and BC4's.
+
+## §52 — When two ceiling probes disagree, the gap is the measurement
+
+The same question — what do the mode-4/5 scans cost — got 42% from a stub probe
+and 24% from a doubling probe.
+
+**The stub probe was inadmissible.** The scans produce an error value, and that
+value gates control flow: `best_err` decides whether mode 4 runs, whether the
+mode-1 64-shape ranking runs, and whether the rotation loop runs. Junk errors
+removed work far beyond the stubbed lines. Making a stub input-dependent guards
+against constant-folding; it does **not** guard against the stubbed value
+steering the program. Before stubbing a value, grep every branch that reads it.
+
+**The doubling probe was admissible but low.** The scalar scan is a loop-carried
+dependency chain, so it is latency-bound, and a duplicate fills idle issue slots
+— its marginal cost sits well below the original's average cost. Against
+latency-bound code a doubling probe is a **lower bound**, not an estimate, which
+is why the realized +18.7% exceeded it. That excess is not a contradiction; it
+is the signature of latency-bound code, and a reason to expect more from
+vectorising, not less.
+
+## §53 — What is left in BC7 encode
+
+Doubled again on the vectorised code, the four fits still cost **>=22%** of BC7
+encode. The prime suspect is the `#[target_feature]` call boundary: the candidate
+loops in `try_bc7_mode5` and `try_bc7_mode4` call these kernels four to eight
+times per block, and §49 showed that boundary decide the *sign* of a result.
+Hoisting it above the candidate loops — one feature check per block, or per
+surface — is the next move, and is deliberately not attempted in 0.3.31.
