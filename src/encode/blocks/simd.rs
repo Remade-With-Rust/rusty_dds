@@ -26,39 +26,6 @@ pub(super) fn has_avx2() -> bool {
     false
 }
 
-/// Per-pixel squared distances of all 16 RGBA pixels to one RGBA point.
-///
-/// # Safety
-/// Caller guarantees AVX2 is available.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sse16_rgba(pixels: &[[u8; 4]; 16], point: [u8; 4], out: &mut [i32; 16]) {
-    use std::arch::x86_64::*;
-    let base = pixels.as_ptr() as *const u8;
-    // Broadcast the point's RGBA as u16 lanes: [r,g,b,a] repeated 4x per ymm.
-    let p64 = u64::from_le_bytes([
-        point[0], 0, point[1], 0, point[2], 0, point[3], 0,
-    ]);
-    let pv = _mm256_set1_epi64x(p64 as i64);
-    for q in 0..4 {
-        // 4 pixels (16 bytes) -> 16 u16 lanes.
-        let raw = _mm_loadu_si128(base.add(q * 16) as *const __m128i);
-        let px = _mm256_cvtepu8_epi16(raw);
-        let d = _mm256_sub_epi16(px, pv);
-        // (r*r+g*g, b*b+a*a) per pixel: 8 i32 lanes.
-        let sq = _mm256_madd_epi16(d, d);
-        // Sum adjacent i32 pairs -> per-pixel SSE.
-        let hi = _mm256_srli_epi64(sq, 32);
-        let s = _mm256_add_epi32(sq, hi);
-        // Per-pixel sums now sit in i32 lanes 0 and 2 of each 128-bit half.
-        let mut tmp = [0i32; 8];
-        _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, s);
-        out[q * 4] = tmp[0];
-        out[q * 4 + 1] = tmp[2];
-        out[q * 4 + 2] = tmp[4];
-        out[q * 4 + 3] = tmp[6];
-    }
-}
 
 /// AVX2 twin of the mode-6 exhaustive index fit: evaluates ALL 16 palette
 /// entries; identical output to `fit_indices_mode6_exhaustive`.
@@ -68,23 +35,92 @@ pub(super) fn fit_indices_mode6_avx2(
     pal: &[[u8; 4]; 16],
 ) -> ([u8; 16], i64) {
     debug_assert!(has_avx2());
-    let mut best_e = [i32::MAX; 16];
-    let mut best_i = [0u8; 16];
-    let mut sse = [0i32; 16];
+    // SAFETY: dispatch guaranteed AVX2 (debug-asserted above, checked at the
+    // call site).
+    unsafe { fit_indices_mode6_avx2_impl(pixels, pal) }
+}
+
+/// Squared distance from eight consecutive pixels to one palette point, as
+/// eight packed `i32` in pixel order.
+///
+/// `_mm256_hadd_epi32` folds within 128-bit lanes, so the pair sums come out
+/// interleaved as `[p0,p1,p4,p5,p2,p3,p6,p7]`; `perm` puts them back in order.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sse8_rgba(
+    base: *const u8,
+    off: usize,
+    pv: std::arch::x86_64::__m256i,
+    perm: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let a = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i));
+    let b = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off + 16) as *const __m128i));
+    let da = _mm256_sub_epi16(a, pv);
+    let db = _mm256_sub_epi16(b, pv);
+    // madd gives (r*r + g*g, b*b + a*a) per pixel; hadd folds those two.
+    let h = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
+    _mm256_permutevar8x32_epi32(h, perm)
+}
+
+/// Exhaustive mode-6 index fit, entirely in registers.
+///
+/// The previous shape computed the sixteen per-pixel distances into a `[i32; 16]`
+/// and then ran a **scalar** sixteen-iteration min-tracking loop over it, once
+/// per palette entry — 256 scalar compare-branches per fit, on top of two
+/// store-forwarding stalls per entry (the vector code stored to a stack array
+/// that scalar code immediately read back). At 3.168 fits per block that is the
+/// dominant shape in the encoder's hot path.
+///
+/// Now the distances stay in two `__m256i` and the running minimum is tracked
+/// with compare-and-blend, so nothing round-trips through memory until the two
+/// results are extracted once at the end.
+///
+/// Selection is unchanged: `_mm256_cmpgt_epi32(best, cur)` is exactly
+/// `cur < best`, which keeps the lowest index on ties as the scalar twin does.
+#[target_feature(enable = "avx2")]
+unsafe fn fit_indices_mode6_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    pal: &[[u8; 4]; 16],
+) -> ([u8; 16], i64) {
+    use std::arch::x86_64::*;
+    let base = pixels.as_ptr() as *const u8;
+    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+
+    let mut best_lo = _mm256_set1_epi32(i32::MAX);
+    let mut best_hi = _mm256_set1_epi32(i32::MAX);
+    let mut idx_lo = _mm256_setzero_si256();
+    let mut idx_hi = _mm256_setzero_si256();
+
     for (k, &entry) in pal.iter().enumerate() {
-        // SAFETY: dispatch guaranteed AVX2 (debug-asserted above, checked
-        // at the call site).
-        unsafe { sse16_rgba(pixels, entry, &mut sse) };
-        for i in 0..16 {
-            if sse[i] < best_e[i] {
-                best_e[i] = sse[i];
-                best_i[i] = k as u8;
-            }
-        }
+        let pv = _mm256_set1_epi64x(u64::from_le_bytes([
+            entry[0], 0, entry[1], 0, entry[2], 0, entry[3], 0,
+        ]) as i64);
+        let kv = _mm256_set1_epi32(k as i32);
+
+        let cur_lo = sse8_rgba(base, 0, pv, perm);
+        let cur_hi = sse8_rgba(base, 32, pv, perm);
+
+        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
+        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
+        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
+        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
+        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
+        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
     }
+
+    let mut e = [0i32; 16];
+    let mut ix = [0i32; 16];
+    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, best_lo);
+    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, best_hi);
+    _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx_lo);
+    _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx_hi);
+
+    let mut best_i = [0u8; 16];
     let mut err = 0i64;
-    for &e in &best_e {
-        err += e as i64;
+    for i in 0..16 {
+        best_i[i] = ix[i] as u8;
+        err += e[i] as i64;
     }
     (best_i, err)
 }

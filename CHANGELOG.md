@@ -3,6 +3,43 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.24 - 2026-08-19
+
+**The AVX2 index-fit kernel now stays in registers.** With `best_index_pal`
+shown to be dead (0.3.23), `fit_indices_mode6_avx2` *is* the BC7 index fit - and
+it was round-tripping through memory twice per palette entry.
+
+The vector code computed sixteen per-pixel distances, **stored them to a
+`[i32; 16]`**, and then a **scalar sixteen-iteration loop** read them back to
+track the running minimum. Once per palette entry, sixteen entries per fit:
+**256 scalar compare-branches per fit**, plus two store-forwarding stalls per
+entry - the vector unit writing a stack array that scalar code immediately reads.
+At 3.168 fits per block that is the dominant shape in the encoder hot path.
+
+Now the distances stay in two `__m256i` and the minimum is tracked with
+compare-and-blend. Nothing touches memory until the two results are extracted
+once, at the end.
+
+BC7 512^2 x 10 mips, pinned, forced serial, 20 paired CPU samples:
+
+| | |
+|---|---|
+| register median | **41.667 ms** |
+| array median | 46.224 ms |
+| **wins** | **16 / 18** (2 ties) |
+| **z** | **+3.30** |
+| **improvement** | **median +9.23%**, mean +7.83% |
+
+### Notes
+
+- **Byte-identical.** `_mm256_cmpgt_epi32(best, cur)` is exactly `cur < best`,
+  which keeps the lowest index on ties as the scalar twin does. Verified by the
+  existing AVX2-vs-scalar oracle, the frozen-payload tests, and an explicit
+  before/after payload hash across BC7, BC1, BC3 and BC5U.
+- `_mm256_hadd_epi32` folds within 128-bit lanes, so the pair sums arrive as
+  `[p0,p1,p4,p5,p2,p3,p6,p7]`; a `permutevar8x32` puts them back in pixel order.
+- 98 tests pass.
+
 ## 0.3.23 - 2026-08-19
 
 **Block statistics computed once each.** The BC7 mode-6 search walked the same

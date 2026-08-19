@@ -2946,3 +2946,76 @@ Order of instruments, revised for this campaign:
   form.
 - The AVX2 `fit_indices_mode6` kernel itself has never been opened.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+
+---
+
+## §43 — The SIMD kernel was half scalar
+
+§42 established that `best_index_pal` never runs, which means
+`fit_indices_mode6_avx2` **is** the BC7 index fit. Opening it found the campaign's
+own recurring defect, inside the code least suspected of having it.
+
+### What an "AVX2 kernel" was doing
+
+```rust
+for (k, &entry) in pal.iter().enumerate() {   // 16 entries
+    sse16_rgba(pixels, entry, &mut sse);      // vectorised
+    for i in 0..16 {                          // SCALAR
+        if sse[i] < best_e[i] { best_e[i] = sse[i]; best_i[i] = k as u8; }
+    }
+}
+```
+
+And one level down, `sse16_rgba` itself computed in registers, **stored eight
+`i32` to a stack array**, and read four of them back scalar-ly.
+
+So per palette entry: one store-forwarding stall inside the distance kernel,
+another feeding the min loop, and sixteen scalar compare-branches. Times sixteen
+entries, times 3.168 fits per block.
+
+Kept in registers — two `__m256i` for the distances, compare-and-blend for the
+running minimum, one extraction at the end: **+9.23%, 16/18 paired wins,
+z = +3.30, byte-identical.** The largest single encoder win of this campaign.
+
+### Why it hid
+
+**Its name.** The function is called `fit_indices_mode6_avx2`, lives in
+`simd.rs`, carries `#[target_feature(enable = "avx2")]`, and has a 200 000-case
+oracle proving it exact. Everything about it says *this one is already done*.
+
+Three earlier sections found store-forwarding stalls in decode and named the
+pattern; none of them thought to look inside the file whose whole purpose is
+vectorisation. **A module named for an optimisation is not evidence that the
+optimisation is complete** — and it is the one place nobody re-reads.
+
+The tell was structural and visible without a profiler: **a `for i in 0..16`
+loop inside a kernel whose reason to exist is not doing that.**
+
+### The instrument ordering held
+
+§42 revised the order to counts → ceiling → paired verdict, and this round is
+its payoff: the count that `best_index_pal` runs zero times is what promoted this
+kernel to the top of the list. Without it the obvious target was the scalar
+function, which does not execute.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | -19.1% fits |
+| 0.3.21 | residual-error seed gate | +8.33% |
+| 0.3.22 | `quantize_7p` table | +7.26% |
+| 0.3.23 | statistics hoist | +2.67% |
+| **0.3.24** | **register-resident index fit** | **+9.23%** |
+
+Four independent CPU wins, three of them byte-identical, none costing a single
+one of the 102 corpus cases.
+
+### Still open
+
+- `palette_mode6` (3.168 calls/block) is the last per-fit helper; its
+  interpolation is already factored, and a SIMD form is the remaining idea.
+- The BC1 AVX2 kernel (`bc1_fit_4color_avx2`) has the **identical** scalar
+  min-tracking loop and the same `sse16_rgba_noalpha` array round-trip. It was
+  not touched this round and is the obvious next target.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
