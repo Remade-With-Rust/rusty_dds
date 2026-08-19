@@ -285,6 +285,109 @@ unsafe fn alpha_fit_avx2_impl(palette: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16
     (out, err)
 }
 
+
+/// Search a BC7 alpha endpoint neighbourhood — all 24 offsets — inside **one**
+/// `#[target_feature]` call.
+///
+/// # Why this exists
+///
+/// Call counters on alpha-structured content: BC7 encode crosses into an AVX2
+/// kernel **58 times per block**, and **50 of those are alpha** — modes 4 and 5
+/// each run a 5x5-minus-centre endpoint search, 25 scans apiece, and each scan
+/// was its own boundary crossing plus its own `OnceLock` check. A
+/// `#[target_feature]` function cannot be inlined into a caller that lacks the
+/// feature, so that is 50 real calls per block. 0.3.28 measured that same
+/// boundary at 26.7% of BC1 decode — enough there to invert the sign of the
+/// whole result.
+///
+/// Hoisting the loop inside drops mode 5 and mode 4 to three crossings each,
+/// and lets the sixteen samples be loaded and widened **once** rather than
+/// twenty-five times.
+///
+/// # Why it can score without tracking indices
+///
+/// The scalar twin adds `(pal[best] - a)^2` where `best` is the nearest entry,
+/// and that equals `(min_j |pal[j] - a|)^2` — the error depends only on the
+/// minimum distance, never on which entry achieved it. So the search needs only
+/// `_mm256_min_epi16` and no index blending at all; the winner's indices come
+/// from one ordinary scan afterwards, which is also what keeps the lowest-index
+/// tie-break exactly the scalar one.
+///
+/// `N` is 4 for mode 5 (`W2`, 8-bit endpoints) or 8 for mode 4 (`W3`, 6-bit
+/// endpoints, unquantized here). Returns the best `(c0, c1, err)`, seeded with
+/// `seed_err` so it only ever reports a **strictly** better candidate — same
+/// order and same strict `<` as the loop it replaces.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_nbhd_avx2<const N: usize>(
+    alpha: &[u8; 16],
+    s0: u8,
+    s1: u8,
+    clamp_hi: i32,
+    seed_err: i32,
+) -> (u8, u8, i32) {
+    debug_assert!(has_avx2());
+    debug_assert!(N == 4 || N == 8);
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_nbhd_avx2_impl::<N>(alpha, s0, s1, clamp_hi, seed_err) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_nbhd_avx2_impl<const N: usize>(
+    alpha: &[u8; 16],
+    s0: u8,
+    s1: u8,
+    clamp_hi: i32,
+    seed_err: i32,
+) -> (u8, u8, i32) {
+    use std::arch::x86_64::*;
+    const W2: [u32; 4] = [0, 21, 43, 64];
+    const W3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
+
+    // Loaded and widened ONCE, not once per candidate.
+    let sv = _mm256_cvtepu8_epi16(_mm_loadu_si128(alpha.as_ptr() as *const __m128i));
+
+    let mut best = (s0, s1, seed_err);
+    for d0 in -2i32..=2 {
+        for d1 in -2i32..=2 {
+            if d0 == 0 && d1 == 0 {
+                continue;
+            }
+            let c0 = (s0 as i32 + d0).clamp(0, clamp_hi) as u8;
+            let c1 = (s1 as i32 + d1).clamp(0, clamp_hi) as u8;
+            // Mode 4 stores 6-bit endpoints and dequantizes; mode 5 stores 8-bit.
+            let (u0, u1) = if N == 8 {
+                ((c0 << 2) | (c0 >> 4), (c1 << 2) | (c1 >> 4))
+            } else {
+                (c0, c1)
+            };
+
+            let mut mn = _mm256_set1_epi16(i16::MAX);
+            for k in 0..N {
+                let w = if N == 8 { W3[k] } else { W2[k] };
+                let pe = (((64 - w) * u0 as u32 + w * u1 as u32 + 32) / 64) as i16;
+                let d = _mm256_abs_epi16(_mm256_sub_epi16(_mm256_set1_epi16(pe), sv));
+                mn = _mm256_min_epi16(mn, d);
+            }
+
+            // Distances are at most 255, so each square fits well inside i32 and
+            // the sixteen of them cannot overflow it.
+            let sq = _mm256_madd_epi16(mn, mn);
+            let h = _mm256_hadd_epi32(sq, sq);
+            let h = _mm256_hadd_epi32(h, h);
+            let err = _mm_cvtsi128_si32(_mm_add_epi32(
+                _mm256_castsi256_si128(h),
+                _mm256_extracti128_si256(h, 1),
+            ));
+
+            if err < best.2 {
+                best = (c0, c1, err);
+            }
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -315,6 +418,100 @@ mod oracle {
             let fast = super::fit_indices_mode6_avx2(&px, &pal);
             let slow = super::super::fit_indices_mode6_exhaustive(&px, &pal);
             assert_eq!(fast, slow, "case {case}");
+        }
+    }
+
+    /// The vector neighbourhood must pick exactly the candidate the scalar loop
+    /// picks, and report exactly its error — same traversal order, same strict
+    /// `<`, same clamping — for both palette widths.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn alpha_nbhd_avx2_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        const W2: [u32; 4] = [0, 21, 43, 64];
+        const W3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
+
+        fn scalar<const N: usize>(
+            alpha: &[u8; 16],
+            s0: u8,
+            s1: u8,
+            clamp_hi: i32,
+            seed_err: i32,
+        ) -> (u8, u8, i32) {
+            let mut best = (s0, s1, seed_err);
+            for d0 in -2i32..=2 {
+                for d1 in -2i32..=2 {
+                    if d0 == 0 && d1 == 0 {
+                        continue;
+                    }
+                    let c0 = (s0 as i32 + d0).clamp(0, clamp_hi) as u8;
+                    let c1 = (s1 as i32 + d1).clamp(0, clamp_hi) as u8;
+                    let (u0, u1) = if N == 8 {
+                        ((c0 << 2) | (c0 >> 4), (c1 << 2) | (c1 >> 4))
+                    } else {
+                        (c0, c1)
+                    };
+                    let mut pal = [0u8; N];
+                    for k in 0..N {
+                        let w = if N == 8 { W3[k] } else { W2[k] };
+                        pal[k] = (((64 - w) * u0 as u32 + w * u1 as u32 + 32) / 64) as u8;
+                    }
+                    let mut err = 0i32;
+                    for &a in alpha.iter() {
+                        let mut be = i32::MAX;
+                        for &pe in pal.iter() {
+                            let d = (pe as i32 - a as i32).pow(2);
+                            if d < be {
+                                be = d;
+                            }
+                        }
+                        err += be;
+                    }
+                    if err < best.2 {
+                        best = (c0, c1, err);
+                    }
+                }
+            }
+            best
+        }
+
+        let mut state = 0xb7a1_0ba0_5eed_1234u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut alpha = [0u8; 16];
+            match case {
+                0 => {}
+                1 => alpha = [255; 16],
+                // Flat: every candidate ties, so the seed must survive.
+                2 => alpha = [77; 16],
+                _ => {
+                    alpha[..8].copy_from_slice(&next().to_le_bytes());
+                    alpha[8..].copy_from_slice(&next().to_le_bytes());
+                }
+            }
+            let r = next();
+            // Seeds at and beyond the clamp edges, where the +/-2 offsets saturate.
+            let (s0, s1) = ((r >> 3) as u8, (r >> 19) as u8);
+            let seed = (next() % 40_000) as i32;
+            assert_eq!(
+                alpha_nbhd_avx2::<4>(&alpha, s0, s1, 255, seed),
+                scalar::<4>(&alpha, s0, s1, 255, seed),
+                "N=4 case {case}"
+            );
+            let (q0, q1) = (s0 & 63, s1 & 63);
+            assert_eq!(
+                alpha_nbhd_avx2::<8>(&alpha, q0, q1, 63, seed),
+                scalar::<8>(&alpha, q0, q1, 63, seed),
+                "N=8 case {case}"
+            );
         }
     }
 

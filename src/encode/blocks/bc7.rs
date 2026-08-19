@@ -194,6 +194,19 @@ pub(super) fn try_bc7_mode4(pixels: &[[u8; 4]; 16]) -> Option<([u8; 16], i64)> {
     }
     let (mut a_ep0, mut a_ep1, mut a_idx, mut a_err) = score_alpha_mode4(&alpha, hi >> 2, lo >> 2);
     if a_err > 0 {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        let vectorised = simd::has_avx2();
+        #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+        let vectorised = false;
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if vectorised {
+            let (q0, q1, e) =
+                simd::alpha_nbhd_avx2::<8>(&alpha, hi >> 2, lo >> 2, 63, a_err);
+            if e < a_err {
+                (a_ep0, a_ep1, a_idx, a_err) = score_alpha_mode4(&alpha, q0, q1);
+            }
+        }
+        if !vectorised {
         for d0 in -2i32..=2 {
             for d1 in -2i32..=2 {
                 if d0 == 0 && d1 == 0 {
@@ -206,6 +219,7 @@ pub(super) fn try_bc7_mode4(pixels: &[[u8; 4]; 16]) -> Option<([u8; 16], i64)> {
                     (a_ep0, a_ep1, a_idx, a_err) = cand;
                 }
             }
+        }
         }
     }
 
@@ -465,6 +479,18 @@ pub(super) fn ls_endpoints_mode5(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> 
 pub(super) fn fit_alpha_mode5(alpha: &[u8; 16], hi: u8, lo: u8) -> (u8, u8, [u8; 16], i32) {
     let (mut e0, mut e1, mut idx, mut err) = score_alpha_mode5(alpha, hi, lo);
     if err > 0 && hi != lo {
+        // The whole 24-offset search in one crossing instead of 24 — see
+        // `simd::alpha_nbhd_avx2`. It reports only a strictly better candidate,
+        // in the same order, so the winner is the one the loop below would pick;
+        // re-scoring it scalar-ly recovers the indices and the anchor exactly.
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if simd::has_avx2() {
+            let (c0, c1, e) = simd::alpha_nbhd_avx2::<4>(alpha, hi, lo, 255, err);
+            if e < err {
+                (e0, e1, idx, err) = score_alpha_mode5(alpha, c0, c1);
+            }
+            return (e0, e1, idx, err);
+        }
         for d0 in -2i32..=2 {
             for d1 in -2i32..=2 {
                 if d0 == 0 && d1 == 0 {

@@ -3,6 +3,79 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.32 - 2026-08-19
+
+**BC7 encode: +18.5%, by crossing the SIMD boundary 4.2x less often.** And a
+correction to 0.3.31, which was measured on content that never ran the code half
+of it changed.
+
+### The fixture was not exercising mode 4 at all
+
+Call counters - deterministic, no stopwatch - over 16 384 blocks of the encode
+probe's content:
+
+```
+m5=13053  m4=0  rgb4=51881  alpha8=321165  alpha4=321165
+```
+
+`try_bc7_mode4` was called **exactly zero times**. The probe's alpha is
+`0.6 + 0.4xy`, which varies by under one code across a 4-pixel span, so the
+`a_hi - a_lo > 2` gate fails on every block; mode 5 only ever reached its
+*rotation* path. 0.3.31's +18.7% was real and byte-identical, but it came
+entirely from mode 5's rotations - **the mode-4 half of that change was never
+executed by the measurement that justified it.**
+
+The probes now carry a `PROBE_ALPHA=1` fixture with genuine per-block alpha
+structure. On it both modes run on every block, and the picture is different:
+
+| | default fixture | alpha-structured |
+|---|---|---|
+| `try_bc7_mode5` per block | 0.797 | 1.000 |
+| `try_bc7_mode4` per block | **0.000** | 1.000 |
+| kernel crossings per block | 22.8 | **57.95** |
+
+### 50 of those 58 crossings were alpha
+
+Modes 4 and 5 each run a 5x5-minus-centre endpoint search - 25 scans apiece -
+and every scan was its own `#[target_feature]` call plus its own `OnceLock`
+check. A `#[target_feature]` function cannot be inlined into a caller that lacks
+the feature, so those were 50 real calls per block. §49 measured that same
+boundary at 26.7% of BC1 decode.
+
+`alpha_nbhd_avx2` now runs a whole neighbourhood inside **one** call. Two things
+fall out of hoisting it:
+
+- the sixteen samples are loaded and widened **once**, not twenty-five times;
+- the search no longer tracks indices at all. The scalar twin adds
+  `(pal[best] - a)^2`, which equals `(min_j |pal[j] - a|)^2` — the error depends
+  only on the *minimum distance*, never on which entry achieved it. So the sweep
+  needs `_mm256_min_epi16` and no index blending; the winner's indices come from
+  one ordinary scan afterwards, which is also what keeps the lowest-index
+  tie-break exactly the scalar one.
+
+Mode 5 also stops padding its 4-entry palette out to 8, which had been doubling
+the vector work on 86% of all crossings.
+
+Crossings per block, measured: **57.95 -> 13.81**, with the alpha half going
+**50.00 -> 5.86** (8.5x).
+
+512^2, forced serial, pinned, paired CPU samples, alternating leading arm:
+
+| fixture | before | after | verdict |
+|---|---|---|---|
+| alpha-structured | 56.2337 ms | **45.8170 ms** | 16/16, z = +4.00, **+18.5%** |
+| default | 28.6458 ms | **24.6311 ms** | 12/12, z = +3.46, **+14.0%** |
+
+**Byte-identical on both fixtures.** The neighbourhood kernel is oracle-tested
+against the scalar loop over 60 000 cases per palette width, including flat
+alpha (every candidate ties, so the seed must survive) and seeds at the clamp
+edges where the offsets saturate.
+
+### Still open
+
+`rgb4` is unchanged at 7.95 crossings per block - the colour fits, four per mode
+per block, still cross once each. Same hoist applies and is not attempted here.
+
 ## 0.3.31 - 2026-08-19
 
 **BC7 encode modes 4 and 5: +18.7%, by adding no new kernel at all.**

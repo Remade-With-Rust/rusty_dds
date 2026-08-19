@@ -24,6 +24,8 @@ fn main() {
 
     const W: u32 = 512; // 1024 blocks — below the parallel threshold
     let n = (W * W) as usize;
+    let alpha_struct = std::env::var("PROBE_ALPHA").is_ok();
+    eprintln!("[probe] alpha_struct={alpha_struct}");
     let mut px = Vec::with_capacity(n * 4);
     for i in 0..n {
         let x = (i as u32 % W) as f32 / W as f32;
@@ -33,7 +35,17 @@ fn main() {
             v(x + 0.2 * (y * 24.0).sin()),
             v(y + 0.2 * (x * 18.0).cos()),
             v(0.5 + 0.4 * ((x * 12.0).sin() * (y * 12.0).cos())),
-            v(0.6 + 0.4 * x * y),
+            // PROBE_ALPHA=1 gives alpha real *per-block* structure. Without it
+            // alpha is 0.6+0.4xy, which varies by under one code across a
+            // 4-pixel span, so `a_hi - a_lo > 2` fails and BC7 mode 4 never
+            // runs at all (measured: 0 calls in 16384 blocks) while mode 5 only
+            // reaches its rotation path. A fixture that never enters a mode
+            // cannot measure a change to it.
+            if alpha_struct {
+                v(0.5 + 0.5 * ((x * 160.0).sin() * (y * 96.0).cos()))
+            } else {
+                v(0.6 + 0.4 * x * y)
+            },
         ]);
     }
 
