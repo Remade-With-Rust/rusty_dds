@@ -3396,3 +3396,46 @@ exactly why it was never noticed.
 
 Open item, not yet attempted: give BC4 and BC5 the surface-scope treatment the
 other three now have.
+
+## §55 — The mode that never ran
+
+0.3.31 vectorised BC7 modes 4 and 5 and measured +18.7%, 16/16, z = +4.00,
+byte-identical. Call counters run afterwards showed `try_bc7_mode4` was called
+**exactly zero times** in 16 384 blocks. The probe's alpha, `0.6 + 0.4xy`, varies
+by under one code across a 4-pixel span, so `a_hi - a_lo > 2` failed on every
+block; mode 5 only ever reached its rotation path.
+
+The win was real. Its *explanation* was wrong, and the byte-identity gate that
+cleared the change had never executed half of it.
+
+Nothing in the timing looked off — 16/16 and z = +4.00 is what a correct,
+well-instrumented, incompletely-covering experiment produces. Only a counter
+could see it, which is the argument for counters being the FIRST instrument
+rather than the fallback for a busy box.
+
+Both probes now carry a `PROBE_ALPHA=1` fixture with real per-block alpha
+structure. On it, both modes run on every block and crossings per block go from
+22.8 to 57.95.
+
+## §56 — 50 of 58 crossings were one loop
+
+With coverage fixed, the counters localised the cost immediately: BC7 encode
+crossed into an AVX2 kernel **57.95 times per block**, and **50 were alpha** —
+modes 4 and 5 each running a 5x5-minus-centre endpoint search whose every one of
+25 scans was a separate `#[target_feature]` call plus `OnceLock` check.
+
+`alpha_nbhd_avx2` runs a whole neighbourhood in one call. Two consequences beyond
+the boundary saving:
+
+1. the sixteen samples are loaded and widened **once**, not twenty-five times;
+2. the sweep drops index tracking entirely. The scalar twin adds
+   `(pal[best] - a)^2` = `(min_j |pal[j] - a|)^2`, so the error depends only on
+   the minimum distance and never on which entry achieved it —
+   `_mm256_min_epi16` with no blending suffices. The winner is re-scored once
+   afterwards, which is also what keeps the lowest-index tie-break exactly
+   scalar.
+
+Crossings **57.95 -> 13.81**; alpha **50.00 -> 5.86**. Byte-identical on both
+fixtures; +18.5% (16/16) on the covering one, +14.0% (12/12) on the original.
+
+Remaining: `rgb4` is still 7.95 crossings per block. The same hoist applies.
