@@ -3,6 +3,59 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.17 - 2026-08-19
+
+**In-house BC6H mode-11 block decode.** BC6H was the weakest format in the matrix
+by a factor of three - 3.29x against DirectXTex where every other format sat at
+9-12x - and the only decode path that had never received any of this campaign's
+findings.
+
+### Measured before written
+
+| probe (512^2 serial) | Mpx/s | |
+|---|---:|---|
+| full | 113.8 | - |
+| block decode removed | **227.3** | decode is **50%** of the call |
+| **2x block decode work** | **67.5** | doubling costs 1.7x |
+
+The doubling probe matters: BC6H is **throughput** bound, unlike BC5 which is
+latency bound. Work removed here is work saved, so a leaner decoder pays
+directly.
+
+A mode histogram over the real content: **100% of blocks are mode 11** - one
+subset, both endpoints stored explicitly at 10 bits, no partition table, no delta
+compression, sixteen 4-bit indices. That is what this crate's encoder emits, and
+it is the natural shape for smooth HDR gradients.
+
+### Performance
+
+Eight samples per arm, alternating order: **102.7 -> 124.1 Mpx/s, +20.8%.**
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC6H 141.5 vs 31.4 Mpx/s
+- 4.50x**, up from 3.29x; **8.72x** across all formats, up from 7.88x.
+
+### Notes
+
+- The general decoder reaches mode 11 through a stateful `Bitstream` whose every
+  read mutates the cursor, so the mode dispatch, six endpoint reads and sixteen
+  index reads form one serial dependency chain. Reading each field by computed
+  offset from an immutable `u128` makes them independent - the same fix worth
+  +19% to +73% across BC1-BC5 and every BC7 mode.
+- Signed content and every other mode fall through to the general decoder
+  untouched.
+- Verified bit-identical over **40 000** randomised mode-11 blocks including the
+  `unquantize` saturating branches (`v == 0`, `v == 1023`) and the all-ones
+  payload, with signed input and all 31 other mode fields asserted declined.
+- Decode output is unchanged, bit for bit. SIMD path 96 tests, scalar fallback 90.
+
+### Also
+
+A doubling probe was run on BC7 mode 6, whose "at the limit" verdict rested on
+two throughput edits. Doubling its weight-extraction work is free (295.9 vs
+303.5 Mpx/s), which combined with its 2.5% subtraction ceiling means two
+independent instruments now agree the weight extraction is not its cost. The
+verdict stands, better supported.
+
 ## 0.3.16 - 2026-08-19
 
 **BC4/BC5 palette packing without the serial chain.** Re-measuring the ceiling

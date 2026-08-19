@@ -2223,3 +2223,76 @@ Re-measure before each round, not once per thread.
 - The palette interpolation, ~32% of BC5 and resistant to two attacks.
 - BC2 and BC3 have no real-content measurement; our packs contain neither.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §33 — BC6H, the format six sections walked past
+
+§18 closed BC6H with "`bc6h_half` is 84% of the call and it is somebody else's
+code", and moved on. Over the next fifteen sections that same somebody else's
+code was beaten in BC7 modes 0-7, then BC1, BC2, BC3, BC4 and BC5 — **and nobody
+went back**. BC6H sat at 3.29x against DirectXTex while every other format
+climbed to 9-12x.
+
+### The doubling probe, used as an instrument rather than a rescue
+
+§32's finding — that subtraction probes confound throughput with latency, and
+duplication separates them — was applied here **before** writing anything:
+
+| probe (512², serial) | Mpx/s | |
+|---|---:|---|
+| full | 113.8 | — |
+| block decode removed | **227.3** | decode is **50%** of the call |
+| **2x block decode work** | **67.5** | doubling costs 1.7x |
+
+**BC6H is throughput bound.** That is the opposite of BC5, and it is the whole
+reason this round could succeed where three BC5 rounds could not: here, removing
+work removes time.
+
+One instrument, two formats, opposite answers, and the answer determined whether
+to write the decoder at all. Neither could have been guessed.
+
+### 100% of one mode
+
+A histogram over the real content: every one of 43 694 blocks is **mode 11** —
+one subset, both endpoints explicit at 10 bits, no partition table, no delta,
+sixteen 4-bit indices. Our encoder emits only that, and it is the natural shape
+for smooth HDR gradients generally.
+
+So the specialisation is the same playbook as BC7 mode 6, and the same defect:
+the general path reads the mode field, six endpoints and sixteen indices through
+a **mutating cursor**, one serial chain. Computed offsets from an immutable
+`u128` make them independent.
+
+**102.7 → 124.1 Mpx/s, +20.8%**, eight samples per arm. Against DirectXTex:
+**4.50x**, up from 3.29x; **8.72x** across formats, up from 7.88x.
+
+### The lesson worth keeping
+
+**A conclusion has a scope, and "not worth attacking" almost never keeps its
+scope.** §18's verdict was correct *at the time*: the tools to beat bcdec's
+bitstream did not exist yet, because the serial-cursor diagnosis was four
+sections away. But the verdict outlived its evidence by fifteen sections while
+the very technique that refuted it was applied eleven times next door.
+
+When a technique lands, the question is not only "where else does this shape
+appear" (§28's lesson) but **"what did I previously decide was hopeless, and was
+it hopeless for a reason this technique changes?"** Re-read your own refusals
+after every new capability.
+
+### Also settled
+
+BC7 mode 6's "at the limit" verdict rested on two throughput edits, which §32
+showed can be neutral against a latency wall. Doubling its weight-extraction work
+is **free** (295.9 vs 303.5 Mpx/s) — so it has spare capacity — and its
+subtraction ceiling said 2.5%. Two independent instruments agree the weight
+extraction is not its cost. The verdict stands, now for a supported reason rather
+than an exhausted one.
+
+### Still open
+
+- BC6H captured ~20% of a ~100% ceiling. What remains is 96 multiplies per block
+  (16 pixels x 3 channels x 2), which is a vectorisation candidate — 4 pixels of
+  one channel per register — and it needs its own ceiling first.
+- The BC5 palette chain (§32), latency bound and untouched.
+- BC2 and BC3 have no real-content measurement; our packs contain neither.

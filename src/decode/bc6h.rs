@@ -38,7 +38,10 @@ pub fn decode_bc6h_into(
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
-            bcdec_rs::bc6h_half(&data[bi..bi + 16], &mut scratch, 4 * 3, signed);
+            let blk = &data[bi..bi + 16];
+            if !bc6h_mode11_half(blk, &mut scratch, signed) {
+                bcdec_rs::bc6h_half(blk, &mut scratch, 4 * 3, signed);
+            }
             // Convert in one tight straight-line pass, NOT folded into the
             // strided scatter below. Folding them looks like the obvious win —
             // one pass instead of two — and MEASURED SLOWER (1024^2 24-thread:
@@ -69,6 +72,135 @@ pub fn decode_bc6h_into(
         }
     }
     Ok(())
+}
+
+/// BC6H interpolation weights for 4-bit indices.
+const BC6H_W4: [i32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+
+/// Decode one **mode 11** BC6H block to the 48 half-float components the caller
+/// expects, laid out with a pitch of 12.
+///
+/// Mode 11 is one subset with both endpoints stored explicitly at 10 bits — no
+/// partition table, no delta compression, no sign extension — and sixteen 4-bit
+/// indices. **It is 100% of the blocks this crate's encoder produces**, and it is
+/// the shape most BC6H content uses for smooth HDR gradients.
+///
+/// The general decoder reaches it through a stateful `Bitstream` whose every
+/// read mutates the cursor, so the mode dispatch, the six endpoint reads and the
+/// sixteen index reads are one long serial dependency chain. Reading each field
+/// by computed offset from an immutable `u128` makes them independent — the same
+/// fix that was worth +19% to +73% across BC1-BC5 and every BC7 mode.
+///
+/// Unlike BC5, BC6H measured **throughput** bound: doubling the block-decode
+/// work cost 1.7x (113.8 -> 67.5 Mpx/s), and removing it entirely doubled the
+/// call (113.8 -> 227.3). Work removed here is work saved.
+///
+/// Returns `false` for signed content or any other mode, which falls back.
+#[inline]
+fn bc6h_mode11_half(blk: &[u8], out: &mut [u16; 4 * 4 * 3], signed: bool) -> bool {
+    // The 5-bit mode field; 0b00011 is the 10.10/10.10/10.10 single-subset mode.
+    if signed || blk[0] & 0x1f != 0x03 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    // Six 10-bit endpoint components, component-major: rw gw bw rx gx bx.
+    let f = |sh: u32| ((b >> sh) & 0x3ff) as i32;
+    // Unquantize at 10 bits, unsigned: the endpoints saturate rather than scale.
+    let uq = |v: i32| {
+        if v == 0 {
+            0
+        } else if v == 1023 {
+            0xFFFF
+        } else {
+            ((v << 16) + 0x8000) >> 10
+        }
+    };
+    let a = [uq(f(5)), uq(f(15)), uq(f(25))];
+    let c = [uq(f(35)), uq(f(45)), uq(f(55))];
+
+    // `(a*(64-w) + c*w + 32) >> 6` factored to one multiply, as everywhere else
+    // in this crate: base and delta do not depend on the weight.
+    let base = [a[0] * 64 + 32, a[1] * 64 + 32, a[2] * 64 + 32];
+    let delta = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+
+    // 63 bits of indices; pixel 0 is the fix-up and stores one bit fewer.
+    let idx = (b >> 65) as u64;
+    for p in 0..16usize {
+        let w = if p == 0 {
+            BC6H_W4[(idx & 0x7) as usize]
+        } else {
+            BC6H_W4[((idx >> (3 + (p - 1) * 4)) & 0xf) as usize]
+        };
+        let o = (p / 4) * 12 + (p % 4) * 3;
+        for ch in 0..3 {
+            let v = (base[ch] + w * delta[ch]) >> 6;
+            // finish_unquantize, unsigned: scale the magnitude by 31/64. The
+            // result IS the half bit pattern.
+            out[o + ch] = ((v * 31) >> 6) as u16;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod mode11_tests {
+    use super::bc6h_mode11_half;
+
+    /// Bit-identical to the general decoder across randomised blocks, including
+    /// the endpoint extremes where `unquantize` takes its saturating branches
+    /// (`v == 0` and `v == 1023`) and the all-ones payload.
+    #[test]
+    fn mode11_matches_the_general_decoder() {
+        let mut state = 0x6bc6_1111_2222_3333u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..40_000 {
+            let mut blk = [0u8; 16];
+            match case {
+                0 => {}
+                1 => blk.iter_mut().for_each(|x| *x = 0xff),
+                _ => {
+                    blk[..8].copy_from_slice(&next().to_le_bytes());
+                    blk[8..].copy_from_slice(&next().to_le_bytes());
+                }
+            }
+            // Force the mode field; leave everything above it random.
+            blk[0] = (blk[0] & !0x1f) | 0x03;
+
+            let mut ours = [0u16; 4 * 4 * 3];
+            assert!(bc6h_mode11_half(&blk, &mut ours, false), "case {case}");
+            let mut theirs = [0u16; 4 * 4 * 3];
+            bcdec_rs::bc6h_half(&blk, &mut theirs, 4 * 3, false);
+            assert_eq!(ours, theirs, "case {case}: block {blk:02x?}");
+        }
+    }
+
+    /// Signed content and every other mode must be declined, not mis-decoded.
+    #[test]
+    fn other_modes_and_signed_are_declined() {
+        let mut out = [0u16; 4 * 4 * 3];
+        let mut blk = [0u8; 16];
+        blk[0] = 0x03;
+        assert!(bc6h_mode11_half(&blk, &mut out, false));
+        // Same bits, signed: declined.
+        assert!(!bc6h_mode11_half(&blk, &mut out, true));
+        // Every other 5-bit mode field.
+        for m in 0..32u8 {
+            if m == 0x03 {
+                continue;
+            }
+            blk[0] = m;
+            assert!(!bc6h_mode11_half(&blk, &mut out, false), "mode field {m:#07b}");
+        }
+    }
 }
 
 /// Shared entry checks. Returns `(blocks_x, blocks_y, width, height)` as usize.
