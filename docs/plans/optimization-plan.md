@@ -707,3 +707,72 @@ rusty_dds is 25% ahead — and allocation counts now identical to the digit:
 The instrument was never suspected because it was *fair* — both arms paid it, so
 every A/B stayed valid. Fairness is not the same as fidelity: a tax both sides
 pay still hides the signal underneath it. Measure the profiler, not just with it.
+
+---
+
+## §14 — The two paths nobody had measured (round five)
+
+Rounds one to four all worked on the *streaming* path, because that is where the
+simulator pointed. Two paths were never in the simulator at all, so nothing had
+ever profiled them: **encode**, and **BC6H HDR decode**. `sim/examples/probe_encode.rs`
+exists to close that gap.
+
+### Encode: nothing to fix here
+
+512², 10 mips, per format:
+
+| format | time | allocations |
+|---|---:|---:|
+| BC1 | 14.92 ms | 159 |
+| BC3 | 23.93 ms | 159 |
+| BC5U | 18.89 ms | 159 |
+| BC7 | 38.99 ms | 159 |
+
+**159 allocations, identical across all four formats.** That is the structural
+cost of the mip chain and the container, not per-block work — the encoders
+themselves already allocate nothing per block. Encode was never leaking; there
+is no win here to take. Recording it so nobody spends a round finding that out
+again.
+
+### BC6H: the LDR short-circuit the HDR path never got
+
+`decode_rgba_f32` on 256²: **1.4704 ms, 3 allocations, 2.75 MiB for a 1.00 MiB
+output** — 2.75× write amplification.
+
+The cause is one missing early return. The LDR path has always short-circuited
+`depth == 1` and returned the decoder's own buffer. The HDR path did not: it
+built the surface, then built it *again* into a second full-size `Vec`, for the
+single-slice 2D shape that every HDR texture in practice has.
+
+Fixed: **1.4704 → 0.8364 ms, 3 → 2 allocations, 2.75 → 1.75 MiB.**
+
+### Refuted: single-buffer in-place widening
+
+`bcdec_rs::bc6h_float` writes contiguous RGB, so widening to RGBA is
+unavoidable — but the *second buffer* looked avoidable. Decode RGB into the
+front of one RGBA-sized `vec![0f32; n*4]`, then expand from the back, where the
+write index `i*4` always leads the read index `i*3`.
+
+It reaches the ideal on both deterministic metrics: **1 allocation, exactly
+1.00 MiB for a 1.00 MiB output.** It measured slower anyway. A backward pass
+over a buffer that aliases itself defeats the prefetcher, and the compiler
+cannot prove non-aliasing within one slice, so it will not vectorise. The
+forward `chunks_exact(3)` widen is worth more than the allocation it costs.
+
+**Reverted, with the measurement in a code comment** so it is not re-tried.
+
+### A caveat on the instrument, honestly
+
+The same reverted-to code measured 0.8364 ms on one run and 1.3257 ms on
+another. `probe_encode`'s wall-clock band is wide enough that the ms figures
+above should be read as directional; the allocation and byte counts are
+deterministic and are what the decision rested on. This is §13's lesson landing
+a second time: **measure the profiler, not just with it.** A tightened BC6H
+probe is the next thing this file wants.
+
+### Still open
+
+- `decode_rgba_f32_into` — the HDR twin of `decode_rgba8_into`. Same argument,
+  same win, not yet written.
+- Volume textures in `decode_block_rows_into` still return `UnsupportedFormat`.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
