@@ -584,6 +584,93 @@ pub(super) unsafe fn bc3_blocks_ssse3(
     }
 }
 
+
+/// Is AVX2 available?
+///
+/// Decode keeps its own check rather than borrowing the encoder's, so the
+/// decoder stands alone when `encode` is compiled out.
+#[inline]
+pub(super) fn has_avx2() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+}
+
+/// Interpolate one BC6H mode-11 block: sixteen weights against three channels,
+/// eight lanes at a time.
+///
+/// A ceiling probe puts this at **~37% of BC6H decode**, the largest single
+/// share left in it — 0.65 ms full against 0.41 with the arithmetic stubbed.
+///
+/// # Why 32-bit lanes
+///
+/// `base` is `a * 64 + 32` for an unquantized endpoint up to 0xFFFF, so it
+/// reaches 4 194 336 and `w * delta` spans +/-4 194 240. Both need `i32`; the
+/// sum is the original `a * (64 - w) + c * w + 32`, so it stays in
+/// `0 ..= 4 194 336`, `>> 6` lands in `0 ..= 65 535`, and `(v * 31) >> 6` in
+/// `0 ..= 31 743`. `packus_epi32` therefore never saturates, and the arithmetic
+/// shifts are exact because nothing is ever negative.
+///
+/// # Why the output is planar
+///
+/// Writing `r * 16, g * 16, b * 16` means the kernel never interleaves: three
+/// broadcasts and six store-ready vectors, no cross-lane shuffling at all. The
+/// f32 conversion downstream is layout-agnostic, and the RGBA widen that
+/// follows was already a strided read — a ceiling probe puts it at ~8%, and
+/// reading three planes costs it nothing.
+pub(super) fn bc6h_interp_avx2(
+    base: &[i32; 3],
+    delta: &[i32; 3],
+    w: &[i32; 16],
+    out: &mut [u16; 48],
+) -> bool {
+    if !has_avx2() {
+        return false;
+    }
+    // SAFETY: guarded above. Every load and store is a fixed offset inside the
+    // three fixed-size arrays, and `loadu`/`storeu` impose no alignment
+    // requirement.
+    unsafe { bc6h_interp_avx2_impl(base, delta, w, out) }
+    true
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn bc6h_interp_avx2_impl(
+    base: &[i32; 3],
+    delta: &[i32; 3],
+    w: &[i32; 16],
+    out: &mut [u16; 48],
+) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_epi32, _mm256_castsi256_si128, _mm256_loadu_si256,
+        _mm256_mullo_epi32, _mm256_packus_epi32, _mm256_permute4x64_epi64, _mm256_set1_epi32,
+        _mm256_srai_epi32,
+    };
+    let wv = [
+        _mm256_loadu_si256(w.as_ptr() as *const __m256i),
+        _mm256_loadu_si256(w.as_ptr().add(8) as *const __m256i),
+    ];
+    let s31 = _mm256_set1_epi32(31);
+    for ch in 0..3usize {
+        let bv = _mm256_set1_epi32(base[ch]);
+        let dv = _mm256_set1_epi32(delta[ch]);
+        for half in 0..2usize {
+            let v = _mm256_srai_epi32(
+                _mm256_add_epi32(bv, _mm256_mullo_epi32(dv, wv[half])),
+                6,
+            );
+            // finish_unquantize: scale by 31/64. The result IS the half pattern.
+            let v = _mm256_srai_epi32(_mm256_mullo_epi32(v, s31), 6);
+            // `packus` folds within 128-bit lanes, so qwords 0 and 2 hold the
+            // eight values we want; `permute4x64` brings them together.
+            let packed = _mm256_permute4x64_epi64(_mm256_packus_epi32(v, v), 0b0000_1000);
+            _mm_storeu_si128(
+                out.as_mut_ptr().add(ch * 16 + half * 8) as *mut __m128i,
+                _mm256_castsi256_si128(packed),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

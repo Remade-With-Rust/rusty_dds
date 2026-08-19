@@ -40,7 +40,17 @@ pub fn decode_bc6h_into(
             let bi = (by * blocks_x + bx) * 16;
             let blk = &data[bi..bi + 16];
             if !bc6h_mode11_half(blk, &mut scratch, signed) {
-                bcdec_rs::bc6h_half(blk, &mut scratch, 4 * 3, signed);
+                // The general decoder writes interleaved with a pitch of 12;
+                // transpose it so everything downstream sees one layout. Only
+                // non-mode-11 blocks reach this, which this crate's own encoder
+                // never emits.
+                let mut ilv = [0u16; 4 * 4 * 3];
+                bcdec_rs::bc6h_half(blk, &mut ilv, 4 * 3, signed);
+                for p in 0..16usize {
+                    for ch in 0..3usize {
+                        scratch[ch * 16 + p] = ilv[p * 3 + ch];
+                    }
+                }
             }
             // Convert in one tight straight-line pass, NOT folded into the
             // strided scatter below. Folding them looks like the obvious win —
@@ -69,7 +79,7 @@ pub fn decode_bc6h_into(
                     break;
                 }
                 let n = (w - px0).min(4);
-                let s = row * 4 * 3;
+                let s = row * 4;
                 let d = (y * w + px0) * 4;
                 if n == 4 {
                     // A whole block row per store: one slice range-check instead
@@ -78,28 +88,28 @@ pub fn decode_bc6h_into(
                     // register-resident array, not while addressing `out`.
                     let px = [
                         fscratch[s],
+                        fscratch[16 + s],
+                        fscratch[32 + s],
+                        1.0,
                         fscratch[s + 1],
+                        fscratch[17 + s],
+                        fscratch[33 + s],
+                        1.0,
                         fscratch[s + 2],
+                        fscratch[18 + s],
+                        fscratch[34 + s],
                         1.0,
                         fscratch[s + 3],
-                        fscratch[s + 4],
-                        fscratch[s + 5],
-                        1.0,
-                        fscratch[s + 6],
-                        fscratch[s + 7],
-                        fscratch[s + 8],
-                        1.0,
-                        fscratch[s + 9],
-                        fscratch[s + 10],
-                        fscratch[s + 11],
+                        fscratch[19 + s],
+                        fscratch[35 + s],
                         1.0,
                     ];
                     out[d..d + 16].copy_from_slice(&px);
                 } else {
                     for i in 0..n {
-                        out[d + i * 4] = fscratch[s + i * 3];
-                        out[d + i * 4 + 1] = fscratch[s + i * 3 + 1];
-                        out[d + i * 4 + 2] = fscratch[s + i * 3 + 2];
+                        out[d + i * 4] = fscratch[s + i];
+                        out[d + i * 4 + 1] = fscratch[16 + s + i];
+                        out[d + i * 4 + 2] = fscratch[32 + s + i];
                         out[d + i * 4 + 3] = 1.0;
                     }
                 }
@@ -113,7 +123,13 @@ pub fn decode_bc6h_into(
 const BC6H_W4: [i32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
 /// Decode one **mode 11** BC6H block to the 48 half-float components the caller
-/// expects, laid out with a pitch of 12.
+/// expects, laid out **planar**: sixteen reds, then greens, then blues.
+///
+/// Planar is what lets the vector kernel avoid interleaving entirely — see
+/// [`crate::decode::simd::bc6h_interp_avx2`]. The f32 conversion downstream does
+/// not care about layout, and the RGBA widen after it was already strided. The
+/// general-decoder fallback writes interleaved and is transposed by its
+/// caller.
 ///
 /// Mode 11 is one subset with both endpoints stored explicitly at 10 bits — no
 /// partition table, no delta compression, no sign extension — and sixteen 4-bit
@@ -164,18 +180,23 @@ fn bc6h_mode11_half(blk: &[u8], out: &mut [u16; 4 * 4 * 3], signed: bool) -> boo
 
     // 63 bits of indices; pixel 0 is the fix-up and stores one bit fewer.
     let idx = (b >> 65) as u64;
-    for p in 0..16usize {
-        let w = if p == 0 {
-            BC6H_W4[(idx & 0x7) as usize]
-        } else {
-            BC6H_W4[((idx >> (3 + (p - 1) * 4)) & 0xf) as usize]
-        };
-        let o = (p / 4) * 12 + (p % 4) * 3;
+    let mut w = [0i32; 16];
+    w[0] = BC6H_W4[(idx & 0x7) as usize];
+    for (p, wp) in w.iter_mut().enumerate().skip(1) {
+        *wp = BC6H_W4[((idx >> (3 + (p - 1) * 4)) & 0xf) as usize];
+    }
+
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::decode::simd::bc6h_interp_avx2(&base, &delta, &w, out) {
+        return true;
+    }
+
+    for (p, &wp) in w.iter().enumerate() {
         for ch in 0..3 {
-            let v = (base[ch] + w * delta[ch]) >> 6;
+            let v = (base[ch] + wp * delta[ch]) >> 6;
             // finish_unquantize, unsigned: scale the magnitude by 31/64. The
             // result IS the half bit pattern.
-            out[o + ch] = ((v * 31) >> 6) as u16;
+            out[ch * 16 + p] = ((v * 31) >> 6) as u16;
         }
     }
     true
@@ -212,8 +233,15 @@ mod mode11_tests {
 
             let mut ours = [0u16; 4 * 4 * 3];
             assert!(bc6h_mode11_half(&blk, &mut ours, false), "case {case}");
+            let mut ilv = [0u16; 4 * 4 * 3];
+            bcdec_rs::bc6h_half(&blk, &mut ilv, 4 * 3, false);
+            // Ours is planar; the reference is interleaved with a pitch of 12.
             let mut theirs = [0u16; 4 * 4 * 3];
-            bcdec_rs::bc6h_half(&blk, &mut theirs, 4 * 3, false);
+            for p in 0..16usize {
+                for ch in 0..3usize {
+                    theirs[ch * 16 + p] = ilv[p * 3 + ch];
+                }
+            }
             assert_eq!(ours, theirs, "case {case}: block {blk:02x?}");
         }
     }

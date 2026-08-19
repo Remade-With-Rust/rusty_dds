@@ -3,6 +3,56 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.30 - 2026-08-19
+
+**BC6H block decode gets SIMD: +30.4%.** And the measurement that found it
+invalidated every BC6H decode figure this campaign has published.
+
+### The instrument was measuring the allocator
+
+The per-format decode probe called `decode_rgba_f32` for BC6H while calling
+`decode_rgba8_into` - with a **reused** buffer - for every LDR format. The f32
+entry point allocates and zeroes a fresh 4 MiB `Vec` per call. At 512^2:
+
+| | CPU ms |
+|---|---|
+| `decode_rgba_f32` (allocates per call) | 1.5234 |
+| `decode_rgba_f32_into` (buffer reused) | **0.6497** |
+
+**59% of what was being reported as BC6H decode was allocation and zeroing.**
+The probe now reuses a buffer, as the LDR arms always did. No shipped code was
+wrong; the instrument was, and every BC6H share derived from it was too - the
+interpolation loop had read as 14% of decode and is in fact **~37%**, the
+largest share left in the format.
+
+### The kernel
+
+Sixteen weights against three channels, eight lanes at a time. `base` reaches
+4 194 336 and `w * delta` spans +/-4 194 240, so the lanes must be 32-bit; the
+sum is the original `a * (64 - w) + c * w + 32`, so `>> 6` lands in `0..=65535`
+and `(v * 31) >> 6` in `0..=31743`, and `packus_epi32` never saturates.
+
+The block now decodes **planar** - sixteen reds, then greens, then blues - which
+is what lets the kernel avoid interleaving entirely: three broadcasts, six
+store-ready vectors, no cross-lane shuffling. The f32 conversion downstream is
+layout-agnostic, and the RGBA widen after it was already a strided read (a
+ceiling probe puts it at ~8%, and reading three planes costs it nothing). The
+general-decoder fallback still writes interleaved and is transposed by its
+caller; this crate's own encoder emits only mode 11, so that path is cold.
+
+512^2, pinned, 16 paired CPU samples, alternating leading arm: **0.4688 ms
+against 0.6738, 16/16 wins, z = +4.00, +30.4%.** Byte-identical to the general
+decoder across 40 000 randomised blocks including both saturating `unquantize`
+branches.
+
+### Ceiling probes, on the corrected instrument
+
+| stage | share of BC6H decode |
+|---|---|
+| mode-11 interpolation | ~37% (now vectorised) |
+| half-to-f32 conversion | ~14% (already F16C) |
+| RGB-to-RGBA widen and scatter | ~8% |
+
 ## 0.3.29 - 2026-08-19
 
 **BC2 and BC3 decode get SIMD: 2.43x and 1.90x.** The last two scalar LDR block

@@ -45,10 +45,14 @@ fn main() {
     // tick is a small fraction of the total, or the quantum is the measurement.
     let iters: usize = if fmt == "bc6h" { 400 } else { 4000 };
     if fmt == "bc6h" {
-        let _ = view.decode_rgba_f32(id).unwrap();
+        // `decode_rgba_f32` allocates and zeroes a fresh 4 MiB Vec per call; the
+        // LDR arms reuse a buffer. Measuring the allocator against a decoder is
+        // not a comparison, so this reuses one too.
+        let mut fbuf = Vec::new();
+        view.decode_rgba_f32_into(id, &mut fbuf).unwrap();
         let c0 = rusty_dds_sim::os::process_cpu_secs();
         let t = Instant::now();
-        for _ in 0..iters { std::hint::black_box(view.decode_rgba_f32(id).unwrap()); }
+        for _ in 0..iters { view.decode_rgba_f32_into(id, &mut fbuf).unwrap(); std::hint::black_box(&fbuf); }
         report(c0, t, iters);
     } else {
         let mut buf = Vec::new();
