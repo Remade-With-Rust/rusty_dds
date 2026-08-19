@@ -1000,7 +1000,14 @@ impl Viewport for VulkanViewport {
 
             // Safe point: the previous frame has completed, so anything trimmed
             // or replaced during it can now actually be destroyed.
-            for t in std::mem::take(&mut self.graveyard) {
+            // Taken out and PUT BACK, rather than taken and dropped. `mem::take`
+            // leaves `Vec::new()` behind — capacity zero — so the consumed
+            // vector's buffer was freed here and reallocated on the next push,
+            // once per frame, for the whole run. Moving out is still necessary
+            // (the loop bodies borrow `self.device`), so the fix is to `drain`
+            // the local, which keeps its capacity, and move it home.
+            let mut graveyard = std::mem::take(&mut self.graveyard);
+            for t in graveyard.drain(..) {
                 if t.view != vk::ImageView::null() {
                     self.device.destroy_image_view(t.view, None);
                 }
@@ -1008,9 +1015,13 @@ impl Viewport for VulkanViewport {
                 self.device.destroy_image(t.image, None);
                 self.device.free_memory(t.memory, None);
             }
-            for v in std::mem::take(&mut self.dead_views) {
+            self.graveyard = graveyard;
+
+            let mut dead_views = std::mem::take(&mut self.dead_views);
+            for v in dead_views.drain(..) {
                 self.device.destroy_image_view(v, None);
             }
+            self.dead_views = dead_views;
 
             // Read the previous frame's timestamps before this frame resets them.
             self.last_gpu_ms = f64::NAN;
