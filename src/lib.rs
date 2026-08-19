@@ -70,7 +70,7 @@ pub use decode::reference;
 #[cfg(feature = "encode")]
 mod encode;
 #[cfg(feature = "encode")]
-pub use encode::{max_abs_diff, psnr_rgba8, EncodeLayout, EncodeQuality};
+pub use encode::{max_abs_diff, psnr_rgba8, EncodeLayout, EncodeQuality, Rdo};
 
 mod upload;
 pub use upload::{GpuFormat, UploadPath, UploadPlan};
@@ -79,14 +79,49 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fmt;
 use std::io::{Read, Write};
 
-/// This is the main DirectDraw Surface file structure
+/// This is the main DirectDraw Surface file structure, generic over how the
+/// payload is stored.
+///
+/// Use the aliases, not this type directly: [`Dds`] owns its payload and
+/// [`DdsView`] borrows one. Every query, surface, decode and upload-plan method
+/// is implemented once, here, for both.
 #[derive(Clone)]
-pub struct Dds {
+pub struct DdsBase<D = Vec<u8>> {
     // magic is implicit
     pub header: Header,
     pub header10: Option<Header10>,
-    pub data: Vec<u8>,
+    pub data: D,
 }
+
+/// A DDS that owns its payload. This is what [`Dds::read`] produces, and it is
+/// what `Dds` has always meant.
+pub type Dds = DdsBase<Vec<u8>>;
+
+/// A DDS that **borrows** its payload — no copy, no allocation.
+///
+/// A streaming engine already holds the file bytes: from `fs::read`, a memory
+/// map, or an archive decompressor. [`Dds::read`] would copy them a second time,
+/// and the copy is dominated by the operating system faulting in and zeroing
+/// pages that are about to be overwritten — measured at ~87% of the call.
+/// [`DdsView::parse`] reads the header and points at the bytes you already have.
+///
+/// ```
+/// use rusty_dds::{DdsView, SubresourceId};
+///
+/// # let mut bytes = Vec::new();
+/// # rusty_dds::Dds::new_dxgi(rusty_dds::NewDxgiParams {
+/// #     height: 64, width: 64, depth: None,
+/// #     format: rusty_dds::DxgiFormat::BC1_UNorm,
+/// #     mipmap_levels: None, array_layers: None, caps2: None, is_cubemap: false,
+/// #     resource_dimension: rusty_dds::D3D10ResourceDimension::Texture2D,
+/// #     alpha_mode: rusty_dds::AlphaMode::Straight,
+/// # })?.write(&mut bytes)?;
+/// let dds = DdsView::parse(&bytes)?;
+/// let plan = dds.upload_plan_compressed(SubresourceId::mip_layer(0, 0))?;
+/// assert_eq!(plan.width, 64);
+/// # Ok::<(), rusty_dds::Error>(())
+/// ```
+pub type DdsView<'a> = DdsBase<&'a [u8]>;
 
 /// Parameters for Dds::new_d3d()
 #[derive(Debug, Clone)]
@@ -175,7 +210,9 @@ impl Dds {
         };
         let array_stride = get_array_stride(size, min_mipmap_size, mml);
 
-        let data_size = arraysize * array_stride;
+        let data_size = arraysize
+            .checked_mul(array_stride)
+            .ok_or(Error::OutOfBounds)?;
 
         let arraysize = if params.is_cubemap {
             arraysize / 6
@@ -205,23 +242,51 @@ impl Dds {
         })
     }
 
-    /// Read a DDS file
-    pub fn read<R: Read>(mut r: R) -> Result<Dds, Error> {
-        let magic = r.read_u32::<LittleEndian>()?;
-        if magic != Self::MAGIC {
-            return Err(Error::BadMagicNumber);
-        }
+    /// Read a DDS file, accepting a payload of any length.
+    ///
+    /// The payload is read to end-of-stream with no cap, so the peak allocation
+    /// is whatever the reader yields. That is the right behaviour for a trusted
+    /// file on disk and the wrong one for bytes arriving from a network, a
+    /// user upload, or a mod archive — for those, use [`Dds::read_limited`],
+    /// which fails closed at a byte budget you choose.
+    pub fn read<R: Read>(r: R) -> Result<Dds, Error> {
+        Self::read_inner(r, None)
+    }
 
-        let header = Header::read(&mut r)?;
+    /// Read a DDS file, refusing a payload larger than `max_data_len` bytes.
+    ///
+    /// The limit covers the **payload only** — the 128-byte header (148 with a
+    /// DX10 header) is read first and is not counted. Exceeding it returns
+    /// [`Error::SizeLimitExceeded`] without buffering the overrun, so a hostile
+    /// or corrupt stream cannot force an unbounded allocation.
+    ///
+    /// ```
+    /// use rusty_dds::{Dds, Error};
+    ///
+    /// let mut bytes = Vec::new();
+    /// Dds::new_dxgi(rusty_dds::NewDxgiParams {
+    ///     height: 64, width: 64, depth: None,
+    ///     format: rusty_dds::DxgiFormat::BC1_UNorm,
+    ///     mipmap_levels: None, array_layers: None, caps2: None, is_cubemap: false,
+    ///     resource_dimension: rusty_dds::D3D10ResourceDimension::Texture2D,
+    ///     alpha_mode: rusty_dds::AlphaMode::Straight,
+    /// })?.write(&mut bytes)?;
+    ///
+    /// assert!(Dds::read_limited(&bytes[..], 8 * 1024).is_ok());
+    /// assert!(matches!(
+    ///     Dds::read_limited(&bytes[..], 16),
+    ///     Err(Error::SizeLimitExceeded { .. })
+    /// ));
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn read_limited<R: Read>(r: R, max_data_len: usize) -> Result<Dds, Error> {
+        Self::read_inner(r, Some(max_data_len))
+    }
 
-        let header10 = if header.spf.fourcc == Some(FourCC(<FourCC>::DX10)) {
-            Some(Header10::read(&mut r)?)
-        } else {
-            None
-        };
-
+    fn read_inner<R: Read>(mut r: R, max_data_len: Option<usize>) -> Result<Dds, Error> {
+        let (header, header10) = read_headers(&mut r)?;
         let mut data: Vec<u8> = Vec::new();
-        r.read_to_end(&mut data)?;
+        read_payload(r, &mut data, max_data_len)?;
         Ok(Dds {
             header,
             header10,
@@ -229,14 +294,108 @@ impl Dds {
         })
     }
 
+}
+
+impl<'a> DdsView<'a> {
+    /// Parse a DDS **without copying the payload**.
+    ///
+    /// The returned view borrows `bytes` for its lifetime. Everything a
+    /// streaming engine needs — [`DdsBase::surface`],
+    /// [`DdsBase::subresource_range`], [`DdsBase::upload_plan_compressed`],
+    /// decode — works on it exactly as it does on an owned [`Dds`].
+    pub fn parse(bytes: &'a [u8]) -> Result<DdsView<'a>, Error> {
+        let mut cursor = bytes;
+        let magic = cursor.read_u32::<LittleEndian>()?;
+        if magic != Dds::MAGIC {
+            return Err(Error::BadMagicNumber);
+        }
+        let header = Header::read(&mut cursor)?;
+        let header10 = if header.spf.fourcc == Some(FourCC(<FourCC>::DX10)) {
+            Some(Header10::read(&mut cursor)?)
+        } else {
+            None
+        };
+        // `cursor` has been advanced past the headers by the reads above, so
+        // what remains is exactly the payload — borrowed, never copied.
+        Ok(DdsBase {
+            header,
+            header10,
+            data: cursor,
+        })
+    }
+
+    /// Read a DDS from any reader **into a buffer you own and recycle**.
+    ///
+    /// [`DdsView::parse`] is the right call when you already hold the bytes.
+    /// This is for the case where you do not — an archive decompressor, a
+    /// network stream — and would otherwise be forced back onto [`Dds::read`],
+    /// which allocates a fresh payload buffer every time. A fresh buffer is
+    /// faulted in and zeroed by the operating system before it is overwritten,
+    /// which measured at ~87% of that call; reusing one buffer keeps the pages
+    /// resident and the cost is the copy alone.
+    ///
+    /// `buf` is cleared, so its capacity survives and the second call onwards
+    /// touches no new pages. Reuse one buffer per streaming worker.
+    ///
+    /// ```
+    /// use rusty_dds::{DdsView, SubresourceId};
+    ///
+    /// # let mut bytes = Vec::new();
+    /// # rusty_dds::Dds::new_dxgi(rusty_dds::NewDxgiParams {
+    /// #     height: 64, width: 64, depth: None,
+    /// #     format: rusty_dds::DxgiFormat::BC1_UNorm,
+    /// #     mipmap_levels: None, array_layers: None, caps2: None, is_cubemap: false,
+    /// #     resource_dimension: rusty_dds::D3D10ResourceDimension::Texture2D,
+    /// #     alpha_mode: rusty_dds::AlphaMode::Straight,
+    /// # })?.write(&mut bytes)?;
+    /// let mut buf = Vec::new();          // hoisted out of the loop
+    /// for _ in 0..2 {
+    ///     let dds = DdsView::read_into(&bytes[..], &mut buf)?;
+    ///     assert_eq!(dds.get_width(), 64);
+    /// }
+    /// # Ok::<(), rusty_dds::Error>(())
+    /// ```
+    pub fn read_into<R: Read>(r: R, buf: &'a mut Vec<u8>) -> Result<DdsView<'a>, Error> {
+        Self::read_into_inner(r, buf, None)
+    }
+
+    /// [`DdsView::read_into`], refusing a payload larger than `max_data_len`.
+    ///
+    /// Same posture as [`Dds::read_limited`]: the limit covers the payload only,
+    /// and an overrun fails closed without buffering the rest. Use this for
+    /// bytes you did not produce — a mod archive, a download.
+    pub fn read_into_limited<R: Read>(
+        r: R,
+        buf: &'a mut Vec<u8>,
+        max_data_len: usize,
+    ) -> Result<DdsView<'a>, Error> {
+        Self::read_into_inner(r, buf, Some(max_data_len))
+    }
+
+    fn read_into_inner<R: Read>(
+        mut r: R,
+        buf: &'a mut Vec<u8>,
+        max_data_len: Option<usize>,
+    ) -> Result<DdsView<'a>, Error> {
+        let (header, header10) = read_headers(&mut r)?;
+        read_payload(r, buf, max_data_len)?;
+        Ok(DdsBase {
+            header,
+            header10,
+            data: &buf[..],
+        })
+    }
+}
+
+impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Write to a DDS file
     pub fn write<W: Write>(&self, w: &mut W) -> Result<(), Error> {
-        w.write_u32::<LittleEndian>(Self::MAGIC)?;
+        w.write_u32::<LittleEndian>(Dds::MAGIC)?;
         self.header.write(w)?;
         if let Some(ref header10) = self.header10 {
             header10.write(w)?;
         }
-        w.write_all(&self.data)?;
+        w.write_all(self.data.as_ref())?;
         Ok(())
     }
 
@@ -261,6 +420,21 @@ impl Dds {
         } else {
             DxgiFormat::try_from_pixel_format(&self.header.spf)
         }
+    }
+
+    /// The format by value, without the `Box` that [`Dds::get_format`] costs.
+    ///
+    /// Every internal caller uses this. `get_format` allocates, and it is called
+    /// underneath every subresource offset computation.
+    pub(crate) fn format_of(&self) -> Option<crate::format::FormatOf> {
+        use crate::format::FormatOf;
+        if let Some(dxgi) = self.get_dxgi_format() {
+            return Some(FormatOf::Dxgi(dxgi));
+        }
+        if let Some(d3d) = self.get_d3d_format() {
+            return Some(FormatOf::D3d(d3d));
+        }
+        None
     }
 
     /// Get the format of the DDS as a trait (type-erasure)
@@ -288,7 +462,7 @@ impl Dds {
 
     pub fn get_bits_per_pixel(&self) -> Option<u32> {
         // Try format first
-        if let Some(format) = self.get_format() {
+        if let Some(format) = self.format_of() {
             if let Some(bpp) = format.get_bits_per_pixel() {
                 return Some(bpp as u32);
             }
@@ -302,7 +476,7 @@ impl Dds {
 
     pub fn get_pitch(&self) -> Option<u32> {
         // Try format first
-        if let Some(format) = self.get_format() {
+        if let Some(format) = self.format_of() {
             if let Some(pitch) = format.get_pitch(self.header.width) {
                 return Some(pitch);
             }
@@ -314,13 +488,18 @@ impl Dds {
 
         // Then try to calculate it ourselves
         if let Some(bpp) = self.get_bits_per_pixel() {
-            return Some((bpp * self.get_width() + 7) / 8);
+            // Both operands come from the file; a header that overflows here is
+            // not describing a pitch we can honour.
+            return bpp
+                .checked_mul(self.get_width())
+                .and_then(|n| n.checked_add(7))
+                .map(|n| n / 8);
         }
         None
     }
 
     pub fn get_pitch_height(&self) -> u32 {
-        if let Some(format) = self.get_format() {
+        if let Some(format) = self.format_of() {
             format.get_pitch_height()
         } else {
             1
@@ -366,13 +545,15 @@ impl Dds {
     }
 
     pub fn get_min_mipmap_size_in_bytes(&self) -> u32 {
-        if let Some(format) = self.get_format() {
+        if let Some(format) = self.format_of() {
             if let Some(min) = format.get_minimum_mipmap_size_in_bytes() {
                 return min;
             }
         }
         if let Some(bpp) = self.get_bits_per_pixel() {
-            (bpp + 7) / 8
+            // `bpp` can be the raw `rgb_bit_count` header field, so it is not
+            // bounded by any real format; saturate rather than overflow.
+            bpp.saturating_add(7) / 8
         } else {
             1
         }
@@ -384,20 +565,8 @@ impl Dds {
         let (offset, size) = self.get_offset_and_size(array_layer)?;
         let offset = offset as usize;
         let size = size as usize;
-        self.data
-            .get(offset..offset + size)
-            .ok_or(Error::OutOfBounds)
-    }
-
-    /// This gets a reference to the data at the given `array_layer` (which should be
-    /// 0 for textures with just one image).
-    pub fn get_mut_data(&mut self, array_layer: u32) -> Result<&mut [u8], Error> {
-        let (offset, size) = self.get_offset_and_size(array_layer)?;
-        let offset = offset as usize;
-        let size = size as usize;
-        self.data
-            .get_mut(offset..offset + size)
-            .ok_or(Error::OutOfBounds)
+        let end = offset.checked_add(size).ok_or(Error::OutOfBounds)?;
+        self.data.as_ref().get(offset..end).ok_or(Error::OutOfBounds)
     }
 
     fn get_offset_and_size(&self, array_layer: u32) -> Result<(u32, u32), Error> {
@@ -406,12 +575,88 @@ impl Dds {
             return Err(Error::OutOfBounds);
         }
         let array_stride = self.get_array_stride()?;
-        let offset = array_layer * array_stride;
+        let offset = array_layer
+            .checked_mul(array_stride)
+            .ok_or(Error::OutOfBounds)?;
 
         Ok((offset, array_stride))
     }
 }
 
+impl<D: AsRef<[u8]> + AsMut<[u8]>> DdsBase<D> {
+    /// This gets a mutable reference to the data at the given `array_layer`
+    /// (which should be 0 for textures with just one image).
+    ///
+    /// Only available when the payload is owned or mutably borrowed — a
+    /// [`DdsView`] over `&[u8]` cannot offer it.
+    pub fn get_mut_data(&mut self, array_layer: u32) -> Result<&mut [u8], Error> {
+        let (offset, size) = self.get_offset_and_size(array_layer)?;
+        let offset = offset as usize;
+        let size = size as usize;
+        let end = offset.checked_add(size).ok_or(Error::OutOfBounds)?;
+        self.data
+            .as_mut()
+            .get_mut(offset..end)
+            .ok_or(Error::OutOfBounds)
+    }
+}
+
+/// Magic, `DDS_HEADER`, and the DX10 extension when the pixel format asks for it.
+fn read_headers<R: Read>(r: &mut R) -> Result<(Header, Option<Header10>), Error> {
+    let magic = r.read_u32::<LittleEndian>()?;
+    if magic != Dds::MAGIC {
+        return Err(Error::BadMagicNumber);
+    }
+    // Reborrow: `Header::read` takes the reader by value, and `&mut R` is not
+    // `Copy`, so the second read needs a fresh borrow rather than the moved one.
+    let header = Header::read(&mut *r)?;
+    let header10 = if header.spf.fourcc == Some(FourCC(<FourCC>::DX10)) {
+        Some(Header10::read(&mut *r)?)
+    } else {
+        None
+    };
+    Ok((header, header10))
+}
+
+/// Fill `data` with the payload, honouring an optional byte budget.
+///
+/// `data` is cleared, not reallocated: a caller that reuses one buffer across
+/// many textures keeps its pages resident, which is the entire point of
+/// [`DdsView::read_into`].
+fn read_payload<R: Read>(r: R, data: &mut Vec<u8>, max_data_len: Option<usize>) -> Result<(), Error> {
+    data.clear();
+    match max_data_len {
+        None => {
+            let mut r = r;
+            r.read_to_end(data)?;
+        }
+        Some(limit) => {
+            // Read one byte past the budget: if the reader still had bytes to
+            // give, the payload is over the limit and we stop there rather than
+            // buffering the rest.
+            let mut capped = r.take(limit as u64 + 1);
+            capped.read_to_end(data)?;
+            if data.len() > limit {
+                return Err(Error::SizeLimitExceeded {
+                    limit,
+                    // Only ever `limit + 1` here — the true length is unknown by
+                    // construction, and that is the point.
+                    at_least: data.len(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bytes for one mip-0 surface, or `None` when the header's own fields cannot
+/// describe one.
+///
+/// Every input here is an attacker-controlled `u32` straight out of the file,
+/// so the arithmetic is checked throughout: an overflow means the header is
+/// describing a texture that cannot exist, and the honest answer is `None`
+/// (which callers turn into [`Error::UnsupportedFormat`]), not a wrapped size
+/// that would then be used to slice the payload.
 fn get_texture_size(
     pitch: Option<u32>,
     linear_size: Option<u32>,
@@ -422,29 +667,44 @@ fn get_texture_size(
     let depth = depth.unwrap_or(1);
 
     if let Some(ls) = linear_size {
-        Some(ls)
-    } else if let Some(pitch) = pitch {
-        let row_height = (height + (pitch_height - 1)) / pitch_height;
-        Some(pitch * row_height * depth)
-    } else {
-        None
+        return Some(ls);
     }
+    let pitch = pitch?;
+    // A zero pitch height would divide by zero; a format that reports one is
+    // not describing a layout we can compute.
+    if pitch_height == 0 {
+        return None;
+    }
+    let row_height = height.checked_add(pitch_height - 1)? / pitch_height;
+    pitch.checked_mul(row_height)?.checked_mul(depth)
 }
 
+/// Total bytes of one mip chain.
+///
+/// `mipmap_levels` comes from the file, so it can be up to `u32::MAX`. Once the
+/// mip size has bottomed out at `min_mipmap_size` every remaining level
+/// contributes exactly that much, so the tail is computed in closed form rather
+/// than iterated — otherwise a header claiming `mip_map_count = 0xFFFF_FFFF`
+/// would spin for billions of iterations on every metadata query. Accumulation
+/// saturates for the same reason `get_texture_size` is checked: a wrapped
+/// stride would be used to index the payload.
 fn get_array_stride(texture_size: u32, min_mipmap_size: u32, mipmap_levels: u32) -> u32 {
     let mut stride: u32 = 0;
     let mut current_mipsize: u32 = texture_size;
-    for _ in 0..mipmap_levels {
-        stride += current_mipsize;
+    let mut level: u32 = 0;
+    while level < mipmap_levels {
+        stride = stride.saturating_add(current_mipsize);
+        level += 1;
         current_mipsize /= 4;
-        if current_mipsize < min_mipmap_size {
-            current_mipsize = min_mipmap_size;
+        if current_mipsize <= min_mipmap_size {
+            let remaining = mipmap_levels - level;
+            return stride.saturating_add(remaining.saturating_mul(min_mipmap_size));
         }
     }
     stride
 }
 
-impl fmt::Debug for Dds {
+impl<D: AsRef<[u8]>> fmt::Debug for DdsBase<D> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "Dds:")?;
         if let Some(d3dformat) = self.get_d3d_format() {

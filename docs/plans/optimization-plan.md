@@ -1,0 +1,709 @@
+# Plan: closing the runtime streaming gap vs DirectXTex
+
+Status: **rounds one to four complete** (2026-08-18). Runtime gap closed (§7-§9);
+decode fixed and opened to caller threads (§10-§11); payload buffers recycled
+(§12); **the harness's own instrument was 61% of its measurement and is fixed
+(§13) — every board recorded before that is void.**
+Scope: `rusty_dds` runtime (container parse + subresource/upload-plan queries).
+Not in scope: the encoder (already ahead) or the decoder (already ahead).
+Evidence: [`sim/`](../../sim/) — boards in [`docs/artifacts/`](../artifacts/),
+profile via `cargo run --release --example profile_rusty_dds` in `sim/`.
+
+---
+
+## 1. The symptom
+
+The simulator was built to see whether rusty_dds helps a game's frame stability.
+On the **Stream** profile — the one a running game actually exercises — it does
+not. It costs. Measured detached, pinned, ABBA, N=5-7, `traverse`/high tier,
+192 textures:
+
+| | DirectXTex (loader) | rusty_dds | delta |
+|---|---:|---:|---|
+| Container parse, total | **2.8 ms** | 433.4 ms | 155x |
+| Run CPU | **1.906 s** | 2.406 s | +26% |
+| Hitches (>1 ms) | **304** | 555 | +83% |
+| Peak working set | 132.7 MiB | 134.7 MiB | +1.5% |
+
+The four-pane isolation grid reproduces it and shows both main effects
+replicating across the other factor — rusty_dds costs on both allocators, and
+`rusty_alloc` recovers part of it on both stacks. The two roughly cancel, so
+"both technologies on" currently lands on top of the conventional stack rather
+than beating it.
+
+---
+
+## 2. Root cause, measured
+
+Profiled on one 1024² BC7 texture, 1.33 MiB payload, 200 iterations:
+
+```
+Dds::read                       0.3458 ms/call, 1.0 allocations, 1.00x payload
+upload_plan_compressed          12.0 allocations per subresource query
+surface()                       6.0 allocations per subresource query
+copy into a FRESH buffer        0.3864 ms
+copy into a WARM buffer         0.0486 ms   (28.8 GB/s)
+```
+
+### 2.1 The dominant cost is first-touch page faults, not copying
+
+`Dds::read` ([src/lib.rs:251](../../src/lib.rs)) reads the payload into a fresh
+`Vec<u8>`. **7.9x of that call is the operating system faulting in and zeroing
+pages we are about to overwrite anyway.** The copy itself runs at 28.8 GB/s; the
+call runs at 3.85 GB/s.
+
+This single mechanism explains every observation:
+
+- **Why DirectXTex's loader wins.** `DDSTextureLoader` points into the caller's
+  buffer. It touches no new pages, so it pays none of this.
+- **Why `rusty_alloc` recovers 65%** (parse 433 -> 153 ms). A mimalloc-shaped
+  allocator recycles segments instead of returning them to the OS, so the
+  payload buffer is usually already resident. It is treating the symptom.
+- **Why we tie DirectXTex's `ScratchImage` path** (447.0 vs 470.8 ms, inside the
+  noise). That path copies too, so it pays the same tax — and we use **47% less
+  peak memory** doing it.
+
+A refuted hypothesis, recorded so it is not re-tried: this is **not** `Vec`
+growth. `read_to_end` over a cursor allocates exactly once (1.00x the payload),
+so reserving capacity up front buys nothing.
+
+### 2.2 A `Box` per format query, twelve per subresource
+
+`Dds::get_format()` ([src/lib.rs:328](../../src/lib.rs)) returns
+`Option<Box<dyn DataFormat>>` — a heap allocation, every call. It is called by
+`get_bits_per_pixel`, `get_pitch`, `get_pitch_height` and
+`get_min_mipmap_size_in_bytes`, all of which sit underneath every subresource
+offset computation.
+
+Result: **12 allocations per `upload_plan_compressed`**, ~132 per texture over an
+11-mip chain, repeated on every re-open after eviction. It is ~1.5% of wall time
+but it is most of the *allocation count*, and allocation count is what drives
+allocator tail latency — which is what a hitch is.
+
+### 2.3 The same work, computed twice
+
+`upload_plan_compressed` ([src/upload.rs:78](../../src/upload.rs)) calls both
+`self.surface(id)` and `self.subresource_range(id)`. `surface()` internally calls
+`subresource_range()`. So the subresource offset — an O(mips) walk of the mip
+chain in `mip_offset_and_size_in_chain`
+([src/surface.rs:265](../../src/surface.rs)) plus an O(mips) `get_array_stride` —
+is computed **twice per query**. The allocation counts confirm it exactly:
+`surface()` is 6, the plan is 12.
+
+---
+
+## 3. What the ceiling is — read before choosing work
+
+**In the Stream profile, parity is the best outcome available.** Once the copy is
+gone, both stacks do the same thing: hand the GPU BCn bytes that are already in
+memory. There is no remaining work to be cleverer about. Removing the parse cost
+takes run CPU from 2.406 s to roughly 1.97 s against DirectXTex's 1.906 s — a
+tie, not a win.
+
+That is not a reason to skip it. Being *slower* than the incumbent on the profile
+a game runs is disqualifying no matter how good the encoder is; a studio will not
+adopt a stack that costs them frame time. Parity here converts the conversation
+back to where we are genuinely ahead:
+
+| profile | where we stand | why |
+|---|---|---|
+| **Stream** (runtime) | behind -> **target parity** | both stacks just move bytes |
+| **Transcode** (decode) | **24/24 ahead** | real CPU work, our decoder is faster |
+| **Cook** (encode) | **21/3 ahead, 22/2/0 on PSNR, RDO -4..-15%** | bake farm, patch size |
+| **Memory** | **47% below `ScratchImage`** | and a differentiator at fixed VRAM |
+
+So: fix Stream to stop losing, and sell on Transcode, Cook and memory.
+
+---
+
+## 4. The work
+
+Ordered by value per unit risk. Each item states its own gate.
+
+### A. A borrowing parse path — `Dds` over `&[u8]`
+
+**The fix.** Add a zero-copy constructor that borrows the caller's bytes instead
+of owning them. Shape to settle in review; the constraint is that
+`SurfaceView`/`upload_plan_*` must work unchanged on it.
+
+```rust
+// sketch, not a committed API
+pub struct DdsRef<'a> { header: Header, header10: Option<Header10>, data: &'a [u8] }
+impl<'a> DdsRef<'a> {
+    pub fn parse(bytes: &'a [u8]) -> Result<DdsRef<'a>, Error>;
+}
+```
+
+Engines already have the file bytes — from `fs::read`, a memory map, or an
+archive decompressor. Making them hand those to us and pay for a second copy is
+the whole defect.
+
+**Expected:** parse 433 ms -> ~3 ms, matching DirectXTex's loader. Run CPU
+2.406 -> ~1.97 s. Hitches 555 -> ~300.
+**Gate:** `sim bench --arms rusty,dxtex` on `traverse`/high shows parse inside the
+null band of DirectXTex's loader; `trace_hash` unchanged; the whole decode/encode
+matrix still green.
+**Risk:** additive API, no change to `Dds`. Lifetimes touch `SurfaceView`, which
+already borrows.
+
+### B. A pooled/caller-supplied payload buffer
+
+**The fix.** `Dds::read_into(r, &mut Vec<u8>)` — or accept a buffer the caller
+recycles — so the owning path stops faulting fresh pages per texture.
+
+This exists because **A does not cover every caller.** A streaming engine that
+decompresses from an archive has no borrowable buffer to point at; it needs
+somewhere to put the bytes, and reusing one warm buffer is the whole win.
+
+**Expected:** the same 7.9x on the owning path (0.386 -> 0.049 ms per texture).
+**Gate:** the profile example's fresh-vs-warm gap closes.
+**Risk:** low, additive.
+
+### C. Kill the `Box<dyn DataFormat>` on the query path
+
+**The fix.** `get_format()` is a public convenience and can stay. The internal
+callers must not use it: give `get_pitch`, `get_pitch_height`,
+`get_bits_per_pixel` and `get_min_mipmap_size_in_bytes` an allocation-free path
+over the concrete `DxgiFormat` / `D3DFormat` enums (both `Copy`), matching on
+which is present rather than boxing.
+
+**Expected:** 12 allocations per subresource query -> 0. ~132 allocations per
+texture removed. Small wall-time win; the real target is allocator tail latency,
+i.e. hitches.
+**Gate:** the profile example reports 0 allocations per query; `sim bench` shows
+`Allocations` down and hitches no worse.
+**Risk:** internal only, no API change. `get_format()` keeps working.
+
+### D. Compute the subresource layout once
+
+**The fix.** Have `upload_plan_compressed` compute the range once and derive the
+`SurfaceView` from it, instead of calling both. Then consider caching the mip
+chain: the offsets are a pure function of the header, so a small
+`[u32; MAX_MIPS]` computed at parse turns every subresource query from two
+O(mips) walks into an array index.
+
+**Expected:** subresource query 0.48 µs -> well under 0.1 µs; halves the work
+even before C.
+**Gate:** byte-identical `upload_plan_compressed` output for the whole
+`decode_matrix` / `encode_matrix` corpus.
+**Risk:** low. The cache is derived state, so it must be built at parse and never
+mutated afterwards — `Dds::data` is `pub`, so a caller *can* mutate the payload;
+the cache must depend only on the header, which is not `pub`-mutable in practice.
+Confirm that before caching.
+
+### E. Re-measure the whole matrix
+
+Not optional, and not last because it is least important. After A-D:
+
+```sh
+cd sim
+./target/release/sim bench --pack pack/high192 --scenario traverse \
+    --arms rusty,rusty+ra,dxtex,dxtex+ra --reps 7 --pin --out runs/after
+./target/release/sim board --runs runs/after --out ../docs/artifacts/simulator-matrix.md
+```
+
+The prediction to falsify: **rusty_alloc's advantage should shrink**, because it
+is currently paid for by our own page-fault tax. If it does not shrink, the
+mechanism in §2.1 is wrong and this plan needs revisiting.
+
+---
+
+## 5. Sequencing
+
+1. **C and D first.** Internal, no API surface, cheap, and they make the profile
+   numbers legible before the big change lands.
+2. **A next.** The headline. Ship behind the existing decode/encode gates.
+3. **B alongside A**, for callers that cannot borrow.
+4. **E**, and update the README's runtime claims honestly either way.
+
+A and B change the public API, so they want a `0.3` and a migration note in
+[docs/migration-ddsfile.md](../migration-ddsfile.md).
+
+---
+
+## 6. What not to do
+
+- **Do not reserve capacity in `read_to_end`.** Measured: it already allocates
+  once, at exactly 1.00x the payload. Refuted.
+- **Do not reach for SIMD or a faster memcpy.** The warm copy already runs at
+  28.8 GB/s. The cost is page faults, not bandwidth.
+- **Do not ship `rusty_alloc` as the answer to this.** It recovers 65% of a tax
+  we impose on ourselves, at ~124 MiB more peak working set. Fix the cause; then
+  re-judge the allocator on its own merits.
+- **Do not chase a Stream-profile win over DirectXTex.** §3 — parity is the
+  ceiling, and claiming more would not survive a studio's own measurement.
+
+---
+
+## 7. Results — C and D, landed 2026-08-18
+
+Gated on the **deterministic** numbers, not durations. An allocation count is
+exact, reproducible, needs no pinning and no null band, and N=1 settles it; a
+duration on this box needs seven pinned ABBA reps to say anything at all.
+
+| | before | after | |
+|---|---:|---:|---|
+| Allocations per run (`traverse`/high, 10 500 frames) | 263 112 | **48 072** | **-81.7%** |
+| ...against DirectXTex's arm | 46 362 | 46 362 | now **+3.7%**, was **+468%** |
+| Allocations per `upload_plan_compressed` | 12 | **0** | |
+| Allocations per `surface()` | 6 | **0** | |
+| Uploaded bytes (correctness gate) | 822.241 MiB | **822.241 MiB** | identical |
+
+The uploaded-byte total is the gate that matters: same work, same bytes, fewer
+allocations. The whole `rusty_dds` test suite is green.
+
+**C beat its own prediction.** The plan guessed "small wall-time win"; the
+micro-benchmark shows the query path 13x faster (0.0053 -> 0.0004 ms per 11-mip
+chain). Removing `dyn` did more than remove a `malloc` — it let the compiler
+devirtualise and inline the format queries.
+
+**D is unmeasurable at this granularity, and is landed on structure, not on a
+number.** Per-query cost is 27-64 ns with 2x run-to-run spread, so the second
+mip-chain walk is below the noise floor of anything this harness can resolve.
+It removes provably duplicated work; that is the entire justification, and no
+timing claim is attached to it.
+
+**The mip-offset cache in D is now unnecessary.** It was proposed to turn an
+O(mips) walk into an array index. At 27-64 ns for an eleven-mip chain the walk
+is not worth caching, and a cache derived from a `pub` payload would be a
+correctness hazard for no measurable gain. Dropped.
+
+### What this does *not* fix
+
+The dominant cost is untouched. Per run, C+D removes ~6 ms of query time out of
+~2 400 ms — roughly **0.25%**. The 87% page-fault tax on the payload copy (§2.1)
+is still there and is still the reason we lose to DirectXTex's borrowing loader.
+**A and B are where the frame-time result lives.**
+
+The allocation reduction should show up as fewer hitches rather than less CPU,
+since allocation count drives allocator tail latency. That prediction is
+untested and needs a pinned ABBA bench to confirm or refute.
+
+---
+
+## 8. Results — A, landed 2026-08-18
+
+`Dds` is now generic over how its payload is stored:
+
+```rust
+pub struct DdsBase<D = Vec<u8>> { pub header: Header, pub header10: Option<Header10>, pub data: D }
+pub type Dds        = DdsBase<Vec<u8>>;   // owns   — unchanged for every caller
+pub type DdsView<'a> = DdsBase<&'a [u8]>; // borrows — DdsView::parse(&bytes)
+```
+
+One implementation serves both: the payload is touched in only six places
+library-wide, because everything else already goes through `SurfaceView`, which
+borrows. `Dds` keeps its exact spelling as an alias, so no existing caller
+changes. `get_mut_data` / `surface_mut` moved to an `AsMut` block, which a
+`DdsView` correctly cannot satisfy.
+
+### The deterministic gate
+
+| | before | after | DirectXTex |
+|---|---:|---:|---:|
+| Allocations per run | 263 112 | **46 362** | 46 362 |
+| Container parse, total | 433.4 ms | **1.5 ms** | 2.0 ms |
+| Uploaded bytes | 822.241 MiB | **822.241 MiB** | 822.241 MiB |
+| `DdsView::parse` allocations | — | **0** | — |
+
+The allocation counts are now **exactly equal**. Every allocation left is
+harness-side and identical in both arms: neither stack allocates anything the
+other does not. That is a stronger statement than any duration, and N=1 settles
+it.
+
+### The timing verdict (pinned, ABBA, N=7)
+
+Every row **inside the null band** except container parse, where rusty_dds is now
+**33% faster than DirectXTex** and outside it:
+
+| metric | `dxtex` | `rusty` | verdict |
+|---|---:|---:|---|
+| Run CPU | 1.594 s | 1.656 s | inside the noise |
+| Streaming CPU | 1290.7 ms | 1302.4 ms | inside the noise |
+| **Container parse** | 2.028 ms | **1.519 ms** | **outside the band, ours** |
+| Frame cost p99 | 1.026 ms | 1.022 ms | inside the noise |
+| Hitches | 164 | 156 | inside the noise |
+
+Compare only *within* a board, never across them: absolute numbers move with
+machine load between sessions. Within this board the gap is gone.
+
+### The prediction in §4E was confirmed
+
+"rusty_alloc's advantage should shrink, because it is currently paid for by our
+own page-fault tax." Four-arm matrix, N=5:
+
+| | run CPU | peak working set |
+|---|---:|---:|
+| rusty_dds | 1.656 s | 134.2 MiB |
+| rusty_dds + rusty_alloc | 1.375 s | 260.9 MiB |
+| DirectXTex | 1.641 s | 134.2 MiB |
+| DirectXTex + rusty_alloc | 1.391 s | 260.0 MiB |
+
+`rusty_alloc` now helps **both stacks equally** (-17% and -15%), where before it
+helped rusty_dds disproportionately. Its effect is no longer entangled with our
+defect, which is what the prediction claimed. It still costs **~127 MiB more
+peak working set**, on both stacks, and that trade should now be judged on its
+own merits rather than as compensation for a copy we should never have made.
+
+### B followed — see §9.
+
+---
+
+## 9. Results — B, landed 2026-08-18
+
+```rust
+DdsView::read_into(r, &mut buf)                  // recycle your own buffer
+DdsView::read_into_limited(r, &mut buf, max)     // ...with a hard ceiling
+```
+
+For callers who cannot borrow: an archive decompressor, a network stream. They
+would otherwise be pushed back onto `Dds::read` and pay the page-fault tax
+[§2.1](#21-the-dominant-cost-is-first-touch-page-faults-not-copying) all over
+again. `buf` is cleared rather than reallocated, so its pages stay resident from
+the second call onwards.
+
+| path | per call | allocations | |
+|---|---:|---:|---|
+| `Dds::read` (fresh buffer) | 0.3122 ms | 1.0 | the old behaviour |
+| `DdsView::read_into` (recycled) | **0.0461 ms** | **0.01** | **6.8x faster** |
+| `DdsView::parse` (borrowed) | ~0 | **0** | when you already hold the bytes |
+
+**The prediction was met exactly.** §2.1 measured the floor — a copy into memory
+that is already resident — at 0.0486 ms. `read_into` lands at 0.0461 ms. What
+remains is the copy and nothing else; the page-fault tax is gone rather than
+reduced. The 0.01 allocations/call is the single buffer growth amortised over the
+run.
+
+`read_into_limited` inherits `read_limited`'s posture: the limit covers the
+payload only and an overrun fails closed without buffering the rest.
+
+### Tests added
+
+Buffer reuse is exactly the shape that invites stale-data bugs, so it is gated
+rather than trusted:
+
+- `read_into_reuse_does_not_leak_the_previous_payload` — a large texture then a
+  small one through the same buffer; the second must not see the first's tail,
+  and must match `Dds::read` byte for byte.
+- `read_into_limited_is_a_hard_ceiling` — the security posture.
+- `view_and_owned_agree` — every fixture parsed both ways must agree on payload,
+  dimensions and mip count.
+
+### Where this leaves the library
+
+Three parse paths, each right for a different caller, and none of them paying for
+memory it does not need:
+
+| you have | use | cost |
+|---|---|---|
+| the bytes already (mmap, archive, `fs::read`) | `DdsView::parse` | zero copy, zero allocation |
+| a reader, and a buffer you can recycle | `DdsView::read_into` | one copy, warm pages |
+| a reader, and you want ownership | `Dds::read` | one copy, fresh pages — unchanged |
+
+---
+
+## 10. Round two — the decode path
+
+Stream is finished as an optimization target: rusty_dds now costs **1.5 ms of a
+1264 ms** streaming run, 0.1%. The remaining runtime path worth profiling is
+decode — the Transcode profile.
+
+### 10.1 LANDED — the BC7 parallel threshold was set to the losing case
+
+`decode_bc7` goes parallel above `BC7_PARALLEL_MIN_BLOCKS`. That constant was
+**4 096**, and 4 096 blocks is precisely where spawning threads is a net loss.
+Measured, 24-core box:
+
+| blocks | serial | parallel | |
+|---|---:|---:|---|
+| 65 536 | 172.6 Mpx/s | 484.0 | par wins 2.8x |
+| 16 384 | 172.3 Mpx/s | 265.4 | par wins 1.54x |
+| **4 096** | **200.9 Mpx/s** | **88.9** | **par loses 2.26x** |
+
+Raised to **16 384**, the smallest size where parallelism is *measured* to win.
+The deterministic confirmation: at that size the call drops from **75
+allocations to 1** — the 74 were thread spawns.
+
+The true break-even is somewhere between 4 096 and 16 384 and would need a
+dedicated sweep; the constant errs to the proven side.
+
+### 10.2 LANDED — a syscall on every decode
+
+`std::thread::available_parallelism()` ran per call. It cannot usefully change
+within a process; now cached in a `OnceLock`.
+
+### 10.3 REFUTED — scaling workers with the work
+
+Hypothesis: 24 threads over-subscribe a small job, so `workers = blocks / 8192`
+should help. **Measurement disagreed** — it cost mip 0 31% (484 -> 332 Mpx/s) and
+mip 1 26% (265 -> 195). Above the threshold the spawn cost amortises fine and
+more workers is simply better. Reverted, with a comment in `bcn.rs` so it is not
+re-tried.
+
+### 10.4 OPEN — the decode output buffer is 41% of a decode
+
+`decode_rgba8` returns a fresh `vec![0u8; w*h*4]` every call. That is
+`alloc_zeroed`: the OS hands over zeroed pages, and decode then overwrites every
+one of them. It is the **same defect as §2.1**, on a buffer 3x larger than the
+payload.
+
+| | 4.00 MiB output buffer |
+|---|---:|
+| fresh `vec![0u8; n]` | **1.4446 ms** |
+| refilling a resident buffer | 0.1108 ms |
+| share of a 3.522 ms decode | **41%** |
+
+**Proposed fix — `decode_rgba8_into(&mut Vec<u8>)`**, mirroring
+[`DdsView::read_into`](#9-results--b-landed-2026-08-18). The caller recycles one
+buffer per worker; the buffer is resized once and thereafter written directly, so
+the zeroing disappears as well as the faulting.
+
+**Expected:** decode 3.52 -> ~2.2 ms, roughly **-38%** on the Transcode path,
+where we are already 24/24 ahead of DirectXTex.
+**Gate:** byte-identical output against `decode_rgba8` across the decode matrix;
+a reuse test in the shape of `read_into_reuse_does_not_leak_the_previous_payload`.
+**Risk:** additive API, no change to existing calls.
+
+### 10.5 FOUND — the parallel decode toll is ~1 ms per call, whatever the work
+
+`decode_bc7_parallel` opens a `thread::scope` and spawns one worker per core on
+**every call**. Measured directly on a 24-core box:
+
+```
+thread::scope with 24 no-op workers: 0.982 ms per call
+```
+
+Against the decodes it is meant to accelerate (1024², 65 536 blocks):
+
+| format | decode | spawn toll | path |
+|---|---:|---:|---|
+| BC7 | 2.85 ms | **34%** | parallel |
+| BC5U | 3.28 ms | would be 30% | serial |
+| BC4U | 2.59 ms | would be 38% | serial |
+| BC1 | **1.91 ms** | **exceeds the work** | serial |
+
+That is why 24 threads buy only 2.8x — **12% parallel efficiency**. The toll is
+fixed; only the work varies.
+
+### 10.6 The fix is not "parallelise the other formats"
+
+BC1, BC4 and BC5 decode are entirely serial, which looks like idle cores. It is
+not: BC1 decodes a full 1024² surface in 1.91 ms, *less than the 0.98 ms toll
+plus its own share*, so parallelising it under this model would make it slower.
+Serial BC1 (626 Mpx/s) already beats parallel BC7 (368-502 Mpx/s).
+
+The ceiling is the spawn model, and there are two ways past it:
+
+1. **A persistent pool inside the library** (rayon, or hand-rolled). Removes the
+   toll, but the library then owns threads — and a game engine already has a job
+   system that will not appreciate a texture loader spawning 24 threads behind
+   its back.
+2. **Expose range-based decode and own no threads at all.** Something like
+   `decode_rows_into(&self, id, rows: Range<u32>, dst: &mut [u8])`, so the
+   caller's existing scheduler drives it. The toll disappears, *every* format
+   becomes parallelisable, and the engine keeps control of its own cores.
+
+**(2) is the recommendation.** It is the better fit for the audience, it is
+additive, and it composes with §10.4's `decode_rgba8_into`: one buffer the caller
+owns, filled by the caller's own workers.
+
+### 10.7 Not worth touching — the encoder's identical pattern
+
+`encode/blocks.rs` and `encode/blocks/oracles.rs` spawn the same way per call.
+The difference is scale: a BC7 encode of the same surface is ~50 ms, so a ~1 ms
+toll is ~2%. The encoder is frozen behind byte-identical gates from the 2026-08
+campaign; the measured gain does not justify disturbing it. Recorded, not acted
+on.
+
+---
+
+## 11. Round two, landed — decode into caller memory and caller threads
+
+Two additive APIs, both fixing a measured defect by handing control to the caller:
+
+```rust
+dds.decode_rgba8_into(id, &mut buf)?;                 // your buffer
+dds.decode_block_rows_into(id, rows, &mut band)?;     // your threads
+dds.block_rows(id)?;                                  // how many to split into
+```
+
+Internally every decoder gained an `_into` core that writes to a caller slice;
+the allocating entry points are now thin wrappers over it, so there is one
+implementation per format, not two.
+
+| path (1024^2 BC7) | time | |
+|---|---:|---|
+| `decode_rgba8` | 2.184 ms | allocates a fresh output |
+| **`decode_rgba8_into`** | **1.158 ms** | **1.89x** |
+| `decode_block_rows_into` x24 caller threads | 1.209 ms | 1.81x |
+
+**Read the third row carefully.** The benchmark spawns its own threads per
+iteration, so it pays the same ~0.73 ms toll the API exists to remove; the decode
+work itself is ~0.48 ms. A caller with a persistent job system sees that. The
+point of the API is not that it is faster today — it is that the toll becomes
+*removable*, which it is not while the library owns the threads.
+
+### The bug this nearly shipped
+
+The first cut inverted validation and allocation. `decode_bcN` used to check the
+payload length and *then* allocate; the refactor allocated first and validated
+inside the closure. `parser_robustness` caught it immediately:
+
+```
+memory allocation of 274877906944 bytes failed   (256 GiB)
+```
+
+Width and height are header-derived and the output is 4 bytes a pixel, so a
+corrupt header names a surface needing hundreds of gigabytes. Validation now
+precedes allocation in `alloc_and_decode` and in `decode_rgba8_into`, with the
+reason written at both sites. **The fuzz suite paid for itself here** — this is
+exactly the unbounded-allocation class `read_limited` exists to prevent, and it
+was introduced by a refactor that looked purely mechanical.
+
+### Gates added
+
+- `decode_into_reuse_matches_fresh_decodes` — large mip, then small, then large
+  again through one buffer; each must match the allocating path byte-for-byte, so
+  a stale tail cannot survive.
+- `decode_block_rows_reassemble_into_the_whole_surface` — a split decode must
+  equal the whole-surface decode. That is the contract a caller's scheduler
+  depends on.
+
+### Still open
+
+`decode_block_rows_into` refuses volume textures: splitting them wants a slice
+index as well as a row range, and no caller has asked. BC6H (`decode_rgba_f32`)
+has the same allocating shape and would benefit from the same treatment — its
+output is 16 bytes a pixel, so the fresh-buffer tax is 4x worse than RGBA8.
+
+---
+
+## 12. Round three — the buffer is most of the "file read"
+
+The streaming run spent 477 ms of 1264 ms reading files. `std::fs::read`
+allocates a fresh `Vec` per call, so the same question applied:
+
+| 1.33 MiB file, warm page cache | |
+|---|---:|
+| `std::fs::read` -> fresh `Vec` | 0.9501 ms |
+| `read_to_end` into a recycled `Vec` | **0.2145 ms** |
+| | **4.43x — 77% of a "file read" is the buffer, not the file** |
+
+**This only became recyclable because of §8.** With the owning `Dds::read`, an
+engine that recycled its own file buffer still paid for the library's internal
+copy. `DdsView` borrows, so the engine's buffer *is* the payload, and reuse
+works end to end.
+
+### Landed in the harness
+
+The streamer now returns an evicted texture's payload buffer to a small pool and
+reads the next texture into it, via a new `OpenTexture::reclaim`. The DirectXTex
+arm reclaims too — closing its handle first, since on the loader path the shim
+points into that very buffer.
+
+A/B'd against itself with `--pool-buffers 0`, three runs each, pinned:
+
+| `--pool-buffers` | file read (ms) | allocations |
+|---|---|---:|
+| 0 | 509.4, 494.9, 505.3 | 46 362 |
+| 32 | **375.3, 373.3, 372.6** | 45 162 |
+
+**-26% on file read**, ~129 ms off a 1264 ms streaming run, with non-overlapping
+spreads. The trace hash is unchanged (`fc26977f252783f6`), so the work is
+identical.
+
+### What the sweep could *not* settle
+
+| `--pool-buffers` | file read (ms) | allocations | peak RSS |
+|---|---|---:|---:|
+| 8 | 418.8, 409.9 | 45 507 | 149 MiB |
+| 32 | 375.3, 373.3 | 45 162 | 157 MiB |
+| 64 | 326.5, 316.1, 404.7, 377.7 | 44 809 | 168 MiB |
+| 192 | 306.7, 497.0, 366.7, 348.2 | 44 735 | 175 MiB |
+
+Larger pools *do* reuse more — the allocation counts are deterministic and fall
+monotonically. But the timing ranges for 32/64/192 overlap completely once the
+box got noisier, so **the default stays at 32**: it is the configuration whose
+win was measured cleanly, and it costs the least memory of the three. Moving a
+default on unresolvable data would be exactly the mistake this plan keeps
+catching.
+
+### Two things this suggests, unmeasured
+
+- Reuse is imperfect because buffer sizes vary by format — a recycled BC4 buffer
+  (0.35 MiB) does not fit a BC7 payload (1.33 MiB). **Bucketing the pool by size**
+  should recover more of the micro-benchmark's 4.43x.
+- The pool caps *count*, not *bytes*. Capping bytes would bound its memory
+  honestly regardless of the format mix; RSS climbed 149 -> 175 MiB across the
+  sweep, which is the trade a streaming engine actually cares about.
+
+---
+
+## 13. Round four — the instrument was most of the measurement
+
+With parse at 1.5 ms and the buffer pool landed, `Staging copy` was the largest
+line in the streaming run at ~820 ms. It is not a copy.
+
+`NullRenderer::upload` folds every uploaded byte into an FNV-1a hash — the
+work-count parity gate, the thing that proves both stacks handed the GPU the same
+bytes. FNV is byte-at-a-time and each multiply depends on the previous one:
+
+| one 1.33 MiB subresource | | |
+|---|---:|---:|
+| copy only | 0.064 ms | 21.8 GB/s |
+| **FNV parity hash** | **1.527 ms** | **0.9 GB/s** |
+| copy + hash | 1.481 ms | — |
+
+**The hash was 97% of the "staging copy" row**, ~940 ms of a run that staged
+822 MiB, and **~61% of the whole streaming total**. Both arms paid it equally so
+comparisons stayed *fair* — but it diluted every real difference threefold.
+
+### The fix
+
+`hash::bulk_hash` keeps FNV-1a's mixing but runs **four independent lanes over
+8-byte words**, so the CPU pipelines instead of stalling on one dependency chain.
+It is a divergence detector, not a digest, and it is gated as one:
+
+- `bulk_hash_detects_every_single_bit_flip` — every single-bit change, at lengths
+  0/1/7/8/31/32/33/1000/4096/4097, including the unaligned tail; plus truncation,
+  which the length fold covers.
+- `bulk_hash_is_stable_and_seed_sensitive`.
+
+| | before | after |
+|---|---:|---:|
+| hash throughput | 0.9 GB/s | **29.8 GB/s** (32.5x, now memory-bound) |
+| `Staging copy` per run | 820.6 ms | **91.2 ms** |
+| Streaming CPU per run | 1213.4 ms | **474.3 ms** |
+
+### What this invalidates
+
+**Every board recorded before this is void**, and two of its numbers were
+substantially instrument artifact:
+
+- **Hitch counts.** A hitch is a frame over 1 ms; the hash was pushing ordinary
+  frames past that line. The same comparison reads **164 vs 156 hitches** before
+  and **2 vs 5** after. Any earlier statement about hitch rates was measuring the
+  harness.
+- **p99 frame cost**, which nearly halved (1.03 -> 0.58 ms).
+
+`trace_hash` also changes, by construction, so old and new runs cannot be mixed —
+the board's comparability gate enforces that on its own.
+
+### The re-run, on the sharpened harness
+
+Pinned, ABBA, N=7. Everything inside the null band except container parse, where
+rusty_dds is 25% ahead — and allocation counts now identical to the digit:
+
+| metric | `dxtex` | `rusty` | verdict |
+|---|---:|---:|---|
+| Run CPU | 0.859 s | 0.891 s | inside the noise |
+| Streaming CPU | 497.9 ms | 508.0 ms | inside the noise |
+| **Container parse** | 2.121 ms | **1.699 ms** | **outside the band, ours** |
+| Frame cost p99 | 0.580 ms | 0.592 ms | inside the noise |
+| Allocations | 45 162 | 45 162 | identical |
+
+### The lesson worth keeping
+
+The instrument was never suspected because it was *fair* — both arms paid it, so
+every A/B stayed valid. Fairness is not the same as fidelity: a tax both sides
+pay still hides the signal underneath it. Measure the profiler, not just with it.

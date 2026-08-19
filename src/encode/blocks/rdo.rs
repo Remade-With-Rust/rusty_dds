@@ -5,7 +5,9 @@
 //! how well those bytes MATCH earlier ones. This pass re-chooses blocks
 //! among LZ-friendlier candidates under a Lagrangian:
 //!
-//!     J = SSE  -  lambda * estimated_bytes_saved
+//! ```text
+//! J = SSE - lambda * estimated_bytes_saved
+//! ```
 //!
 //! Candidates per block, all legal BC1 by construction (conformance is
 //! free; only the rate/quality point moves):
@@ -15,7 +17,8 @@
 //!   - reuse a recent block's ENDPOINT bytes,
 //!     indices re-fit exactly                    (4-byte match)
 //!
-//! lambda = 0 disables the pass (byte-identical to the normal path).
+//! `lambda = 0` (i.e. [`crate::Rdo::Off`]) disables the pass — byte-identical
+//! to the normal path, gated by `tests/encode_determinism.rs`.
 //! The window runs in scan order; RDO encodes serially (cook-for-
 //! distribution is a batch job — determinism over parallelism here).
 
@@ -634,8 +637,14 @@ fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])>
     if block[0] & 0x7F != 0x40 {
         return None;
     }
-    let low = u64::from_le_bytes(block[0..8].try_into().unwrap());
-    let high = u64::from_le_bytes(block[8..16].try_into().unwrap());
+    // Infallible: `block` is a `&[u8; 16]`, so both halves are exactly 8 bytes.
+    // Spelled without `unwrap` so no user-reachable path can panic here.
+    let mut lo = [0u8; 8];
+    let mut hi = [0u8; 8];
+    lo.copy_from_slice(&block[0..8]);
+    hi.copy_from_slice(&block[8..16]);
+    let low = u64::from_le_bytes(lo);
+    let high = u64::from_le_bytes(hi);
     let bit = |i: u32| -> u64 {
         if i < 64 {
             (low >> i) & 1

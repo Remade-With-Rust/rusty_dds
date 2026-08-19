@@ -67,17 +67,16 @@ fn main() {
         _ => DecodeContent::Bc1,
     };
     println!("format: {}", content.name());
-    let ladder = ["0", "2", "4", "6", "10", "25", "50", "100", "200"];
+    let ladder = [0.0f32, 2.0, 4.0, 6.0, 10.0, 25.0, 50.0, 100.0, 200.0];
     let mut base_size = 0usize;
     let mut base_psnr = 0.0f64;
     for lam in ladder {
-        std::env::set_var("RUSTY_DDS_RDO_LAMBDA", lam);
         let mut total_deflate = 0usize;
         let mut total_raw = 0usize;
         let mut sse = 0.0f64;
         let mut n = 0usize;
         for (_name, w, h, rgba) in &maps {
-            let layout = EncodeLayout::flat_2d(content, *w, *h);
+            let layout = EncodeLayout::flat_2d(content, *w, *h).with_rdo(Rdo::lambda(lam));
             let dds = Dds::encode_from_rgba8(rgba, layout).expect("encode");
             total_raw += dds.data.len();
             total_deflate +=
@@ -95,7 +94,7 @@ fn main() {
             }
         }
         let psnr = 10.0 * (255.0f64 * 255.0 / (sse / n as f64)).log10();
-        if lam == "0" {
+        if lam == 0.0 {
             base_size = total_deflate;
             base_psnr = psnr;
         }
@@ -157,10 +156,10 @@ fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
         Ok("bc7") => DecodeContent::Bc7,
         _ => DecodeContent::Bc1,
     };
-    let lams: [&str; 3] = if content == DecodeContent::Bc7 {
-        ["0", "4", "10"]
+    let lams: [f32; 3] = if content == DecodeContent::Bc7 {
+        [0.0, 4.0, 10.0]
     } else {
-        ["0", "50", "100"]
+        [0.0, 50.0, 100.0]
     };
     println!(
         "{:<34} {:>9} {:>9} {:>8} | {:>9} {:>9} {:>8}",
@@ -170,8 +169,7 @@ fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
         let mut res = Vec::new();
         let nch = if content == DecodeContent::Bc7 { 4 } else { 3 };
         for lam in lams {
-            std::env::set_var("RUSTY_DDS_RDO_LAMBDA", lam);
-            let layout = EncodeLayout::flat_2d(content, *w, *h);
+            let layout = EncodeLayout::flat_2d(content, *w, *h).with_rdo(Rdo::lambda(lam));
             let dds = Dds::encode_from_rgba8(rgba, layout).unwrap();
             let z = miniz_oxide::deflate::compress_to_vec(&dds.data, 8).len();
             let img = dds.decode_rgba8(SubresourceId::mip_layer(0, 0)).unwrap();

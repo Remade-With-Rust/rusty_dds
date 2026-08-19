@@ -229,16 +229,8 @@ fn peer_json(r: &Result<PeerResult, String>) -> serde_json::Value {
 }
 
 fn rusty_roundtrip(pixels: &[u8], content: DecodeContent, ctx: &Ctx) -> Result<PeerResult, String> {
-    let layout = EncodeLayout {
-        content,
-        width: ctx.width,
-        height: ctx.height,
-        depth: ctx.depth,
-        mipmap_levels: 1,
-        array_layers: 1,
-        is_cubemap: false,
-        quality: EncodeQuality::Quality,
-    };
+    let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
+                .with_depth(ctx.depth);
     let dds = Dds::encode_from_rgba8(pixels, layout).map_err(|e| e.to_string())?;
     let img = dds
         .decode_rgba8(SubresourceId::mip_layer(0, 0))
@@ -395,6 +387,9 @@ fn dxgi_name(content: DecodeContent) -> &'static str {
         DecodeContent::Bc7 => "BC7_UNORM",
         DecodeContent::Rgba8 => "R8G8B8A8_UNORM",
         DecodeContent::Bgra8 => "B8G8R8A8_UNORM",
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 
@@ -426,6 +421,9 @@ fn psnr_floor(content: DecodeContent) -> f64 {
         | DecodeContent::Bc4SNorm
         | DecodeContent::Bc5UNorm
         | DecodeContent::Bc5SNorm => 28.0,
+        // Exhaustive by intent: a new DecodeContent must be added to
+        // this matrix, never silently skipped.
+        other => panic!("unhandled DecodeContent: {other:?}"),
     }
 }
 

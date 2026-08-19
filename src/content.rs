@@ -2,7 +2,7 @@
 
 use crate::error::Error;
 use crate::format::{D3DFormat, DxgiFormat};
-use crate::Dds;
+use crate::DdsBase;
 
 /// Tightly packed RGBA8 image (row-major).
 ///
@@ -33,6 +33,7 @@ pub struct ImageRgbaF32 {
 /// HDR (float-output) content set — separate from [`DecodeContent`] so the
 /// LDR matrix (`ALL_LDR`, `decode_rgba8`, encode) is untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HdrDecodeContent {
     /// BC6H unsigned half-float (`DXGI_FORMAT_BC6H_UF16` / `_Typeless`).
     Bc6hUf16,
@@ -71,6 +72,7 @@ impl ImageRgba8 {
 
 /// Public LDR format classification (decode + encode matrix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DecodeContent {
     Bc1,
     Bc2,
@@ -134,7 +136,7 @@ impl DecodeContent {
     }
 }
 
-impl Dds {
+impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Classify this DDS for LDR RGBA8 decode/encode, if supported.
     pub fn decode_content(&self) -> Result<DecodeContent, Error> {
         if let Some(dxgi) = self.get_dxgi_format() {

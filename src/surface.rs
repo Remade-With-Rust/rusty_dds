@@ -26,7 +26,7 @@
 use crate::error::Error;
 use crate::header::Caps2;
 use crate::header10::MiscFlag;
-use crate::Dds;
+use crate::DdsBase;
 use std::ops::Range;
 
 /// DirectX cubemap face order (face index 0..5).
@@ -104,6 +104,7 @@ impl SubresourceId {
 
 /// Borrowed view of one subresource's bytes and mip dimensions.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SurfaceView<'a> {
     pub id: SubresourceId,
     pub width: u32,
@@ -112,7 +113,7 @@ pub struct SurfaceView<'a> {
     pub data: &'a [u8],
 }
 
-impl Dds {
+impl<D: AsRef<[u8]>> DdsBase<D> {
     /// True when this DDS is a cubemap (DX10 `TEXTURECUBE` or legacy `Caps2::CUBEMAP`).
     pub fn is_cubemap(&self) -> bool {
         if let Some(ref h10) = self.header10 {
@@ -185,7 +186,7 @@ impl Dds {
         let end = start
             .checked_add(size as usize)
             .ok_or(Error::OutOfBounds)?;
-        if end > self.data.len() {
+        if end > self.data.as_ref().len() {
             return Err(Error::TruncatedData);
         }
         Ok(start..end)
@@ -200,20 +201,7 @@ impl Dds {
             width,
             height,
             depth,
-            data: &self.data[range],
-        })
-    }
-
-    /// Mutable borrowed view of one subresource's bytes (dimensions unchanged).
-    pub fn surface_mut(&mut self, id: SubresourceId) -> Result<SurfaceViewMut<'_>, Error> {
-        let range = self.subresource_range(id)?;
-        let (width, height, depth) = self.mip_dimensions(id.mip)?;
-        Ok(SurfaceViewMut {
-            id,
-            width,
-            height,
-            depth,
-            data: &mut self.data[range],
+            data: &self.data.as_ref()[range],
         })
     }
 
@@ -285,8 +273,26 @@ impl Dds {
     }
 }
 
+/// Mutable payload access. A [`crate::DdsView`] over `&[u8]` cannot satisfy
+/// `AsMut`, so these are available only when the payload is owned.
+impl<D: AsRef<[u8]> + AsMut<[u8]>> DdsBase<D> {
+    /// Mutable borrowed view of one subresource's bytes (dimensions unchanged).
+    pub fn surface_mut(&mut self, id: SubresourceId) -> Result<SurfaceViewMut<'_>, Error> {
+        let range = self.subresource_range(id)?;
+        let (width, height, depth) = self.mip_dimensions(id.mip)?;
+        Ok(SurfaceViewMut {
+            id,
+            width,
+            height,
+            depth,
+            data: &mut self.data.as_mut()[range],
+        })
+    }
+}
+
 /// Mutable borrowed view of one subresource.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SurfaceViewMut<'a> {
     pub id: SubresourceId,
     pub width: u32,

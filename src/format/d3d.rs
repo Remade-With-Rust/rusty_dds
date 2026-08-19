@@ -25,6 +25,7 @@ use super::DataFormat;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum D3DFormat {
     A8B8G8R8,
     G16R16,
@@ -68,17 +69,27 @@ pub enum D3DFormat {
 impl DataFormat for D3DFormat {
     fn get_pitch(&self, width: u32) -> Option<u32> {
         // see https://msdn.microsoft.com/en-us/library/bb943991.aspx
+        //
+        // `width` is a header field, so every step is checked: a width that
+        // overflows the pitch computation cannot describe a real surface, and
+        // `None` (-> `Error::UnsupportedFormat`) is the honest answer. A
+        // wrapped pitch would go on to size a payload slice.
         match *self {
             D3DFormat::R8G8_B8G8 | D3DFormat::G8R8_G8B8 => {
-                return Some(((width + 1) >> 1) * 4);
+                return width.checked_add(1).map(|w| w >> 1)?.checked_mul(4);
             }
             _ => {}
         };
 
         if let Some(bpp) = self.get_bits_per_pixel() {
-            Some((width * bpp as u32 + 7) / 8)
+            width
+                .checked_mul(bpp as u32)
+                .and_then(|n| n.checked_add(7))
+                .map(|n| n / 8)
         } else {
-            self.get_block_size().map(|bs| 1.max((width + 3) / 4) * bs)
+            let bs = self.get_block_size()?;
+            let blocks = 1.max(width.checked_add(3)? / 4);
+            blocks.checked_mul(bs)
         }
     }
 

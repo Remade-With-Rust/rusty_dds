@@ -3,6 +3,160 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.0 — 2026-08-18
+
+**The runtime streaming path.** A texture-streaming simulator
+([`sim/`](sim/)) measured this crate against Microsoft DirectXTex on D3D11 and
+Vulkan and found rusty_dds *behind* on the profile a running game actually
+exercises. This release closes that gap. Encoder output is unchanged.
+
+### Added
+
+- **`DdsView<'a>` — zero-copy parse.** `Dds` is now `DdsBase<Vec<u8>>` and
+  `DdsView<'a>` is `DdsBase<&'a [u8]>`, sharing one implementation. Every
+  existing call is unchanged. `DdsView::parse(&bytes)` allocates **nothing**.
+- **`DdsView::read_into` / `read_into_limited`** — read from any reader into a
+  buffer you recycle, for callers that cannot borrow (archive, network).
+- **`decode_rgba8_into`** — decode into your buffer instead of a fresh one.
+- **`decode_block_rows_into` / `block_rows`** — decode a range of block rows, so
+  your job system parallelises the work and the library owns no threads.
+
+### Performance
+
+Measured pinned, ABBA-interleaved, N=7, 192 textures, 10 500 frames; every run
+gated on byte-identical uploaded data.
+
+| | before | after |
+|---|---:|---:|
+| Container parse, total | 433.4 ms | **1.5 ms** |
+| Allocations per run | 263 112 | **45 162** (DirectXTex: 45 162) |
+| `decode_rgba8` (1024² BC7) | 2.184 ms | **1.158 ms** via `_into` |
+| Payload copy | 1 per open | **0** with `DdsView` |
+
+Root cause, in one line: `Dds::read` allocated a fresh payload buffer per open,
+and ~87% of that call was the operating system faulting in and zeroing pages the
+copy then overwrote. `DdsView` does not copy; `read_into` reuses warm pages.
+
+### Fixed
+
+- **BC7 parallel decode threshold** was 4 096 blocks — precisely the size where
+  spawning a thread per core is a **net 2.26× loss**. Raised to 16 384, the
+  smallest size where parallelism is measured to win. At 4 096 blocks the call
+  drops from 75 allocations to 1.
+- `std::thread::available_parallelism()` was a syscall on every decode; cached.
+- Internal format queries allocated a `Box<dyn DataFormat>` — **12 per
+  `upload_plan_compressed`**, now zero, via an allocation-free `FormatOf`.
+- `upload_plan_compressed` computed the subresource range twice.
+- `decode_rgba_f32` (BC6H HDR) built the whole surface a second time even for a
+  single-slice 2D texture, the only shape anyone decodes. The LDR path had always
+  short-circuited `depth == 1`; this one had not. On 256^2: **3 allocations and
+  2.75 MiB down to 2 and 1.75 MiB** for a 1.00 MiB output.
+
+### Notes
+
+- No behaviour change: the simulator's whole-run trace hash is identical before
+  and after, and the decode/encode matrices are unchanged.
+- MSRV remains 1.73. `Dds` keeps its name and its `data: Vec<u8>` field.
+
+### Also in 0.3.0 — the API and hardening pass
+
+Landed before the runtime campaign and released here for the first time. The
+encoder's output is unchanged — byte-identical on
+all 22 payload hashes in the new `tests/encode_determinism.rs`, verified
+against the 0.2.0 tree — but how it is *configured*, and how the parser behaves
+on bytes it did not create, both changed.
+
+### Added
+
+- **`Rdo` — a typed RDO API.** `EncodeLayout::with_rdo(Rdo::lambda(4.0))`
+  replaces the `RUSTY_DDS_RDO_LAMBDA` environment variable. The old design was
+  not merely undiscoverable: it was **racy**. Lambda was read from process-global
+  environment on every encode call, so two threads encoding at different
+  strengths silently overwrote each other's setting — reproduced by running the
+  determinism suite multi-threaded against 0.2.0, where a λ=4 encode produced a
+  λ=0 payload. Lambda now travels in the layout, so the race is structurally
+  impossible. `Rdo::Off` is the default and is byte-identical to the plain
+  encoder.
+- **`Dds::read_limited(r, max_data_len)`** and `Error::SizeLimitExceeded`.
+  `Dds::read` reads to end-of-stream uncapped, which is right for a trusted file
+  and wrong for a network or mod-archive source; the limited form fails closed
+  without buffering the overrun.
+- **`tests/encode_determinism.rs`** — a standing byte-identical gate. Payload
+  hashes for every format × both quality tiers × RDO, plus repeatability and
+  strip-parallel determinism. An output-preserving refactor must leave every
+  hash untouched; a deliberate change updates the table in the same commit.
+- **`tests/parser_robustness.rs`** — always-on structured fuzzing of the
+  untrusted-input surface. Pure Rust, stable toolchain, deterministic, no new
+  dependencies. Deep sweep: 150k mutations across every fixture plus 150k
+  arbitrary inputs, clean.
+- **`fuzz/`** — opt-in cargo-fuzz targets (`parse`, `read_limited`,
+  `encode_roundtrip`). A standalone workspace, listed in the package `exclude`,
+  so `libfuzzer-sys` and its LLVM C++ runtime can never reach a shipped
+  dependency graph. Shares `tests/common/driver.rs` with the stable harness so
+  the two cannot drift.
+- **`tests/fixtures/regressions/`** — every crashing input, replayed on every
+  `cargo test`.
+- **`tuning` feature (off by default)** — the only way to reach the `RUSTY_DDS_*`
+  encoder overrides. Development only.
+
+### Fixed
+
+- **Four unchecked-arithmetic defects on the untrusted path**, all found by the
+  new harness on its first runs, all previously *silent* in release builds
+  (a wrapped size goes on to slice the payload):
+  - `get_texture_size` — `pitch * row_height * depth` overflowed on hostile
+    header dimensions, and `pitch_height == 0` divided by zero.
+  - `DxgiFormat::get_pitch` / `D3DFormat::get_pitch` — the same class, one layer
+    down, in all three pitch formulas.
+  - `get_min_mipmap_size_in_bytes` — `bpp + 7` overflowed on a raw
+    `rgb_bit_count` header field.
+  - `Dds::get_offset_and_size`, `get_data`, `get_mut_data`, `get_pitch` —
+    unchecked `*` and `+` on header-derived values.
+- **A header-driven hang.** `get_array_stride` looped `mip_map_count` times with
+  no bound, so a file claiming `mip_map_count = 0xFFFF_FFFF` spun for billions of
+  iterations on *every* metadata query — reachable from `get_data`,
+  `subresource_range`, `surface` and every upload plan. The tail is now closed
+  form once the mip size bottoms out.
+- **The `rdo` module doctest**, which had never compiled: an indented block in
+  the module header was parsed as Rust, so `cargo test` was red on a clean tree.
+- Two `unwrap()` calls on a user-reachable encode path replaced with the
+  infallible spelling.
+
+### Changed
+
+- **`src/encode/blocks.rs` split** (3188 lines → a 325-line root plus `bc1`,
+  `alpha`, `bc7` and a `#[cfg(test)] oracles` module holding the campaign
+  scaffolding that used to sit in the encoder core). Byte-identical, proven by
+  the determinism gate.
+- **Encoder tuning constants are frozen.** `RUSTY_DDS_BC7_M1_T`,
+  `BC45U_WINDOW`, `ALPHA_SEL`, `BC1_LATTICE_ROUNDS`, `BC1_LATTICE_T` and the
+  BC4/5 refine harvest were live environment reads in shipped builds, so a stray
+  variable in a user's shell could silently change a cook's output. They are now
+  compile-time constants in `src/encode/tuning.rs`, re-openable only under the
+  non-default `tuning` feature.
+- **`#[non_exhaustive]`** on the types the crate *produces* or whose variant set
+  is owned by an outside authority: `Error`, `DxgiFormat`, `D3DFormat`,
+  `DecodeContent`, `HdrDecodeContent`, `EncodeQuality`, `Rdo`, `GpuFormat`,
+  `UploadPath`, `UploadPlan`, `SurfaceView`, `SurfaceViewMut`, `EncodeLayout`.
+  Deliberately **not** applied to the wire-format mirrors (`Header`, `Header10`,
+  `PixelFormat`, `Dds`), whose field sets are fixed by the DDS format itself, nor
+  to `CubemapFace` (exactly six faces, forever), nor to the argument bags
+  `NewD3dParams` / `NewDxgiParams` and the plain data carriers `ImageRgba8` /
+  `ImageRgbaF32`, which callers must construct and which have no builder.
+  **Breaking:** build `EncodeLayout` through `flat_2d` + the `with_*` builders,
+  and add a `_` arm when matching the marked enums. `EncodeLayout` also loses
+  `Eq` (it now carries an `f32`).
+- `Cargo.lock` is committed — the crate ships three binaries and the performance
+  claims want a pinned graph.
+- Docs refreshed: `docs/formats.md` claimed BC6H was deferred and BC7 encode was
+  mode 6 only, both untrue since 0.2.0; the plan file said Phase 6 was in flight.
+
+### Verified
+
+- MSRV 1.73 still builds, against that toolchain.
+- `wasm32-unknown-unknown`, decode-only, still builds.
+- Full suite green: 14 test binaries, including the doctests.
+
 ## 0.2.0 — 2026-08-13
 
 The encoder campaign. Against 0.1.2 on a 102-case real-content corpus
