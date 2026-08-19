@@ -1769,3 +1769,86 @@ one layer down.
   *why*, and the same `base + w * delta` identity applies to its 2-bit
   interpolation.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §27 — Mode 6 does not move, and the ceiling that proves it
+
+§26 named mode 6 as the cap on real-content throughput: it is 88% of our packs,
+it gained least from SIMD (+20% against +52-93% elsewhere), and it is the only
+mode with 4-bit indices — sixteen wider weight extractions than anything else.
+The obvious target was that extraction.
+
+Two attempts, both refuted.
+
+### Refuted: narrowing the index field for mode 6
+
+Every BC7 index region is at most 47 bits, so reading it as `u64` instead of
+`u128` should replace sixteen multi-instruction shifts with sixteen single ones.
+
+For mode 6 it changed nothing, and the reason is instructive: its shift amounts
+are `3 + (i - 1) * 4` — **compile-time constants in an unrolled loop**. LLVM had
+already folded every one of them. The `u128` was never being shifted at runtime
+at all.
+
+### Refuted: removing the fix-up branch
+
+Pixel 0 stores three bits with an implicit zero MSB, so the loop branched on
+`i == 0`. Re-inserting that zero makes all sixteen indices uniformly four bits
+and removes the branch. Eight samples per arm: **321.9 vs 326.8 Mpx/s** — neutral
+to slightly worse.
+
+Same cause. The branch was constant-folded by the same unroller, so the change
+spent three real operations removing one that did not exist.
+
+### The ceiling measurement that ended the round
+
+Rather than attempt a third variant — a `pshufb` gather of all sixteen weights
+in one instruction was the next idea — the headroom was measured directly by
+replacing the entire per-pixel weight lookup with a constant. Wrong output, but
+it is the **absolute ceiling** any weight-extraction optimisation could reach:
+
+| mode 6 | Mpx/s |
+|---|---:|
+| current | 336.9 |
+| **no weight lookup at all** | **345.7** |
+
+**The whole weight extraction is worth ~2.5%.** A perfect vectorised gather could
+recover at most that. The round ended there.
+
+### What did work, elsewhere
+
+The `u64` narrowing is a real win where shift amounts are **runtime-variable** —
+the multi-subset modes, whose index offsets depend on the partition anchor. Six
+samples per arm:
+
+| mode | before | after | |
+|---|---:|---:|---|
+| 0 | 354.7 Mpx/s | **425.9** | **+20.1%**, no overlap |
+| 3 | 526.5 | **589.7** | +12.0% |
+| 1 | 515.1 | **571.4** | +10.9% |
+
+Whole-content figures do not move, because our packs are 70-88% mode 6.
+
+### The lesson worth keeping
+
+**Measure the ceiling before building the optimisation.** Three sections of this
+file have now spent effort on changes whose maximum possible payoff was never
+established first. Stubbing the work out entirely is crude, produces wrong
+output, takes two minutes, and would have prevented all of it — here it converted
+"mode 6 is capped by weight extraction, let us vectorise the gather" into "the
+extraction is 2.5% of the call" before a line of `pshufb` was written.
+
+The corollary is worth stating too: **an optimisation can fail because the
+compiler already did it.** Both refutations here were of work LLVM had performed
+at compile time. Reading the assumption — "sixteen `u128` shifts", "a branch per
+pixel" — as though it described the emitted code, rather than the source, is what
+made both look promising.
+
+### Still open
+
+- Mode 6 is at the limit of this approach. What remains in it is the vectorised
+  interpolation and the stores, both already minimal.
+- BC1-BC5 have never been examined for either the index-chain or the
+  interpolation win. BC1 runs at 684 Mpx/s and nothing has profiled why.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.

@@ -3,6 +3,50 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.11 - 2026-08-19
+
+**Index fields read as `u64` instead of `u128`.** Every BC7 index region is at
+most 47 bits, so one wide shift down to `u64` replaces sixteen `u128` shifts. On
+x86_64 a `u128` shift with a runtime-variable amount is a multi-instruction
+sequence; the `u64` equivalent is one instruction.
+
+This matters exactly where the shift amount is *not* a compile-time constant -
+the multi-subset modes, whose index offsets depend on the partition anchor.
+
+### Performance
+
+Six samples per arm, alternating order:
+
+| mode | before | after | |
+|---|---:|---:|---|
+| 0 | 354.7 Mpx/s | **425.9** | **+20.1%** (no overlap) |
+| 3 | 526.5 | **589.7** | +12.0% |
+| 1 | 515.1 | **571.4** | +10.9% |
+
+**Mode 6 is unchanged**, and that is expected: its shift amounts are
+compile-time constants in an unrolled loop, which LLVM had already folded.
+
+### Notes on what did not work
+
+Mode 6 was the target of this round and it did not move. Two attempts, both
+refuted by measurement and both recorded at the site:
+
+- **Normalising the fix-up index away** so all sixteen indices are uniformly four
+  bits, removing a per-pixel branch: eight samples per arm, 321.9 vs 326.8 Mpx/s.
+  The branch was constant-folded by the unroller, so this cost three real
+  operations to remove one that did not exist.
+- **Attacking the weight lookup at all.** Replacing the entire per-pixel lookup
+  with a constant - the absolute ceiling for any gather, vectorised or not -
+  measures **345.7 Mpx/s against 336.9 with it. The whole weight extraction is
+  worth ~2.5%.**
+
+Mode 6 is at the limit of this approach. Since our own packs are 70-88% mode 6,
+whole-content figures do not move in this release either; the gain is for content
+using the multi-subset modes.
+
+- Decode output is unchanged, bit for bit. Both the SIMD path (88 tests) and the
+  scalar fallback (83 tests, `--no-default-features`) pass.
+
 ## 0.3.10 - 2026-08-19
 
 **SIMD across the four channels.** Every BC7 mode now interpolates two pixels per

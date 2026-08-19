@@ -581,7 +581,10 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let subsets = BC7_P2_SUBSET[partition];
     let fixup = BC7_P2_FIXUP[partition] as usize;
-    let idx = b >> 82;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let idx = (b >> 82) as u64;
 
     // One multiply per channel, not two: see `bc7_mode6_block`. Base and delta
     // are per endpoint pair, so both subsets are prepared up front.
@@ -589,7 +592,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 3);
-        BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize]
+        BC7_WEIGHTS3[((idx >> off) & ((1u64 << w) - 1)) as usize]
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
@@ -658,14 +661,17 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let subsets = BC7_P2_SUBSET[partition];
     let fixup = BC7_P2_FIXUP[partition] as usize;
-    let idx = b >> 98;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let idx = (b >> 98) as u64;
 
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 2);
 
     let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+        BC7_WEIGHTS2[((idx >> off) & ((1u64 << w) - 1)) as usize]
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
@@ -744,14 +750,17 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let subsets = BC7_P2_SUBSET[partition];
     let fixup = BC7_P2_FIXUP[partition] as usize;
-    let idx = b >> 98;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let idx = (b >> 98) as u64;
 
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd4(&e, 2);
 
     let weight_of = |p: usize| {
         let (off, w) = bc7_p2_index_at(p, fixup, 2);
-        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+        BC7_WEIGHTS2[((idx >> off) & ((1u64 << w) - 1)) as usize]
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
@@ -903,8 +912,11 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let e1 = [c(13), c(23), c(33), a(44)];
 
     // Two index regions: the 2-bit set at bit 50, the 3-bit set at bit 81.
-    let i2 = b >> 50;
-    let i3 = b >> 81;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let i2 = (b >> 50) as u64;
+    let i3 = (b >> 81) as u64;
 
     // Resolve the rotation once. `map[k]` is the output byte that computed
     // channel `k` belongs in; the rotation swaps alpha with one colour channel.
@@ -930,8 +942,8 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let weights = |p: usize| {
         let (o2, w2) = bc7_p1_index_at(p, 2);
         let (o3, w3) = bc7_p1_index_at(p, 3);
-        let wa = BC7_WEIGHTS2[((i2 >> o2) & ((1u128 << w2) - 1)) as usize];
-        let wb = BC7_WEIGHTS3[((i3 >> o3) & ((1u128 << w3) - 1)) as usize];
+        let wa = BC7_WEIGHTS2[((i2 >> o2) & ((1u64 << w2) - 1)) as usize];
+        let wb = BC7_WEIGHTS3[((i3 >> o3) & ((1u64 << w3) - 1)) as usize];
         // The index-selection bit decides which set drives colour and which
         // drives alpha; it does not change what the sets are.
         if isb {
@@ -1144,14 +1156,17 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let subsets = BC7_P3_SUBSET[partition];
     let anchors = BC7_P3_ANCHOR[partition];
-    let idx = b >> 83;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let idx = (b >> 83) as u64;
 
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 3);
 
     let weight_of = |p: usize| {
         let (off, w) = bc7_p3_index_at(p, anchors, 3);
-        BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize]
+        BC7_WEIGHTS3[((idx >> off) & ((1u64 << w) - 1)) as usize]
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
@@ -1223,14 +1238,17 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let subsets = BC7_P3_SUBSET[partition];
     let anchors = BC7_P3_ANCHOR[partition];
-    let idx = b >> 99;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let idx = (b >> 99) as u64;
 
     // One multiply per channel, not two: see `bc7_mode6_block`.
     let bd = bc7_bd3(&e, 3);
 
     let weight_of = |p: usize| {
         let (off, w) = bc7_p3_index_at(p, anchors, 2);
-        BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize]
+        BC7_WEIGHTS2[((idx >> off) & ((1u64 << w) - 1)) as usize]
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
@@ -1399,8 +1417,11 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     let e1 = [c(15), c(29), c(43), a(58)];
 
     // Two 31-bit index regions: colour at bit 66, alpha at bit 97.
-    let ci = b >> 66;
-    let ai = b >> 97;
+    // The index region is at most 47 bits, so it fits a `u64`. Doing the wide
+    // shift once and the sixteen per-pixel shifts narrow matters: a `u128` shift
+    // on x86_64 is a multi-instruction sequence, a `u64` shift is one.
+    let ci = (b >> 66) as u64;
+    let ai = (b >> 97) as u64;
 
     // Resolve the rotation once, into an output-byte map.
     let mut map = [0usize, 1, 2, 3];
@@ -1424,7 +1445,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     let weights = |p: usize| {
         let (off, w) = bc7_p1_index_at(p, 2);
-        let mask = (1u128 << w) - 1;
+        let mask = (1u64 << w) - 1;
         (
             BC7_WEIGHTS2[((ci >> off) & mask) as usize],
             BC7_WEIGHTS2[((ai >> off) & mask) as usize],
@@ -1708,7 +1729,21 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     // Indices occupy bits 65..128. The first is the fix-up index and carries one
     // less bit, its high bit being implicitly zero.
-    let idx = b >> 65;
+    // Narrowed to `u64` for consistency with the other modes. Unlike them it is
+    // NOT a speedup here: mode 6's shift amounts are compile-time constants in an
+    // unrolled loop, so LLVM had already folded them.
+    //
+    // Two further attempts on this mode were REFUTED, both by measurement:
+    //
+    // * Normalising the fix-up index away, so all sixteen indices are uniformly
+    //   four bits and the `i == 0` branch disappears: eight samples per arm,
+    //   321.9 vs 326.8 Mpx/s. The branch was constant-folded too, so this cost
+    //   three real operations to remove one that did not exist.
+    // * Vectorising the weight lookup at all. Replacing the entire per-pixel
+    //   lookup with a constant — the absolute ceiling — measured 345.7 Mpx/s
+    //   against 336.9 with it. **The whole weight extraction is worth ~2.5%.**
+    //   There is nothing here to win.
+    let idx = (b >> 65) as u64;
     let weight = |i: usize| {
         if i == 0 {
             BC7_WEIGHTS4[(idx & 0x7) as usize]
