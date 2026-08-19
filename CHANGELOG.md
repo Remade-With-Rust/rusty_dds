@@ -3,6 +3,41 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.6 — 2026-08-18
+
+**Specialised BC7 decoders for the two-subset modes 1 and 3.** Profiling the
+general decoder per mode found the real cost, and it is not the partition
+lookup: `bcdec_rs` reads pixel indices through a stateful bitstream where every
+read mutates the cursor, so sixteen index reads form a **sixteen-deep serial
+dependency chain**. Reading each index by computed offset from an immutable
+`u128` makes all sixteen independent.
+
+### Performance
+
+Isolated on all-mode-N surfaces, alternating-order ABBA, four samples per arm:
+
+| mode | general | specialised | |
+|---|---:|---:|---|
+| 1 | 185-191 Mpx/s | **242-253** | **+31%** |
+| 3 | 171-189 | **245-252** | **+38%** |
+
+Larger than mode 6 got in 0.3.5 (+18%), because the two-subset modes carried
+more of that serial read overhead to begin with.
+
+### Notes
+
+- **On packs cooked by this crate the change is not measurable**, because our own
+  encoder emits ~88% mode 6 and no mode 3 at all. The gain applies to content
+  whose encoder favours the two-subset modes; how much you see depends entirely
+  on what compressed your textures.
+- Verified bit-identical to the general decoder across **all 64 partitions x 200
+  randomised blocks x 2 modes**, plus the all-zero and all-ones payloads, with
+  every non-matching mode asserted declined rather than mis-decoded.
+- The partition tables are asserted against the spec values (0xCCCC, 0x8888,
+  0xEEEE), not merely against themselves: subset 0 must own pixel 0, every
+  partition must use both subsets, and each anchor must belong to subset 1.
+- Decode output is unchanged, bit for bit.
+
 ## 0.3.5 — 2026-08-18
 
 **A specialised BC7 mode-6 block decoder.** Mode 6 is **87.8%** of the blocks in

@@ -1329,3 +1329,97 @@ isolation first, share second.
 - Modes 1 (2.9%) and 3 — measure in isolation before writing anything.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
 - The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.
+
+---
+
+## §22 — Modes 1 and 3: the mechanism, found at last
+
+§21 refuted "specialising BC7 modes is a win" and left a rule: **measure in
+isolation first, share second.** Following it produced both the largest per-mode
+win of the campaign and the clearest explanation of why mode 5 failed.
+
+### Isolation first: what the general decoder costs per mode
+
+All-mode-N synthetic surfaces, 256², serial, general decoder only:
+
+| mode | Mpx/s | |
+|---|---:|---|
+| 6 | 205.9 | 1 subset, one 4-bit index per pixel |
+| 7 | 167.2 | 2 subsets |
+| 1 | 162.0 | 2 subsets |
+| 3 | 161.8 | 2 subsets |
+| 2 | 159.9 | 3 subsets |
+| 0 | 158.5 | 3 subsets |
+| 5 | 152.0 | 1 subset, **two** index sets |
+| 4 | 151.3 | 1 subset, two index sets |
+
+Mode 6 is already the fastest *before* any specialisation, and mode 5 — also
+single-subset — is the **slowest**. Subset count does not order this table.
+Index-read count does.
+
+### The mechanism
+
+`bcdec_rs` reads indices through a stateful bitstream:
+
+```rust
+let bits = self.low & mask;
+self.low >>= num_bits;
+self.low |= (self.high & mask) << (64 - num_bits);
+self.high >>= num_bits;
+```
+
+Every read **mutates** the cursor, so sixteen index reads are a sixteen-deep
+serial dependency chain: read `n + 1` cannot issue until read `n` retires. That
+is the cost, and it scales with **how many indices a mode reads**, not with how
+many subsets it has.
+
+This explains §21 exactly. Mode 5 reads *two* index sets per pixel — thirty-two
+chained reads — and my fast path replaced them with thirty-two independent
+extractions, which should have won. It did not, because mode 5 also carries a
+rotation and a channel permutation I reintroduced per pixel. **Mode 5 was a bad
+implementation of a good idea**, and §21 recorded it as a bad idea. Correcting
+that is worth more than the code.
+
+### The result
+
+Modes 1 and 3 read one index per pixel, like mode 6, and the two-subset partition
+lookup — which the format requires and no specialisation can remove — turns out
+not to be the expensive part. Alternating-order ABBA, four samples per arm:
+
+| mode | general | specialised | |
+|---|---:|---:|---|
+| 1 | 185-191 Mpx/s | **242-253** | **+31%** |
+| 3 | 171-189 | **245-252** | **+38%** |
+
+No overlap between arms in either case. **Larger than mode 6's +18%**, because
+the two-subset modes started with more of the chain to remove.
+
+### And it does not show on our packs
+
+Whole-surface on the ultra pack, where mode 1 is 18.8% of blocks: 240.2 vs 242.5
+Mpx/s at 256², 250.7 vs 252.1 at 128². **Flat.**
+
+That is not a contradiction, it is a statement about our *encoder*: it emits ~88%
+mode 6 and no mode 3 at all. The specialisation pays on content whose compressor
+favours the two-subset modes, and this crate decodes textures it did not cook.
+Shipping it on the isolated measurement, and saying plainly in the changelog that
+packs cooked here will not show it.
+
+### The lesson worth keeping
+
+§21's rule was right and its conclusion was wrong. "Measure in isolation" caught
+mode 5's numbers correctly but let me generalise from **one implementation** to
+the whole idea. The isolated measurement tells you whether *this code* is faster;
+it does not tell you whether the *approach* is sound. Separating those needed a
+third thing neither §20 nor §21 had: a per-mode cost profile of the code being
+replaced, which is what pointed at index-read count as the variable that matters.
+
+**Profile the thing you intend to beat, before writing the thing that beats it.**
+
+### Still open
+
+- Modes 0 and 2 (3-subset) and 4 and 7 remain general. Mode 7 at 167.2 Mpx/s and
+  one index set is the most promising of them; modes 4 and 5 read two sets and
+  should be expected to behave like mode 5 did.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.
+- The sim's buffer pool is capped by count, not bytes, and is not size-bucketed.

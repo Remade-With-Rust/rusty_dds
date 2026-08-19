@@ -267,7 +267,7 @@ fn decode_bc7_direct(
             let bi = (by * blocks_x + bx) * 16;
             let offset = (by * 4 * out_w + bx * 4) * 4;
             let (blk, dst) = (&data[bi..bi + 16], &mut out[offset..]);
-            if !bc7_mode6_block(blk, dst, pitch) {
+            if !bc7_fast_block(blk, dst, pitch) {
                 bcdec_rs::bc7(blk, dst, pitch);
             }
         }
@@ -287,7 +287,7 @@ fn decode_bc7_scratch(
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
             let blk = &data[bi..bi + 16];
-            if !bc7_mode6_block(blk, &mut scratch, 16) {
+            if !bc7_fast_block(blk, &mut scratch, 16) {
                 bcdec_rs::bc7(blk, &mut scratch, 16);
             }
             blit_rgba4(&scratch, out, out_w, out_h, bx * 4, by * 4);
@@ -342,7 +342,7 @@ fn decode_bc7_parallel(
                         let bi = (by * blocks_x + bx) * 16;
                         let offset = (local_y * 4 * out_w + bx * 4) * 4;
                         let (blk, dst) = (&data[bi..bi + 16], &mut band[offset..]);
-                        if !bc7_mode6_block(blk, dst, pitch) {
+                        if !bc7_fast_block(blk, dst, pitch) {
                             bcdec_rs::bc7(blk, dst, pitch);
                         }
                     }
@@ -426,6 +426,256 @@ fn blit_rg_to_rgba(
 // whole-surface measurement either. Whatever mode 6 gains below, it is not
 // "specialisation" in general — do not assume modes 1/3 will pay without
 // measuring them the same way.
+
+/// Dispatch a block to whichever specialised decoder claims it.
+///
+/// Ordered by measured share: mode 6 is ~88% of blocks, mode 1 the next largest
+/// two-subset mode. Returns `false` when no fast path applies, so the caller
+/// falls back to the general decoder.
+#[inline]
+fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    bc7_mode6_block(blk, out, pitch)
+        || bc7_mode1_block(blk, out, pitch)
+        || bc7_mode3_block(blk, out, pitch)
+}
+
+/// Subset assignment for BC7's 64 two-subset partitions: bit `p` set means
+/// pixel `p` (raster order) belongs to subset 1. Derived from the spec table.
+const BC7_P2_SUBSET: [u16; 64] = [
+    0xcccc, 0x8888, 0xeeee, 0xecc8, 0xc880, 0xfeec, 0xfec8, 0xec80,
+    0xc800, 0xffec, 0xfe80, 0xe800, 0xffe8, 0xff00, 0xfff0, 0xf000,
+    0xf710, 0x008e, 0x7100, 0x08ce, 0x008c, 0x7310, 0x3100, 0x8cce,
+    0x088c, 0x3110, 0x6666, 0x366c, 0x17e8, 0x0ff0, 0x718e, 0x399c,
+    0xaaaa, 0xf0f0, 0x5a5a, 0x33cc, 0x3c3c, 0x55aa, 0x9696, 0xa55a,
+    0x73ce, 0x13c8, 0x324c, 0x3bdc, 0x6996, 0xc33c, 0x9966, 0x0660,
+    0x0272, 0x04e4, 0x4e40, 0x2720, 0xc936, 0x936c, 0x39c6, 0x639c,
+    0x9336, 0x9cc6, 0x817e, 0xe718, 0xccf0, 0x0fcc, 0x7744, 0xee22,
+];
+
+/// Pixel index carrying subset 1's fix-up index, per partition. Subset 0's
+/// fix-up is always pixel 0. Both are stored with one bit fewer.
+const BC7_P2_FIXUP: [u8; 64] = [
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15,  2,  8,  2,  2,  8,  8, 15,  2,  8,  2,  2,  8,  8,  2,  2,
+    15, 15,  6,  8,  2,  8, 15, 15,  2,  8,  2,  2,  2, 15, 15,  6,
+     6,  2,  6,  8, 15, 15,  2,  2, 15, 15, 15, 15, 15,  2,  2, 15,
+];
+
+/// BC7 interpolation weights for 3-bit indices.
+const BC7_WEIGHTS3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
+
+/// BC7 interpolation weights for 2-bit indices.
+const BC7_WEIGHTS2: [u32; 4] = [0, 21, 43, 64];
+
+/// Bit offset and width of pixel `p`s index, for a two-subset mode with
+/// `bits`-wide indices and subset 1 anchored at `fixup`.
+///
+/// The two fix-up pixels store one bit fewer, which is why the general decoder
+/// reads indices through a stateful cursor: each reads position depends on
+/// every read before it. Computing the offset arithmetically makes all sixteen
+/// extractions independent instead.
+#[inline(always)]
+fn bc7_p2_index_at(p: usize, fixup: usize, bits: u32) -> (u32, u32) {
+    let short = usize::from(p > 0) + usize::from(p > fixup);
+    let off = bits as usize * p - short;
+    let w = bits - u32::from(p == 0 || p == fixup);
+    (off as u32, w)
+}
+
+/// Decode one mode 1 BC7 block straight to RGBA8.
+///
+/// Two subsets, 6-bit RGB endpoints with a p-bit shared per subset, 3-bit
+/// indices, opaque alpha.
+///
+/// The win is not the partition lookup, which the format requires and which
+/// stays. It is the index reads. `bcdec_rs` pulls indices through a stateful
+/// bitstream whose every read mutates the cursor, so sixteen of them form a
+/// sixteen-deep serial dependency chain: read `n + 1` cannot start until read
+/// `n` retires. Reading each index by computed offset from an immutable `u128`
+/// makes all sixteen independent, and the out-of-order engine runs them in
+/// parallel.
+///
+/// Returns `false` if the block is not mode 1.
+#[inline]
+fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] & 0x3 != 0x2 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let partition = ((b >> 2) & 0x3f) as usize;
+    let p0 = ((b >> 80) & 1) as u32;
+    let p1 = ((b >> 81) & 1) as u32;
+
+    // 6 bits, then the subsets shared p-bit appended as the low bit, then the
+    // 7-bit value shifted up with its MSB replicated into the vacated bit.
+    let ep = |shift: u32, pbit: u32| {
+        let v = ((((b >> shift) & 0x3f) as u32) << 1) | pbit;
+        let t = v << 1;
+        t | (t >> 7)
+    };
+    // Component-major in the block: R0..R3, then G0..G3, then B0..B3.
+    let e = [
+        [ep(8, p0), ep(32, p0), ep(56, p0)],
+        [ep(14, p0), ep(38, p0), ep(62, p0)],
+        [ep(20, p1), ep(44, p1), ep(68, p1)],
+        [ep(26, p1), ep(50, p1), ep(74, p1)],
+    ];
+
+    let subsets = BC7_P2_SUBSET[partition];
+    let fixup = BC7_P2_FIXUP[partition] as usize;
+    let idx = b >> 82;
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p2_index_at(p, fixup, 3);
+        let weight = BC7_WEIGHTS3[((idx >> off) & ((1u128 << w) - 1)) as usize];
+        let s = (((subsets >> p) & 1) as usize) * 2;
+        let (a, c) = (&e[s], &e[s + 1]);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
+        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
+        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o + 3] = 0xff;
+    }
+    true
+}
+
+/// Decode one mode 3 BC7 block straight to RGBA8.
+///
+/// Two subsets, 7-bit RGB endpoints with a unique p-bit each, 2-bit indices,
+/// opaque alpha. Same argument as [`bc7_mode1_block`].
+///
+/// Returns `false` if the block is not mode 3.
+#[inline]
+fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+    if blk[0] & 0xf != 0x8 {
+        return false;
+    }
+    let Ok(bytes) = <[u8; 16]>::try_from(&blk[..16]) else {
+        return false;
+    };
+    let b = u128::from_le_bytes(bytes);
+
+    let partition = ((b >> 4) & 0x3f) as usize;
+    // 7 bits plus a unique p-bit is already 8, so no MSB replication is needed.
+    let ep = |shift: u32, pbit_shift: u32| {
+        ((((b >> shift) & 0x7f) as u32) << 1) | (((b >> pbit_shift) & 1) as u32)
+    };
+    let e = [
+        [ep(10, 94), ep(38, 94), ep(66, 94)],
+        [ep(17, 95), ep(45, 95), ep(73, 95)],
+        [ep(24, 96), ep(52, 96), ep(80, 96)],
+        [ep(31, 97), ep(59, 97), ep(87, 97)],
+    ];
+
+    let subsets = BC7_P2_SUBSET[partition];
+    let fixup = BC7_P2_FIXUP[partition] as usize;
+    let idx = b >> 98;
+
+    for p in 0..16usize {
+        let (off, w) = bc7_p2_index_at(p, fixup, 2);
+        let weight = BC7_WEIGHTS2[((idx >> off) & ((1u128 << w) - 1)) as usize];
+        let s = (((subsets >> p) & 1) as usize) * 2;
+        let (a, c) = (&e[s], &e[s + 1]);
+        let o = (p / 4) * pitch + (p % 4) * 4;
+        out[o] = ((a[0] * (64 - weight) + c[0] * weight + 32) >> 6) as u8;
+        out[o + 1] = ((a[1] * (64 - weight) + c[1] * weight + 32) >> 6) as u8;
+        out[o + 2] = ((a[2] * (64 - weight) + c[2] * weight + 32) >> 6) as u8;
+        out[o + 3] = 0xff;
+    }
+    true
+}
+
+#[cfg(test)]
+mod bc7_p2_tests {
+    use super::{bc7_mode1_block, bc7_mode3_block, BC7_P2_FIXUP, BC7_P2_SUBSET};
+
+    /// Both two-subset fast paths must match the general decoder bit for bit on
+    /// every one of the 64 partitions, which is where a wrong subset mask or a
+    /// wrong fix-up anchor would hide.
+    #[test]
+    fn two_subset_modes_match_the_general_decoder() {
+        for &(mode, mask, set) in &[(1u32, 0x3u8, 0x2u8), (3, 0xf, 0x8)] {
+            let mut state = 0xdead_beef_cafe_f00du64 ^ mode as u64;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            for partition in 0..64u8 {
+                for case in 0..200 {
+                    let mut raw = [0u8; 16];
+                    match case {
+                        0 => {}
+                        1 => raw.iter_mut().for_each(|x| *x = 0xff),
+                        _ => {
+                            let (x, y) = (next(), next());
+                            raw[..8].copy_from_slice(&x.to_le_bytes());
+                            raw[8..].copy_from_slice(&y.to_le_bytes());
+                        }
+                    }
+                    // Mode in the low bits, then the 6-bit partition field.
+                    let pshift = mode + 1;
+                    let v = u128::from_le_bytes(raw);
+                    let v = (v & !(0x3fu128 << pshift)) | ((partition as u128) << pshift);
+                    let mut blk = v.to_le_bytes();
+                    blk[0] = (blk[0] & !mask) | set;
+
+                    let mut ours = [0u8; 64];
+                    let claimed = if mode == 1 {
+                        bc7_mode1_block(&blk, &mut ours, 16)
+                    } else {
+                        bc7_mode3_block(&blk, &mut ours, 16)
+                    };
+                    assert!(claimed, "mode {mode} partition {partition} not recognised");
+
+                    let mut theirs = [0u8; 64];
+                    bcdec_rs::bc7(&blk, &mut theirs, 16);
+                    assert_eq!(
+                        ours, theirs,
+                        "mode {mode}, partition {partition}, case {case} diverged"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn other_modes_are_declined() {
+        for mode in 0..8u32 {
+            let mut blk = [0u8; 16];
+            blk[0] = 1u8 << mode;
+            let mut px = [0u8; 64];
+            assert_eq!(bc7_mode1_block(&blk, &mut px, 16), mode == 1, "m1 vs {mode}");
+            assert_eq!(bc7_mode3_block(&blk, &mut px, 16), mode == 3, "m3 vs {mode}");
+        }
+    }
+
+    /// The generated tables must be the specs, not merely self-consistent.
+    #[test]
+    fn partition_tables_are_the_spec_tables() {
+        assert_eq!(BC7_P2_SUBSET[0], 0xcccc);
+        assert_eq!(BC7_P2_SUBSET[1], 0x8888);
+        assert_eq!(BC7_P2_SUBSET[2], 0xeeee);
+        // Subset 0 always owns pixel 0, so bit 0 is never set.
+        assert!(BC7_P2_SUBSET.iter().all(|m| m & 1 == 0));
+        // Every partition must actually use both subsets.
+        assert!(BC7_P2_SUBSET.iter().all(|&m| m != 0));
+        // The anchor must belong to subset 1.
+        for (i, &f) in BC7_P2_FIXUP.iter().enumerate() {
+            assert!((1..=15).contains(&f), "partition {i} anchor {f}");
+            assert_eq!(
+                (BC7_P2_SUBSET[i] >> f) & 1,
+                1,
+                "partition {i} anchor not in subset 1"
+            );
+        }
+    }
+}
 
 /// BC7 interpolation weights for 4-bit indices.
 const BC7_WEIGHTS4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
