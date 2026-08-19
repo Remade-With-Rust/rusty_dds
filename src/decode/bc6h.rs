@@ -7,12 +7,57 @@
 
 use crate::error::Error;
 
-pub fn decode_bc6h(
+/// Decode a BC6H slice to tightly packed RGBA `f32` in caller memory.
+///
+/// `out` must be exactly `width * height * 4` floats.
+///
+/// One fused pass. `bcdec_rs::bc6h_float` writes contiguous RGB, so widening to
+/// RGBA is unavoidable — but doing it over a full-surface RGB plane is not, and
+/// that plane is what made this the slowest decode in the crate. At 1024^2 it
+/// cost 12 MiB written, 12 MiB read back and 16 MiB written again, for a 16 MiB
+/// result. Decoding a block at a time into a 192-byte scratch that never leaves
+/// L1, and widening straight into `out`, deletes both extra streams.
+pub fn decode_bc6h_into(
     data: &[u8],
     width: u32,
     height: u32,
     signed: bool,
-) -> Result<Vec<f32>, Error> {
+    out: &mut [f32],
+) -> Result<(), Error> {
+    let (blocks_x, blocks_y, w, h) = validate(data, width, height)?;
+    if out.len() != w.checked_mul(h).and_then(|n| n.checked_mul(4)).ok_or(Error::OutOfBounds)? {
+        return Err(Error::OutOfBounds);
+    }
+
+    let mut scratch = [0f32; 4 * 4 * 3];
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let bi = (by * blocks_x + bx) * 16;
+            bcdec_rs::bc6h_float(&data[bi..bi + 16], &mut scratch, 4 * 3, signed);
+            let px0 = bx * 4;
+            let py0 = by * 4;
+            for row in 0..4 {
+                let y = py0 + row;
+                if y >= h {
+                    break;
+                }
+                let n = (w - px0).min(4);
+                let s = row * 4 * 3;
+                let d = (y * w + px0) * 4;
+                for i in 0..n {
+                    out[d + i * 4] = scratch[s + i * 3];
+                    out[d + i * 4 + 1] = scratch[s + i * 3 + 1];
+                    out[d + i * 4 + 2] = scratch[s + i * 3 + 2];
+                    out[d + i * 4 + 3] = 1.0;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared entry checks. Returns `(blocks_x, blocks_y, width, height)` as usize.
+fn validate(data: &[u8], width: u32, height: u32) -> Result<(usize, usize, usize, usize), Error> {
     if width == 0 || height == 0 {
         return Err(Error::InvalidField("zero image dimension".into()));
     }
@@ -25,50 +70,22 @@ pub fn decode_bc6h(
     if data.len() < expected {
         return Err(Error::TruncatedData);
     }
-    let w = width as usize;
-    let h = height as usize;
+    Ok((blocks_x, blocks_y, width as usize, height as usize))
+}
 
-    // Two buffers here, deliberately. Decoding RGB into the front of one
-    // RGBA-sized buffer and widening in place from the back saves this 12-byte
-    // allocation, and was MEASURED SLOWER: 0.836 -> 1.662 ms on 256x256, because
-    // a backward pass over an aliasing buffer defeats both the prefetcher and
-    // auto-vectorisation. The forward `chunks_exact(3)` widen below is worth
-    // more than the allocation it costs. Do not "fix" this without a number.
-    let mut rgb = vec![0f32; w * h * 3];
-    if width % 4 == 0 && height % 4 == 0 {
-        let pitch = w * 3; // pitch in floats
-        for by in 0..blocks_y {
-            for bx in 0..blocks_x {
-                let bi = (by * blocks_x + bx) * 16;
-                let offset = (by * 4 * w + bx * 4) * 3;
-                bcdec_rs::bc6h_float(&data[bi..bi + 16], &mut rgb[offset..], pitch, signed);
-            }
-        }
-    } else {
-        let mut scratch = [0f32; 4 * 4 * 3];
-        for by in 0..blocks_y {
-            for bx in 0..blocks_x {
-                let bi = (by * blocks_x + bx) * 16;
-                bcdec_rs::bc6h_float(&data[bi..bi + 16], &mut scratch, 4 * 3, signed);
-                let px0 = bx * 4;
-                let py0 = by * 4;
-                for row in 0..4 {
-                    let y = py0 + row;
-                    if y >= h {
-                        break;
-                    }
-                    let n = (w - px0).min(4);
-                    let src = row * 4 * 3;
-                    let dst = (y * w + px0) * 3;
-                    rgb[dst..dst + n * 3].copy_from_slice(&scratch[src..src + n * 3]);
-                }
-            }
-        }
-    }
-
-    let mut out = Vec::with_capacity(w * h * 4);
-    for px in rgb.chunks_exact(3) {
-        out.extend_from_slice(&[px[0], px[1], px[2], 1.0]);
-    }
+pub fn decode_bc6h(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    signed: bool,
+) -> Result<Vec<f32>, Error> {
+    let (_, _, w, h) = validate(data, width, height)?;
+    let mut out = vec![
+        0f32;
+        w.checked_mul(h)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?
+    ];
+    decode_bc6h_into(data, width, height, signed, &mut out)?;
     Ok(out)
 }

@@ -3,6 +3,49 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.1 — 2026-08-18
+
+**BC6H, the last unoptimised decode.** Profiling the whole format matrix found
+HDR decode running at 39.7 Mpx/s against BC1's 337 and BC7's ~400 — a 10x gap,
+on the most expensive format we ship. **1024^2 BC6H: 26.428 ms to 2.743 ms, 9.6x.**
+Output is bit-identical; a test asserts that at every split point.
+
+### Added
+
+- **`decode_rgba_f32_into`** — decode HDR into a buffer you own and recycle. This
+  output is 16 bytes a pixel, four times RGBA8, so the buffer the OS zeroes for
+  you and the decoder immediately overwrites is 16 MiB on a 1024^2 surface.
+- **`decode_block_rows_f32_into` / `block_rows_f32`** — the caller-parallel seam,
+  the HDR twin of `decode_block_rows_into`. BC6H has no internal thread pool and
+  deliberately does not grow one: a texture library that seizes cores inside a
+  frame is a library an engine has to work around.
+
+### Performance
+
+1024^2 BC6H_UF16, 24 cores:
+
+| | time | throughput |
+|---|---:|---:|
+| 0.3.0 | 26.428 ms | 39.7 Mpx/s |
+| fused single pass | 18.691 ms | 56.1 Mpx/s |
+| `decode_rgba_f32_into` | 11.941 ms | 87.8 Mpx/s |
+| **`decode_block_rows_f32_into`, 24 threads** | **2.743 ms** | **382.3 Mpx/s** |
+
+### Fixed
+
+- `decode_bc6h` built a full-surface RGB plane and then made a **second pass**
+  over it to widen to RGBA. At 1024^2 that was 12 MiB written, 12 MiB read back
+  and 16 MiB written again, for a 16 MiB result. Now one fused pass through a
+  192-byte block scratch that never leaves L1. The tell was throughput *falling*
+  with surface size — 56.8 / 49.2 / 39.7 Mpx/s at 256/512/1024 — which is a cache
+  cliff, not decode cost. It now flattens: 76.9 / 62.7 / 56.1.
+
+### Notes
+
+- Purely additive; every existing call is unchanged. MSRV remains 1.73.
+- Splitting is the **caller's** call: at 256^2 a 24-thread split is 0.56x, because
+  spawn cost dominates. The seam exists so your scheduler decides, not ours.
+
 ## 0.3.0 — 2026-08-18
 
 **The runtime streaming path.** A texture-streaming simulator

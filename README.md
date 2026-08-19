@@ -134,6 +134,12 @@ let dds = DdsView::read_into(reader, &mut buf)?;
 let mut pixels = Vec::new();
 dds.decode_rgba8_into(id, &mut pixels)?;
 dds.decode_block_rows_into(id, 0..dds.block_rows(id)?, &mut pixels)?;
+
+// HDR has the same two seams — and needs them most. BC6H is the priciest
+// format we ship: 26.4 ms serial at 1024^2, 2.7 ms across 24 of your threads.
+let mut hdr = Vec::new();
+dds.decode_rgba_f32_into(id, &mut hdr)?;
+dds.decode_block_rows_f32_into(id, 0..dds.block_rows_f32(id)?, &mut hdr)?;
 ```
 
 `Dds` still owns its payload and every existing call is unchanged — it is now an

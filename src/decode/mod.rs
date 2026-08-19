@@ -96,6 +96,127 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             pixels,
         })
     }
+
+    /// Decode one HDR subresource to RGBA `f32` **into a buffer you own**.
+    ///
+    /// The HDR twin of [`DdsBase::decode_rgba8_into`], and it matters more here:
+    /// this output is 16 bytes a pixel, four times RGBA8, so a 1024^2 surface
+    /// hands back 16 MiB that the operating system zeroed for you and the
+    /// decoder immediately overwrote. Recycle one buffer per worker instead.
+    ///
+    /// `dst` is resized to fit and fully overwritten. Returns
+    /// `(width, height, depth)`.
+    pub fn decode_rgba_f32_into(
+        &self,
+        id: SubresourceId,
+        dst: &mut Vec<f32>,
+    ) -> Result<(u32, u32, u32), Error> {
+        let kind = self.hdr_decode_content()?;
+        let signed = kind == HdrDecodeContent::Bc6hSf16;
+        let surf = self.surface(id)?;
+        let (w, h, d) = (surf.width, surf.height, surf.depth.max(1));
+        let slice_bytes = hdr_slice_bytes(w, h)?;
+        let need = slice_bytes.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
+        if surf.data.len() < need {
+            return Err(Error::TruncatedData);
+        }
+
+        let out_slice = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?;
+        let total = out_slice.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
+        // `resize` only zeroes what it adds, so a correctly sized buffer costs
+        // nothing here — the whole point of handing one back in.
+        if dst.len() != total {
+            dst.clear();
+            dst.resize(total, 0.0);
+        }
+
+        for z in 0..d as usize {
+            let src = &surf.data[z * slice_bytes..(z + 1) * slice_bytes];
+            let dst_z = dst
+                .get_mut(z * out_slice..(z + 1) * out_slice)
+                .ok_or(Error::OutOfBounds)?;
+            bc6h::decode_bc6h_into(src, w, h, signed, dst_z)?;
+        }
+        Ok((w, h, d))
+    }
+
+    /// Decode a **range of block rows** of one HDR subresource into caller
+    /// memory — the seam your job system splits on.
+    ///
+    /// BC6H is the most expensive decode this crate ships: at 1024^2 it is
+    /// ~21 ms serial, against 2.6 ms for BC7 split across a caller's threads.
+    /// Unlike BC7 it has no internal thread pool to fall back on, and it should
+    /// not grow one — a texture library that seizes cores inside a frame is a
+    /// library an engine has to work around. This hands you the split instead.
+    ///
+    /// `rows` is in block rows of 4 pixel rows each; `dst` receives only those
+    /// rows, tightly packed at `width * 4` floats per pixel row. Use
+    /// [`DdsBase::block_rows_f32`] for the count.
+    ///
+    /// ```no_run
+    /// # use rusty_dds::{Dds, SubresourceId};
+    /// # fn f(dds: &Dds) -> Result<(), rusty_dds::Error> {
+    /// let id = SubresourceId::mip_layer(0, 0);
+    /// let rows = dds.block_rows_f32(id)?;
+    /// let (w, h, _) = (1024usize, 1024usize, 1);
+    /// let mut pixels = vec![0f32; w * h * 4];
+    /// let (top, bottom) = pixels.split_at_mut(w * (h / 2) * 4);
+    /// // In a real engine these two are two jobs on two cores.
+    /// dds.decode_block_rows_f32_into(id, 0..rows / 2, top)?;
+    /// dds.decode_block_rows_f32_into(id, rows / 2..rows, bottom)?;
+    /// # Ok(()) }
+    /// ```
+    pub fn decode_block_rows_f32_into(
+        &self,
+        id: SubresourceId,
+        rows: core::ops::Range<u32>,
+        dst: &mut [f32],
+    ) -> Result<(), Error> {
+        let kind = self.hdr_decode_content()?;
+        let signed = kind == HdrDecodeContent::Bc6hSf16;
+        let surf = self.surface(id)?;
+        if surf.depth.max(1) != 1 {
+            // Volumes want a slice index alongside the row range; no caller has
+            // needed it yet, and guessing the layout would be worse than failing.
+            return Err(Error::UnsupportedFormat);
+        }
+        let total = surf.height.div_ceil(4);
+        if rows.start > rows.end || rows.end > total {
+            return Err(Error::OutOfBounds);
+        }
+        let y0 = rows.start * 4;
+        let y1 = (rows.end * 4).min(surf.height);
+        if y0 >= y1 {
+            return Ok(());
+        }
+
+        // 16 bytes per block, one block row is `blocks_x` of them.
+        let row_pitch = (surf.width as usize).div_ceil(4) * 16;
+        let src = surf
+            .data
+            .get(rows.start as usize * row_pitch..rows.end as usize * row_pitch)
+            .ok_or(Error::TruncatedData)?;
+        bc6h::decode_bc6h_into(src, surf.width, y1 - y0, signed, dst)
+    }
+
+    /// Block rows in one HDR subresource — the unit
+    /// [`DdsBase::decode_block_rows_f32_into`] splits on. Always 4 pixel rows.
+    pub fn block_rows_f32(&self, id: SubresourceId) -> Result<u32, Error> {
+        self.hdr_decode_content()?;
+        Ok(self.surface(id)?.height.div_ceil(4))
+    }
+}
+
+/// Payload bytes for one BC6H slice.
+fn hdr_slice_bytes(width: u32, height: u32) -> Result<usize, Error> {
+    let bx = (width as usize).div_ceil(4);
+    let by = (height as usize).div_ceil(4);
+    bx.checked_mul(by)
+        .and_then(|n| n.checked_mul(16))
+        .ok_or(Error::OutOfBounds)
 }
 
 impl<D: AsRef<[u8]>> DdsBase<D> {

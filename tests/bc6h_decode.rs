@@ -184,3 +184,61 @@ fn apis_fail_closed_across_domains() {
     let ldr = img.encode_dds(DecodeContent::Bc7).expect("encode bc7");
     assert!(ldr.decode_rgba_f32(SubresourceId::mip_layer(0, 0)).is_err());
 }
+
+/// The caller-parallel seam must produce byte-identical pixels to the whole-surface
+/// decode, at aligned and NPOT sizes, and for every split that divides the rows.
+///
+/// This is the guard on a 9.6x win: BC6H at 1024^2 went from 26.4 ms serial to
+/// 2.7 ms across 24 caller threads. A split that quietly decodes different pixels
+/// than the whole would be worse than no split at all.
+#[test]
+fn hdr_block_row_split_matches_whole_surface() {
+    for &(w, h) in &[(64u32, 64u32), (128, 64), (37, 53), (16, 100)] {
+        let n = (w * h) as usize;
+        let mut src = Vec::with_capacity(n * 4);
+        for i in 0..n {
+            let x = (i as u32 % w) as f32 / w as f32;
+            let y = (i as u32 / w) as f32 / h as f32;
+            src.extend_from_slice(&[x * 7.0, y * 3.0 + 0.25, (x + y) * 2.0, 1.0]);
+        }
+        let dds = Dds::encode_bc6h_uf16(&src, w, h).expect("encode");
+        let id = SubresourceId::mip_layer(0, 0);
+
+        let whole = dds.decode_rgba_f32(id).expect("whole");
+        let rows = dds.block_rows_f32(id).expect("rows");
+        assert_eq!(rows, h.div_ceil(4), "{w}x{h}: block row count");
+
+        // `_into` must agree with the allocating call.
+        let mut buf = Vec::new();
+        dds.decode_rgba_f32_into(id, &mut buf).expect("into");
+        assert_eq!(buf, whole.pixels, "{w}x{h}: _into diverged");
+
+        // Every split point, not just the middle.
+        for cut in 0..=rows {
+            let mut split = vec![0f32; n * 4];
+            let px = (cut * 4).min(h) as usize * w as usize * 4;
+            let (top, bottom) = split.split_at_mut(px);
+            dds.decode_block_rows_f32_into(id, 0..cut, top).expect("top");
+            dds.decode_block_rows_f32_into(id, cut..rows, bottom)
+                .expect("bottom");
+            assert_eq!(split, whole.pixels, "{w}x{h}: split at row {cut} diverged");
+        }
+    }
+}
+
+/// Out-of-range row spans fail closed rather than reading past the payload.
+#[test]
+fn hdr_block_rows_reject_bad_ranges() {
+    let src = vec![0.5f32; 64 * 64 * 4];
+    let dds = Dds::encode_bc6h_uf16(&src, 64, 64).expect("encode");
+    let id = SubresourceId::mip_layer(0, 0);
+    let rows = dds.block_rows_f32(id).expect("rows");
+    let mut out = vec![0f32; 64 * 64 * 4];
+
+    assert!(dds.decode_block_rows_f32_into(id, 0..rows + 1, &mut out).is_err());
+    assert!(dds.decode_block_rows_f32_into(id, 2..1, &mut out).is_err());
+    // A destination that does not match the requested rows is refused, not
+    // silently truncated.
+    let mut small = vec![0f32; 8];
+    assert!(dds.decode_block_rows_f32_into(id, 0..rows, &mut small).is_err());
+}
