@@ -60,6 +60,20 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         if surf.data.len() < need {
             return Err(Error::TruncatedData);
         }
+        // The 2D case is every case that matters, and `decode_bc6h` already
+        // returns exactly the buffer we want. Building a second full-size `Vec`
+        // and extending it into cost a whole extra allocation plus a copy of the
+        // output — and this output is 16 bytes a pixel, four times RGBA8. The
+        // LDR path has always short-circuited depth == 1; this one did not.
+        if surf.depth <= 1 {
+            return Ok(ImageRgbaF32 {
+                width: surf.width,
+                height: surf.height,
+                depth: surf.depth,
+                pixels: bc6h::decode_bc6h(&surf.data[..slice_bytes], surf.width, surf.height, signed)?,
+            });
+        }
+
         let mut pixels = Vec::with_capacity(
             (surf.width as usize)
                 .saturating_mul(surf.height as usize)

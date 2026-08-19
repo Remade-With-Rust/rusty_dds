@@ -47,6 +47,10 @@ copy then overwrote. `DdsView` does not copy; `read_into` reuses warm pages.
 - Internal format queries allocated a `Box<dyn DataFormat>` — **12 per
   `upload_plan_compressed`**, now zero, via an allocation-free `FormatOf`.
 - `upload_plan_compressed` computed the subresource range twice.
+- `decode_rgba_f32` (BC6H HDR) built the whole surface a second time even for a
+  single-slice 2D texture, the only shape anyone decodes. The LDR path had always
+  short-circuited `depth == 1`; this one had not. On 256^2: **3 allocations and
+  2.75 MiB down to 2 and 1.75 MiB** for a 1.00 MiB output.
 
 ### Notes
 
