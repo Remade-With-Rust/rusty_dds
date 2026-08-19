@@ -3,6 +3,46 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.18 - 2026-08-19
+
+**Hardware half-float conversion for BC6H.** `vcvtph2ps` converts eight halves
+per instruction, so a block's 48 components take six instructions instead of 48
+scalar conversions.
+
+Eight samples per arm, alternating order: **136.0 -> 146.8 Mpx/s, +7.9%.** The
+arms overlap slightly; this is a modest result reported as one.
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC6H 144.1 vs 30.2 Mpx/s
+- 4.77x**, up from 4.50x; **8.86x** across all formats.
+
+### The 96 multiplies were the wrong target
+
+The obvious next step after 0.3.17 was to vectorise the 16 x 3 x 2 interpolation
+multiplies. Probing first said not to:
+
+| probe (512^2 serial) | Mpx/s | reading |
+|---|---:|---|
+| full | 119.7 | - |
+| interpolation removed | 156.1 | ~23% of the call |
+| **2x interpolation work** | **115.5** | **only 3.5% slower** |
+
+Removing it helps, doubling it costs almost nothing - so the interpolation sits
+on the dependency chain but has spare throughput, and vectorising it (a
+throughput fix) would buy little. The same shape that made three BC5 rounds
+measure neutral.
+
+Redirecting the same probe onto the downstream conversion gave the opposite
+answer - doubling that work cost **19%** (121.3 -> 98.8) - which is what made it
+the target.
+
+### Notes
+
+- F16C plus AVX are runtime-detected; the branchless scalar converter remains as
+  the twin for everything else.
+- Verified against the scalar converter across **all 65 536** half bit patterns,
+  not merely the positive normals BC6H emits, with NaN compared as NaN.
+- Decode output is unchanged, bit for bit. SIMD path 97 tests, scalar fallback 90.
+
 ## 0.3.17 - 2026-08-19
 
 **In-house BC6H mode-11 block decode.** BC6H was the weakest format in the matrix

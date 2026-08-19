@@ -2296,3 +2296,66 @@ than an exhausted one.
   one channel per register — and it needs its own ceiling first.
 - The BC5 palette chain (§32), latency bound and untouched.
 - BC2 and BC3 have no real-content measurement; our packs contain neither.
+
+---
+
+## §34 — The 96 multiplies were the wrong target, and the probe said so first
+
+§33 ended by naming the BC6H interpolation — 16 pixels x 3 channels x 2
+multiplies — as the next candidate, "needs its own ceiling first". It did, and
+the ceiling refused it.
+
+### The probe that saved a day
+
+| probe (512², serial) | Mpx/s | reading |
+|---|---:|---|
+| full | 119.7 | — |
+| interpolation removed | 156.1 | ~23% of the call |
+| **2x interpolation work** | **115.5** | **only 3.5% slower** |
+
+Removing it helps; doubling it costs nothing. That pair means the interpolation
+sits **on the dependency chain but has spare throughput** — precisely the shape
+that made three consecutive BC5 rounds measure neutral. Vectorising 96 multiplies
+is a throughput fix, and there was no throughput problem to fix.
+
+**The candidate named at the end of §33 was wrong, and one build said so.** Had
+the same paragraph been written without the probe, it would have been a day of
+`mullo_epi32` work with runtime detection for a result already visible in three
+numbers.
+
+### The same probe, pointed elsewhere, found the real one
+
+Aimed at the downstream half-to-float conversion, doubling the work cost **19%**
+(121.3 → 98.8) — a throughput signal, not a latency one. `vcvtph2ps` converts
+eight halves per instruction, so a block's 48 components become six instructions
+instead of 48 scalar conversions.
+
+**136.0 → 146.8 Mpx/s, +7.9%**, eight samples per arm, arms slightly overlapping.
+Against DirectXTex: **BC6H 4.77x**, up from 4.50x; **8.86x** across formats.
+
+Less than the 19% the probe promised, and that is expected — removing 19% of a
+call cannot yield 19% when what remains still has to run. The probe bounds the
+prize; it does not predict the delivery.
+
+### The lesson worth keeping
+
+**The doubling probe is now the campaign's cheapest and most decisive
+instrument** — one build, three numbers, and it distinguishes the two failure
+modes that have between them accounted for every neutral result in this file:
+
+| removing it helps | doubling it hurts | meaning | what pays |
+|---|---|---|---|
+| yes | yes | throughput bound | do less work: fewer ops, SIMD |
+| yes | **no** | latency bound, spare throughput | shorten the chain, or nothing |
+| no | — | not the cost at all | stop |
+
+Before §32 this file had spent five rounds across BC5, BC7 mode 6 and BC6H
+attacking the middle row with tools that only help the top row. The instrument
+costs one build and it now runs first.
+
+### Still open
+
+- BC6H's interpolation is ~23% of the call and latency-shaped; the only lever is
+  shortening the chain, not vectorising it.
+- The BC5 palette chain (§32), same shape, same open question.
+- BC2 and BC3 have no real-content measurement; our packs contain neither.

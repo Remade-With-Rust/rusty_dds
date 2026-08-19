@@ -49,8 +49,17 @@ pub fn decode_bc6h_into(
             // vectorise; a strided read/write with the conversion inline does
             // not, and the vectoriser is worth more than the extra pass.
             // Same shape as the refuted backward widen in the crate's history.
-            for k in 0..4 * 4 * 3 {
-                fscratch[k] = half_to_f32(scratch[k]);
+            // `vcvtph2ps` does eight halves per instruction; 48 of them is six
+            // instructions against 48 scalar conversions. Measured at ~19% of
+            // the BC6H call by doubling the conversion work.
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            let converted = crate::decode::simd::half48_to_f32(&scratch, &mut fscratch);
+            #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+            let converted = false;
+            if !converted {
+                for k in 0..4 * 4 * 3 {
+                    fscratch[k] = half_to_f32(scratch[k]);
+                }
             }
             let px0 = bx * 4;
             let py0 = by * 4;
