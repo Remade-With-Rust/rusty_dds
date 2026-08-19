@@ -37,7 +37,14 @@ fn main() {
         ]);
     }
 
-    let layout = EncodeLayout::flat_2d(DecodeContent::Bc7, W, W).with_mips(10);
+    // Format selectable so the same instrument serves every kernel.
+    let content = match std::env::var("PROBE_FMT").unwrap_or_else(|_| "bc7".into()).as_str() {
+        "bc1" => DecodeContent::Bc1,
+        "bc3" => DecodeContent::Bc3,
+        "bc5u" => DecodeContent::Bc5UNorm,
+        _ => DecodeContent::Bc7,
+    };
+    let layout = EncodeLayout::flat_2d(content, W, W).with_mips(10);
     let _ = Dds::encode_from_rgba8(&px, layout).expect("warm");
 
     // Enough iterations that the 15.625 ms process-CPU quantum is noise.

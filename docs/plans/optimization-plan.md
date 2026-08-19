@@ -3019,3 +3019,67 @@ one of the 102 corpus cases.
   min-tracking loop and the same `sse16_rgba_noalpha` array round-trip. It was
   not touched this round and is the obvious next target.
 - BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.
+
+---
+
+## §44 — The same defect, one function over, worth four times as much
+
+§43 ended by naming `bc1_fit_4color_avx2` as having the identical shape. It did,
+and it was worth far more.
+
+| format | register | array | wins | z | gain |
+|---|---:|---:|---:|---:|---:|
+| BC1 | **6.510 ms** | 10.417 | 20/20 | +4.47 | **+37.50%** |
+| BC3 | **9.115 ms** | 13.021 | 12/12 | +3.46 | **+26.11%** |
+| BC7 (§43) | 41.667 | 46.224 | 16/18 | +3.30 | +9.23% |
+
+### Why the smaller kernel gained more
+
+The defect is a **fixed cost per colour**: sixteen scalar compare-branches and
+two store-forwarding stalls, regardless of how much real work the colour
+evaluation does. BC7 amortises that over sixteen palette entries and a much
+heavier search; BC1 evaluates **four** colours in a far shorter kernel, so the
+same overhead was a much larger fraction of it.
+
+**A fixed overhead hurts the cheap path most.** The instinct is to optimise the
+expensive kernel first — here the cheap one held four times the win, and nothing
+about reading either function would have suggested it. Only measuring both did.
+
+### The pattern, now three for three
+
+Store-forwarding between a vector producer and a scalar consumer has now been
+found and fixed in:
+
+| site | gain |
+|---|---:|
+| BC5 index unpack (§30) | +25% |
+| BC5 palette handoff (§31) | +12.5% |
+| BC7 index fit (§43) | +9.23% |
+| BC1/BC3 colour fit (§44) | **+37.5% / +26.1%** |
+
+Four sites, two of them inside files named for SIMD. The signature is always the
+same and needs no profiler: **a `for i in 0..N` loop reading an array that vector
+code just wrote.**
+
+That is now a grep, not an investigation. It is worth running across any codebase
+mixing intrinsics with scalar glue — the glue is where the stalls live, and it is
+never what the file is named after.
+
+### Where the encoder stands
+
+| release | change | verdict |
+|---|---|---|
+| 0.3.20 | refine reuses the winning fit | -19.1% fits |
+| 0.3.21 | residual-error seed gate | +8.33% |
+| 0.3.22 | `quantize_7p` table | +7.26% |
+| 0.3.23 | statistics hoist | +2.67% |
+| 0.3.24 | register-resident BC7 index fit | +9.23% |
+| **0.3.25** | **register-resident BC1/BC3 colour fit** | **+37.5% / +26.1%** |
+
+Six releases, five byte-identical, **zero of 102 corpus cases worse**.
+
+### Still open
+
+- `palette_mode6` (3.168 calls/block) is the last per-fit helper.
+- The BC4/BC5 alpha fit has not been examined for the same shape.
+- BC6H interpolation (§34) and the BC5 palette chain (§32), both latency-shaped.

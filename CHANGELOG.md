@@ -3,6 +3,40 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.25 - 2026-08-19
+
+**The BC1 AVX2 kernel too.** `bc1_fit_4color_avx2` had the identical defect
+0.3.24 fixed one function over: distances computed in vector registers, **stored
+to a `[i32; 16]`**, then a **scalar sixteen-iteration loop** reading them back to
+track the minimum - once per colour, four colours per call.
+
+Now register-resident, with compare-and-blend. `sse16_rgba_noalpha` is gone; the
+extraction loop stays scalar on purpose, because it carries the order-dependent
+early abort and runs once per call rather than once per colour.
+
+### Performance
+
+512^2 x 10 mips, pinned, forced serial, paired CPU:
+
+| format | register | array | wins | z | improvement |
+|---|---:|---:|---:|---:|---:|
+| **BC1** | **6.510 ms** | 10.417 ms | **20/20** | **+4.47** | **+37.50%** |
+| **BC3** | **9.115 ms** | 13.021 ms | **12/12** | **+3.46** | **+26.11%** |
+
+Larger than BC7's +9.23% from the same fix, and for a clear reason: BC1 evaluates
+only **four** colours, so the fixed 64 scalar compare-branches and two
+store-forwarding stalls were a far larger share of a much shorter kernel. BC3
+gains through the same colour path.
+
+### Notes
+
+- **Byte-identical**, verified by the existing `bc1_avx2_matches_scalar` oracle,
+  the frozen-payload tests, and an explicit payload hash across BC7, BC1, BC3
+  and BC5U.
+- `sim/examples/probe_encode_serial.rs` now takes `PROBE_FMT` so the same
+  instrument serves every format.
+- 98 tests pass.
+
 ## 0.3.24 - 2026-08-19
 
 **The AVX2 index-fit kernel now stays in registers.** With `best_index_pal`

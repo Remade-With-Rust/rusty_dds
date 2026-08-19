@@ -136,28 +136,93 @@ pub(super) fn bc1_fit_4color_avx2(
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     debug_assert!(has_avx2());
-    let mut best_e = [i32::MAX; 16];
-    let mut best_i = [0u8; 16];
-    let mut sse = [0i32; 16];
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_fit_4color_avx2_impl(pixels, colors, err_limit) }
+}
+
+/// RGB squared distance from eight consecutive pixels to one point, packed in
+/// pixel order. The alpha lane is masked to zero on both sides so it cannot
+/// contribute — see [`sse8_rgba`] for the `hadd` lane ordering.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sse8_rgb(
+    base: *const u8,
+    off: usize,
+    pv: std::arch::x86_64::__m256i,
+    keep: std::arch::x86_64::__m256i,
+    perm: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    let a = _mm256_and_si256(
+        _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
+        keep,
+    );
+    let b = _mm256_and_si256(
+        _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off + 16) as *const __m128i)),
+        keep,
+    );
+    let da = _mm256_sub_epi16(a, pv);
+    let db = _mm256_sub_epi16(b, pv);
+    let h = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
+    _mm256_permutevar8x32_epi32(h, perm)
+}
+
+/// BC1 four-colour fit, entirely in registers.
+///
+/// Same defect as the mode-6 kernel had before 0.3.24, one file over: the
+/// distances were computed in vector registers, **stored to a `[i32; 16]`**, and
+/// a **scalar sixteen-iteration loop** read them back to track the minimum —
+/// once per colour, four colours per call. Two store-forwarding stalls and 64
+/// scalar compare-branches per fit.
+///
+/// The extraction loop below stays scalar deliberately: it carries the
+/// early-abort on the running total, which is order-dependent and runs once per
+/// call rather than once per colour.
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_fit_4color_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    colors: &[[u8; 3]; 4],
+    err_limit: i32,
+) -> Option<(u32, i32)> {
+    use std::arch::x86_64::*;
+    let base = pixels.as_ptr() as *const u8;
+    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+    let keep = _mm256_set1_epi64x(
+        u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
+    );
+
+    let mut best_lo = _mm256_set1_epi32(i32::MAX);
+    let mut best_hi = _mm256_set1_epi32(i32::MAX);
+    let mut idx_lo = _mm256_setzero_si256();
+    let mut idx_hi = _mm256_setzero_si256();
+
     for (k, c) in colors.iter().enumerate() {
-        // Alpha lane must not contribute: give the point each pixel's own
-        // alpha? Cheaper: zero contribution by matching — use alpha 0 and
-        // mask pixel alphas by copying RGB into a scratch with A=0.
-        let point = [c[0], c[1], c[2], 0];
-        // SAFETY: AVX2 guaranteed by dispatch.
-        unsafe { sse16_rgba_noalpha(pixels, point, &mut sse) };
-        for i in 0..16 {
-            if sse[i] < best_e[i] {
-                best_e[i] = sse[i];
-                best_i[i] = k as u8;
-            }
-        }
+        let pv = _mm256_set1_epi64x(
+            u64::from_le_bytes([c[0], 0, c[1], 0, c[2], 0, 0, 0]) as i64,
+        );
+        let kv = _mm256_set1_epi32(k as i32);
+        let cur_lo = sse8_rgb(base, 0, pv, keep, perm);
+        let cur_hi = sse8_rgb(base, 32, pv, keep, perm);
+        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
+        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
+        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
+        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
+        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
+        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
     }
+
+    let mut e = [0i32; 16];
+    let mut ix = [0i32; 16];
+    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, best_lo);
+    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, best_hi);
+    _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx_lo);
+    _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx_hi);
+
     let mut table = 0u32;
     let mut err = 0i32;
     for i in 0..16 {
-        table |= (best_i[i] as u32) << (2 * i);
-        err += best_e[i];
+        table |= (ix[i] as u32) << (2 * i);
+        err += e[i];
         if err >= err_limit {
             return None;
         }
@@ -165,38 +230,6 @@ pub(super) fn bc1_fit_4color_avx2(
     Some((table, err))
 }
 
-/// Like `sse16_rgba` but the alpha channel is excluded (RGB distance).
-///
-/// # Safety
-/// Caller guarantees AVX2 is available.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sse16_rgba_noalpha(pixels: &[[u8; 4]; 16], point: [u8; 4], out: &mut [i32; 16]) {
-    use std::arch::x86_64::*;
-    let base = pixels.as_ptr() as *const u8;
-    let p64 = u64::from_le_bytes([
-        point[0], 0, point[1], 0, point[2], 0, 0, 0,
-    ]);
-    let pv = _mm256_set1_epi64x(p64 as i64);
-    // Zero the alpha u16 lane of the pixels: lane mask keeps r,g,b.
-    let keep = _mm256_set1_epi64x(u64::from_le_bytes([
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0,
-    ]) as i64);
-    for q in 0..4 {
-        let raw = _mm_loadu_si128(base.add(q * 16) as *const __m128i);
-        let px = _mm256_and_si256(_mm256_cvtepu8_epi16(raw), keep);
-        let d = _mm256_sub_epi16(px, pv);
-        let sq = _mm256_madd_epi16(d, d);
-        let hi = _mm256_srli_epi64(sq, 32);
-        let s = _mm256_add_epi32(sq, hi);
-        let mut tmp = [0i32; 8];
-        _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, s);
-        out[q * 4] = tmp[0];
-        out[q * 4 + 1] = tmp[2];
-        out[q * 4 + 2] = tmp[4];
-        out[q * 4 + 3] = tmp[6];
-    }
-}
 
 #[cfg(test)]
 mod oracle {
