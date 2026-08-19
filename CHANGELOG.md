@@ -3,6 +3,45 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.38 - 2026-08-19
+
+**BC7 mode 1 ranking: +8.0% on opaque textures — the third fixture gap.**
+
+Mode 1 had never been measured. Counters said why: it runs **0.000 times per
+block** on both existing probe fixtures. Its gate is `a_lo == 255`, so it needs
+**fully opaque** alpha — and neither fixture had any. Opaque is the most common
+real texture, and it was the one case nothing covered. It also *closes* modes 4
+and 5 (whose gate is `a_hi - a_lo > 2`), so it exercises an entirely different
+mode mix.
+
+On a new `PROBE_OPAQUE=1` fixture, mode 1 runs on **99.4% of blocks**, ranking
+all **8** shortlist partitions each time — and the promise gate then rejects
+**99.7%** of them (`fit = 0.027` per block). The ranking is almost pure gating
+work, and a doubling probe put it at **~21% of BC7 encode** on that content.
+
+Two exact changes, no arithmetic altered:
+
+- **Subset 0 is derived, not accumulated.** Channel totals come free alongside
+  the `sq` pass that already walks the block, and subset 0's sum is the total
+  minus subset 1's, its count `16 - cnt1`. Half the per-partition accumulation
+  disappears. The table entry is already 0 or 1, so it doubles as a mask and the
+  loop is branchless.
+- **32-bit division, not 64-bit.** A channel sum is at most `16 * 255 = 4080`
+  and its square 16 646 400 — comfortably inside `u32`, and every value is
+  non-negative, so truncation is identical.
+
+512^2, forced serial, pinned, 14 paired CPU samples:
+
+| fixture | before | after | verdict |
+|---|---|---|---|
+| opaque (mode 1 fires) | 49.7582 ms | **45.7589 ms** | 14/14, z = +3.74, **+8.0%** |
+| alpha-structured (mode 1 never runs) | 51.4323 ms | 51.3021 ms | 5/10, z = +0.00, flat |
+
+**Byte-identical on all three fixtures.** The hash gate now carries the opaque
+one too — without it, this change would have been "verified" by content that
+never executes the code it touches, which is the same hole 0.3.32 found in the
+mode-4 measurement.
+
 ## 0.3.37 - 2026-08-19
 
 **The parallel threshold was 8x too high: up to +44.9% on mid-sized surfaces.**

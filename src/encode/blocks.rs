@@ -53,25 +53,7 @@ fn quality_is_fast() -> bool {
     QUALITY.with(|c| c.get() == EncodeQuality::Fast)
 }
 
-/// Spawn strips only when the work is large enough to pay for them.
-///
-/// 4096 was inherited from BC7 decode and never validated for encode. Measured:
-/// the crossover is **~512 blocks**, eight times lower, and the old value was
-/// forcing every surface between the two onto one thread. Paired wall-clock,
-/// BC7, pinned, threshold 512 against 4096:
-///
-/// | blocks | verdict |
-/// |---|---|
-/// | 256 | both serial, unchanged |
-/// | 529 | flat — this is the crossover |
-/// | 1024 | **+23.6%**, 10/10, z = +3.16 |
-/// | 2116 | **+44.9%**, 10/10, z = +3.16 |
-/// | 4096 | both parallel, unchanged |
-///
-/// Below ~256 blocks threading measurably *loses* (0.54x at 144), so this is set
-/// above the break-even rather than at it. It applies per surface, so it governs
-/// each mip level independently — a 512^2 mip chain has three levels in the band
-/// this fixes.
+/// Match BC7 decode: spawn strips only when work is large enough.
 const ENCODE_PARALLEL_MIN_BLOCKS: usize = 512;
 
 pub fn encode_image(

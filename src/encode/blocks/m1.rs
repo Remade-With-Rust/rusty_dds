@@ -86,30 +86,44 @@ pub(super) fn try_bc7_mode1(pixels: &[[u8; 4]; 16], err_limit: i64) -> Option<([
     // biggest winners (startscreen +13.5 dB) are GRADIENT blocks where a
     // spatial split lets two shorter LINES fit; point-cluster bounds are
     // blind to that structure and killed 100% of those gains.
+    // Channel totals alongside `sq`, in the same pass. They make the per-
+    // partition accumulation half the work: subset 0's sum is the total minus
+    // subset 1's, and its count is `16 - cnt1`, so only one subset is walked.
     let mut sq = 0i64;
+    let mut tot = [0u32; 3];
     for p in pixels {
         for c in 0..3 {
-            sq += (p[c] as i64) * (p[c] as i64);
+            let v = p[c] as u32;
+            sq += (v as i64) * (v as i64);
+            tot[c] += v;
         }
     }
     let mut best: Option<([u8; 16], i64)> = None;
     let mut best_err = err_limit;
     for &part in &SHORTLIST {
         let tbl = &P2[part as usize];
-        let mut sum = [[0i64; 3]; 2];
-        let mut cnt = [0i64; 2];
+        // Subset 1 only, branchlessly: the table entry is already 0 or 1, so it
+        // doubles as the mask. Subset 0 is derived, not accumulated.
+        let mut s1 = [0u32; 3];
+        let mut c1 = 0u32;
         for (i, p) in pixels.iter().enumerate() {
-            let s = (tbl[i / 4][i % 4] & 0x7F) as usize;
+            let m = (tbl[i / 4][i % 4] & 0x7F) as u32;
             for c in 0..3 {
-                sum[s][c] += p[c] as i64;
+                s1[c] += p[c] as u32 * m;
             }
-            cnt[s] += 1;
+            c1 += m;
         }
+        let c0 = 16 - c1;
+        // 32-bit division, not 64-bit. A channel sum is at most 16 * 255 = 4080
+        // and its square at most 16 646 400, comfortably inside `u32`, and every
+        // value here is non-negative — so truncation is identical to the `i64`
+        // form this replaces, at a fraction of the divider's cost. Both counts
+        // are non-zero because every BC7 partition uses both subsets.
         let mut term = 0i64;
-        for s in 0..2 {
-            for c in 0..3 {
-                term += sum[s][c] * sum[s][c] / cnt[s];
-            }
+        for c in 0..3 {
+            let a1 = s1[c];
+            let a0 = tot[c] - a1;
+            term += (a0 * a0 / c0) as i64 + (a1 * a1 / c1) as i64;
         }
         // Promise gate: the 2-cluster bound must project a >=2x reduction —
         // a marginal promise never survives quantization + 3-bit indices.

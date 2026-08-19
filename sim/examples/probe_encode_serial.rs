@@ -25,7 +25,8 @@ fn main() {
     const W: u32 = 512; // 1024 blocks — below the parallel threshold
     let n = (W * W) as usize;
     let alpha_struct = std::env::var("PROBE_ALPHA").is_ok();
-    eprintln!("[probe] alpha_struct={alpha_struct}");
+    let opaque = std::env::var("PROBE_OPAQUE").is_ok();
+    eprintln!("[probe] alpha_struct={alpha_struct} opaque={opaque}");
     let mut px = Vec::with_capacity(n * 4);
     for i in 0..n {
         let x = (i as u32 % W) as f32 / W as f32;
@@ -41,7 +42,14 @@ fn main() {
             // runs at all (measured: 0 calls in 16384 blocks) while mode 5 only
             // reaches its rotation path. A fixture that never enters a mode
             // cannot measure a change to it.
-            if alpha_struct {
+            // PROBE_OPAQUE=1: alpha exactly 255 everywhere. This is the most
+            // common real texture and the ONLY one that reaches BC7 mode 1,
+            // whose gate is `a_lo == 255`. It also closes modes 4 and 5, whose
+            // gate is `a_hi - a_lo > 2`, so it exercises a completely different
+            // mode mix from the other two fixtures.
+            if opaque {
+                255
+            } else if alpha_struct {
                 v(0.5 + 0.5 * ((x * 160.0).sin() * (y * 96.0).cos()))
             } else {
                 v(0.6 + 0.4 * x * y)
