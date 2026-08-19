@@ -3,6 +3,63 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.3.14 - 2026-08-19
+
+**Vectorised palette gather for BC5.** An 8-entry palette looked up sixteen
+times per channel is exactly what `pshufb` does in one instruction.
+
+### The cost, isolated
+
+0.3.13 left the gather untouched and unmeasured. Isolating it properly:
+
+| probe | Mpx/s | implies |
+|---|---:|---|
+| full | ~371 | - |
+| index math kept, **table lookup removed** | ~655 | lookup ~43% |
+| both removed | ~789 | index math ~10% |
+
+An earlier probe had suggested the reverse - that the index arithmetic dominated
+- but it replaced the lookup index with a loop constant, so the compiler folded
+the load away *and* the arithmetic. A probe that removes more than it means to
+does not isolate anything.
+
+### Performance
+
+Eight samples per arm, alternating order: **378.2 -> 489.9 Mpx/s, +29.5%.**
+
+Against Microsoft DirectXTex on a cooked 1024^2 pack: **BC5U 652.8 vs 61.2 Mpx/s
+- 10.66x**, up from 7.62x; **7.16x** across all formats.
+
+### Two things that did not work
+
+- **Palette in a register instead of memory.** Holding the eight entries in a
+  `u64` and selecting with `>> (8 * idx)` to avoid a load measured **9.8%
+  slower**. An L1-resident table indexed by a computed value pipelines better
+  than a dependent multiply-then-variable-shift chain.
+- **Index bytes via a `[u8; 16]` array.** Building the sixteen index bytes into
+  an array and loading it as a vector is a store-forwarding stall - sixteen
+  narrow stores feeding one wide load - and gave only +11.6% with overlapping
+  arms. Building the vector in registers with `pdep` gave +25% cleanly.
+
+### Notes on the feature gate
+
+The kernel needs SSSE3 (`pshufb`) **and** BMI2 (`pdep`), and additionally needs
+`pdep` to be a real instruction rather than microcode.
+
+**On AMD Zen 1 and Zen 2, `pdep` is microcoded at ~18 cycles** against 3 on Intel
+Haswell-and-later and AMD Zen 3-and-later. The kernel issues four per block
+against a block budget near 100 cycles, so enabling it there would be a large
+*regression* on hardware that advertises BMI2. The gate therefore checks CPU
+vendor and family via `cpuid` and refuses AMD families below 0x19 (Zen 3).
+
+A portable register-only index unpack was measured as an alternative and is
+**neutral against the scalar path**, so it is not shipped - the win genuinely
+depends on fast `pdep`.
+
+- Decode output is unchanged, bit for bit; the gather is verified against the
+  scalar lookup over 5 000 randomised palette and index combinations.
+- SIMD path 94 tests, scalar fallback 88 (`--no-default-features`).
+
 ## 0.3.13 - 2026-08-19
 
 **BC5 writes a block row per store.** 0.3.12 left BC5 as the one BCn format that

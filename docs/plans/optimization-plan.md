@@ -2004,3 +2004,81 @@ worked.
   ceiling measured first (post-row-store), which this round did not redo.
 - BC2 and BC3 still have no real-content measurement; our packs contain neither.
 - Volume textures in both `decode_block_rows_into` and its HDR twin.
+
+---
+
+## §30 — The BC5 gather, and a probe that removed more than it meant to
+
+§29 closed BC5's store problem and left the gather explicitly open, with a note
+that its ceiling needed re-measuring first. Doing that changed the target.
+
+### The probe that lied
+
+§29's decomposition replaced the palette index with the loop variable:
+
+```rust
+let r = pr[col] as u32;      // col is 0..3 in an unrolled loop
+```
+
+That is a *constant* index. The compiler folded the load away **and** the
+arithmetic feeding it, so the probe measured the removal of both and was read as
+"the index math dominates". The correct probe keeps the arithmetic and drops only
+the lookup:
+
+```rust
+let r = ((ir >> sh) & 0x7) as u32;   // index math kept, no table read
+```
+
+| probe | Mpx/s | implies |
+|---|---:|---|
+| full | ~371 | — |
+| **lookup removed, index math kept** | ~655 | lookup ≈ **43%** |
+| both removed | ~789 | index math ≈ 10% |
+
+The conclusion inverted. **A probe that removes more than it names does not
+isolate anything** — and it is easy to write, because a constant index looks like
+a harmless simplification.
+
+### The kernel
+
+`pshufb` is a sixteen-entry byte gather in one instruction, which is precisely an
+eight-entry palette looked up sixteen times. Eight samples per arm, alternating:
+**378.2 → 489.9 Mpx/s, +29.5%.** Against DirectXTex, BC5U **10.66x**, up from
+7.62x; 7.16x across formats.
+
+### Two refutations on the way
+
+- **Palette in a register.** Holding the eight entries in a `u64` and selecting
+  with `>> (8 * idx)` to avoid a memory load: **9.8% slower**. An L1-resident
+  table indexed by a computed value pipelines better than a dependent
+  multiply → variable-shift → mask chain. The "avoid memory" instinct was simply
+  wrong here.
+- **Index bytes through an array.** Building sixteen index bytes into a
+  `[u8; 16]` and loading it as a vector gave **+11.6% with overlapping arms**;
+  building the same vector in registers with `pdep` gave **+25% cleanly**. The
+  difference is a store-forwarding stall — sixteen narrow stores feeding one wide
+  load — which is invisible in the source and shows up only as a disappointing
+  number.
+
+### The gate is part of the optimisation
+
+`pdep` is BMI2, and BMI2 being *present* is the wrong question. **On AMD Zen 1
+and Zen 2 `pdep` is microcoded at ~18 cycles**, against 3 on Intel Haswell+ and
+AMD Zen 3+. Four per block against a ~100-cycle block budget would make this a
+large regression on hardware that advertises the feature.
+
+So the gate checks vendor and family through `cpuid` and refuses AMD below family
+0x19. A portable register-only unpack was written and measured as the
+alternative: **neutral against scalar**, so the win genuinely depends on fast
+`pdep` and the gate is load-bearing rather than defensive.
+
+**`is_x86_feature_detected!` answers "is it encodable", not "is it fast".** For
+`pdep`/`pext` specifically, that gap is a factor of six.
+
+### Still open
+
+- The gather is now ~29% better and the ceiling was ~789 Mpx/s against 490 now;
+  the remaining gap is the `pshufb`, the unpacks and the four stores, all real
+  work.
+- BC2 and BC3 still have no real-content measurement; our packs contain neither.
+- Volume textures in both `decode_block_rows_into` and its HDR twin.

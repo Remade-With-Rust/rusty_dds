@@ -27,8 +27,10 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_mullo_epi16, _mm_packus_epi16, _mm_set_epi16, _mm_set_epi64x,
-    _mm_srai_epi16, _mm_storel_epi64,
+    __m128i, _mm_add_epi16, _mm_loadl_epi64, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
+    _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
+    _mm_set_epi64x as _set64, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 
 /// Pack four per-channel values into one register-ready `i64` of four `i16`
@@ -146,6 +148,135 @@ pub(super) fn write2_split(
     }
 }
 
+
+/// Can this CPU run the BC5 gather profitably?
+///
+/// Needs SSSE3 (`pshufb`) and BMI2 (`pdep`) — neither is baseline — and needs
+/// `pdep` to be fast rather than microcoded. See [`has_fast_pdep`]. Cached, and
+/// the scalar twin covers every CPU that fails this.
+#[inline]
+pub(super) fn has_ssse3() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("bmi2")
+            && has_fast_pdep()
+    })
+}
+
+/// Is `pdep` a real instruction on this CPU, or microcode?
+///
+/// BMI2 being *present* is not the question. On AMD Zen 1 and Zen 2 `pdep` and
+/// `pext` are microcoded at roughly **18 cycles** latency and 1/18 throughput,
+/// against 3 cycles on Intel Haswell-and-later and AMD Zen 3-and-later. The BC5
+/// kernel issues four of them per block against a block budget near 100 cycles,
+/// so enabling this path on Zen 1/2 would be a large *regression* on hardware
+/// that advertises the feature.
+///
+/// Zen 3 is family 0x19; Zen 1 and Zen 2 are 0x17. Anything not AMD is fine.
+fn has_fast_pdep() -> bool {
+    // SAFETY: `__cpuid` is available on all x86_64. Leaves 0 and 1 are
+    // architecturally defined and supported everywhere; no memory is touched.
+    let (vendor, family) = unsafe {
+        let v = core::arch::x86_64::__cpuid(0);
+        let f = core::arch::x86_64::__cpuid(1);
+        ((v.ebx, v.edx, v.ecx), f.eax)
+    };
+    // "AuthenticAMD" as three little-endian dwords.
+    let is_amd = vendor == (0x6874_7541, 0x6974_6e65, 0x444d_4163);
+    if !is_amd {
+        return true;
+    }
+    let base = (family >> 8) & 0xf;
+    let display = if base == 0xf {
+        base + ((family >> 20) & 0xff)
+    } else {
+        base
+    };
+    display >= 0x19
+}
+
+/// Gather both channels of a BC5 block and write all four RGBA rows.
+///
+/// The measured cost in BC5 was the **table lookup**, not the index arithmetic:
+/// with the lookup stubbed out the block runs at ~655 Mpx/s against ~371 with it,
+/// so thirty-two dependent byte loads were 43% of the call. `pshufb` is a
+/// sixteen-entry byte gather in one instruction, which is exactly the shape of an
+/// eight-entry palette lookup done sixteen times.
+///
+/// Returns `false` when SSSE3 is absent, so the caller keeps its scalar path.
+///
+/// `out` must span the four block rows, i.e. at least `3 * pitch + 16` bytes.
+pub(super) fn bc5_gather(
+    pr: &[u8; 8],
+    pg: &[u8; 8],
+    ir: u64,
+    ig: u64,
+    out: &mut [u8],
+    pitch: usize,
+) -> bool {
+    if !has_ssse3() {
+        return false;
+    }
+    debug_assert!(out.len() >= 3 * pitch + 16);
+    // SAFETY: guarded by the `has_ssse3` check above, so every intrinsic used is
+    // available. The four stores write sixteen bytes at `0, pitch, 2*pitch,
+    // 3*pitch`, all within the `3 * pitch + 16` the caller guarantees; the loads
+    // read eight bytes from `[u8; 8]` palettes and sixteen from local arrays.
+    // Nothing is aligned-assuming and no pointer escapes.
+    unsafe { bc5_gather_ssse3(pr, pg, ir, ig, out, pitch) }
+    true
+}
+
+#[target_feature(enable = "ssse3,bmi2")]
+unsafe fn bc5_gather_ssse3(
+    pr: &[u8; 8],
+    pg: &[u8; 8],
+    ir: u64,
+    ig: u64,
+    out: &mut [u8],
+    pitch: usize,
+) {
+    // Sixteen 3-bit indices per channel, one byte each. These extractions are
+    // already independent — the index arithmetic measured at only ~10% of the
+    // call — so they stay scalar rather than fighting a 3-bit field unpack in
+    // vector form.
+    // Sixteen 3-bit indices per channel, one per byte, built entirely in
+    // registers. Writing them to a `[u8; 16]` and loading it back is the classic
+    // store-forwarding stall — sixteen narrow stores feeding one wide load —
+    // and it ate most of the gather win when measured that way.
+    //
+    // `pdep` with mask 0x0707..07 deposits each 3-bit group into its own byte,
+    // which is exactly the unpack needed, at two instructions per eight pixels.
+    const SPREAD: u64 = 0x0707_0707_0707_0707;
+    let idx_vec = |w: u64| {
+        _set64(
+            core::arch::x86_64::_pdep_u64(w >> 24, SPREAD) as i64,
+            core::arch::x86_64::_pdep_u64(w, SPREAD) as i64,
+        )
+    };
+
+    let pal_r = _mm_loadl_epi64(pr.as_ptr() as *const __m128i);
+    let pal_g = _mm_loadl_epi64(pg.as_ptr() as *const __m128i);
+    let rv = _mm_shuffle_epi8(pal_r, idx_vec(ir));
+    let gv = _mm_shuffle_epi8(pal_g, idx_vec(ig));
+
+    // Interleave to RGBA. `ba` is 0x00,0xFF per 16-bit lane: blue zero, alpha
+    // opaque, which is what BC5 expands to.
+    let ba = _mm_set1_epi16(0xFF00u16 as i16);
+    let rg_lo = _mm_unpacklo_epi8(rv, gv); // pixels 0..8 as (r,g) pairs
+    let rg_hi = _mm_unpackhi_epi8(rv, gv); // pixels 8..16
+    let rows = [
+        _mm_unpacklo_epi16(rg_lo, ba),
+        _mm_unpackhi_epi16(rg_lo, ba),
+        _mm_unpacklo_epi16(rg_hi, ba),
+        _mm_unpackhi_epi16(rg_hi, ba),
+    ];
+    for (r, row) in rows.into_iter().enumerate() {
+        _mm_storeu_si128(out.as_mut_ptr().add(r * pitch) as *mut __m128i, row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +345,49 @@ mod tests {
                 };
                 assert_eq!(got[lane], want, "alpha_lane {alpha_lane}, lane {lane}");
             }
+        }
+    }
+
+    /// The gather must reproduce the scalar palette lookup exactly, for every
+    /// index value and both channels, including the palette entries a wrong
+    /// `pshufb` mask would silently swap.
+    #[test]
+    fn bc5_gather_matches_scalar() {
+        if !has_ssse3() {
+            return;
+        }
+        let mut state = 0x0bad_c0de_0bad_c0deu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..5_000 {
+            let mut pr = [0u8; 8];
+            let mut pg = [0u8; 8];
+            pr.copy_from_slice(&next().to_le_bytes());
+            pg.copy_from_slice(&next().to_le_bytes());
+            let (ir, ig) = match case {
+                0 => (0u64, 0u64),
+                1 => (u64::MAX >> 16, u64::MAX >> 16),
+                _ => (next() >> 16, next() >> 16),
+            };
+
+            let pitch = 16;
+            let mut got = [0u8; 64];
+            assert!(bc5_gather(&pr, &pg, ir, ig, &mut got, pitch));
+
+            let mut want = [0u8; 64];
+            for p in 0..16usize {
+                let sh = 3 * p;
+                let o = (p / 4) * pitch + (p % 4) * 4;
+                want[o] = pr[((ir >> sh) & 0x7) as usize];
+                want[o + 1] = pg[((ig >> sh) & 0x7) as usize];
+                want[o + 2] = 0;
+                want[o + 3] = 255;
+            }
+            assert_eq!(got, want, "case {case}");
         }
     }
 }

@@ -439,6 +439,15 @@ fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
     let pg = bc4_palette(blk[8], blk[9], is_signed);
     let ir = bc4_indices(&blk[..8]);
     let ig = bc4_indices(&blk[8..16]);
+
+    // One `pshufb` per channel replaces thirty-two dependent byte loads. Needs
+    // SSSE3, so it is detected and the scalar path below stays as the twin.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if out.len() >= 3 * pitch + 16
+        && crate::decode::simd::bc5_gather(&pr, &pg, ir, ig, out, pitch)
+    {
+        return;
+    }
     // A whole block row per store. Four separate four-byte `copy_from_slice`
     // calls carry four slice range-checks; building the row and writing it once
     // carries one, and the row is contiguous in the destination by construction.
