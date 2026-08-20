@@ -33,16 +33,20 @@
 
 | Board (24 cases) | rusty_dds vs DirectXTex | Artifact |
 |---|---|---|
-| **Encode quality (PSNR)** | **22 higher / 2 tie / 0 lower** (±0.25 dB) † | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
-| **Encode speed** | **21 ahead / 3 behind** (behind = 3 signed cases at ~1.10×) ‡ | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode quality (PSNR)** | **22 higher / 2 tie / 0 lower** (±0.25 dB) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode speed** | **24 ahead / 0 behind** | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
 | **Decode speed** | **24 ahead / 0 behind** | [decode-vs-baselines](docs/artifacts/decode-vs-baselines.md) |
-| Synthetic C×X quality grid | 0 DirectXTex-higher cases | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
+| Synthetic C×X quality grid (54 cases) | **19 higher / 18 tie / 17 DirectXTex-higher** | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
 
-† Quality is deterministic per source, so it is valid on any machine; this row is a
-re-measure taken after the BC7 mode-1/4/5 and BC1 lattice bricks, which postdate the
-committed board file. ‡ Speed row is the last **sanity-gated** board run (a run is
-rejected when byte-identical paths drift from their known standing); a refresh is
-pending a quiet machine.
+All four rows re-measured at 0.7.0 against the same DirectXTex build. Two changed:
+encode speed was **21 ahead / 3 behind** — the three signed cases that trailed at
+~1.10× are now ahead — and the synthetic grid row previously read *"0
+DirectXTex-higher cases"*, which its own linked artifact never supported. That grid
+is 54 synthetic content×context cases, and **DirectXTex is genuinely higher on 17
+of them** — mostly BC2 and volume-texture BC1/BC2/BC3, where it holds a few tenths
+of a dB. It is stated plainly here rather than aggregated away. rusty_dds improved
+on that grid over the encoder campaign (12 → 19 higher, absorbing ties), but it
+does not sweep it.
 
 Notes on those numbers (2026-08 encoder campaign):
 
@@ -72,28 +76,40 @@ cargo run --release --example harvest_rdo           # rate/quality ladder (defla
 powershell -File bench/ab_encode.ps1                # pinned ABBA A/B harness
 ```
 
-**Encoder vs the 0.1.2 release** — real-content corpus (ambientCG PNG + 16 CryTIF from
-CRYTEK GameSDK + 10 USC-SIPI TIFF), pinned, interleaved:
+**Encoder vs the 0.1.2 release** — real-content corpus, 102 cases (ambientCG PNG +
+16 CryTIF from CRYTEK GameSDK + 10 USC-SIPI TIFF). Both arms run the *same*
+harness; only the library differs, with 0.1.2 built from commit `286d070`.
+Speed is that harness's best-of-N per case, summed.
 
 | | 0.1.2 | now |
 |---|---|---|
-| Cases with higher PSNR | — | **89 / 102** (0 regressed) |
-| Whole-corpus encode CPU | 44.6–45.6 s | **38.0–39.0 s** (~1.17× less, 6/6 pairs, zero overlap) |
-| BC7 wall (pinned min, 25 cases) | 2364 ms | **1167 ms** (2.03×) |
-| Largest single-case gain | — | **+13.53 dB** (BC7, UI startscreen) |
+| Cases with higher PSNR | — | **85 / 102**, **0 regressed** |
+| Whole-corpus encode | 0.851 s | **0.644 s** (1.32× less) |
+| BC7 (25 cases) | 575 ms | **211 ms** (2.73×) |
+| Largest single-case gain | — | **+13.53 dB** (BC7, `crytif_startscreen`) |
+
+Four of the 102 cases are lossless (infinite PSNR) and cannot move, so the quality
+row compares the 98 lossy ones: 85 higher, 13 unchanged, none worse. The absolute
+seconds differ from earlier revisions of this table because they now come from the
+`bench_encode_corpus` command below rather than an unrecorded protocol — the
+ratios are what carry over.
 
 **BC7 encode** — 512², forced serial, process-pinned, **process CPU time**, 14
 paired samples with the leading arm alternated, against 0.3.30. Byte-identical
-throughout. Two fixtures, because the default one never enters BC7 mode 4 at all
-(its alpha varies by under one code across a 4-pixel span, so the mode's gate
-never fires) — a fixture that never enters a mode cannot measure a change to it:
+throughout. **Three** fixtures, because BC7's mode gates partition on alpha and a
+fixture that never enters a mode cannot measure a change to it. The default one
+never enters mode 4 at all — its alpha varies by under one code across a 4-pixel
+span, so `a_hi - a_lo > 2` never fires — and only fully-opaque alpha reaches mode
+1, whose gate is `a_lo == 255`:
 
 | fixture | 0.3.30 | now | verdict |
 |---|---|---|---|
-| alpha-structured (modes 4 + 5 both run) | 83.6123 ms | **30.9710 ms** | 14/14, z = +3.74, **+63.0%** (2.70×) |
-| default | 33.5752 ms | **22.8795 ms** | 14/14, z = +3.74, **+31.9%** (1.47×) |
+| alpha-structured (modes 4 + 5 both run) | 112.7387 ms | **41.1241 ms** | 12/12, z = +3.46, **+63.5%** (2.74×) |
+| opaque (mode 1 runs; 4 and 5 do not) | 47.9601 ms | **32.7691 ms** | 12/12, z = +3.46, **+31.7%** (1.46×) |
+| default | 45.5729 ms | **30.5989 ms** | 12/12, z = +3.46, **+32.9%** (1.49×) |
 
 ```sh
+# PROBE_ALPHA=1 for the alpha-structured fixture, PROBE_OPAQUE=1 for the opaque one
 PROBE_FMT=bc7 PROBE_ALPHA=1 cargo run --release --example probe_encode_serial --manifest-path sim/Cargo.toml
 ```
 
@@ -104,12 +120,12 @@ twin it replaces.
 
 | Format | 0.3.27 | now | verdict |
 |---|---|---|---|
-| BC1 | 0.1445 ms | **0.0878 ms** | 12/12, z = +3.46, **+39.2%** |
-| BC2 | 0.2471 ms | **0.1019 ms** | 12/12, z = +3.46, **+58.7%** |
-| BC3 | 0.2894 ms | **0.1605 ms** | 12/12, z = +3.46, **+44.5%** |
-| BC4 | 0.1393 ms | **0.1104 ms** | 12/12, z = +3.46, **+20.8%** |
-| BC5 | 0.1551 ms | 0.1547 ms | untouched — flat at z = +0.33 |
-| BC6H | 0.7129 ms | **0.5046 ms** | 12/12, z = +3.46, **+29.2%** |
+| BC1 | 0.2031 ms | **0.1309 ms** | 12/12, z = +3.46, **+35.6%** |
+| BC2 | 0.3278 ms | **0.1390 ms** | 12/12, z = +3.46, **+57.6%** |
+| BC3 | 0.4193 ms | **0.2259 ms** | 12/12, z = +3.46, **+46.1%** |
+| BC4 | 0.1813 ms | **0.0912 ms** | 12/12, z = +3.46, **+49.7%** |
+| BC5 | 0.2077 ms | **0.1651 ms** | 12/12, z = +3.46, **+20.5%** |
+| BC6H | 0.9635 ms | **0.5078 ms** | 12/12, z = +3.46, **+47.3%** |
 
 ```sh
 DEC_FMT=bc1 cargo run --release --example probe_dec --manifest-path sim/Cargo.toml

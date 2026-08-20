@@ -21,7 +21,7 @@
       ],
       "content": "bc1",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": 0.1,
+      "delta_rusty_minus_dxtex_db": 0.26,
       "directxtex": {
         "error": null,
         "max_abs": 19,
@@ -33,12 +33,12 @@
       "id": "bc1__X-2D",
       "rusty_dds": {
         "error": null,
-        "max_abs": 18,
+        "max_abs": 16,
         "ok": true,
-        "psnr_db": 33.28,
+        "psnr_db": 33.44,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -49,7 +49,7 @@
       ],
       "content": "bc2",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": -1.14,
+      "delta_rusty_minus_dxtex_db": -1.04,
       "directxtex": {
         "error": null,
         "max_abs": 19,
@@ -61,9 +61,9 @@
       "id": "bc2__X-2D",
       "rusty_dds": {
         "error": null,
-        "max_abs": 18,
+        "max_abs": 16,
         "ok": true,
-        "psnr_db": 32.3,
+        "psnr_db": 32.4,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -77,7 +77,7 @@
       ],
       "content": "bc3",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": 0.09,
+      "delta_rusty_minus_dxtex_db": 0.25,
       "directxtex": {
         "error": null,
         "max_abs": 19,
@@ -89,12 +89,12 @@
       "id": "bc3__X-2D",
       "rusty_dds": {
         "error": null,
-        "max_abs": 18,
+        "max_abs": 16,
         "ok": true,
-        "psnr_db": 34.52,
+        "psnr_db": 34.68,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -207,7 +207,7 @@
       ],
       "content": "bc7",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": -0.04,
+      "delta_rusty_minus_dxtex_db": 0.96,
       "directxtex": {
         "error": null,
         "max_abs": 17,
@@ -219,12 +219,12 @@
       "id": "bc7__X-2D",
       "rusty_dds": {
         "error": null,
-        "max_abs": 17,
+        "max_abs": 15,
         "ok": true,
-        "psnr_db": 35.09,
+        "psnr_db": 36.09,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -559,7 +559,7 @@
       ],
       "content": "bc1",
       "context": "X-ARRAY",
-      "delta_rusty_minus_dxtex_db": -0.36,
+      "delta_rusty_minus_dxtex_db": -0.31,
       "directxtex": {
         "error": null,
         "max_abs": 27,
@@ -571,9 +571,9 @@
       "id": "bc1__X-ARRAY",
       "rusty_dds": {
         "error": null,
-        "max_abs": 32,
+        "max_abs": 31,
         "ok": true,
-        "psnr_db": 27.44,
+        "psnr_db": 27.48,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -587,7 +587,7 @@
       ],
       "content": "bc2",
       "context": "X-ARRAY",
-      "delta_rusty_minus_dxtex_db": -0.67,
+      "delta_rusty_minus_dxtex_db": -0.63,
       "directxtex": {
         "error": null,
         "max_abs": 27,
@@ -599,9 +599,9 @@
       "id": "bc2__X-ARRAY",
       "rusty_dds": {
         "error": null,
-        "max_abs": 32,
+        "max_abs": 31,
         "ok": true,
-        "psnr_db": 28.07,
+        "psnr_db": 28.11,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -615,7 +615,7 @@
       ],
       "content": "bc3",
       "context": "X-ARRAY",
-      "delta_rusty_minus_dxtex_db": -0.36,
+      "delta_rusty_minus_dxtex_db": -0.31,
       "directxtex": {
         "error": null,
         "max_abs": 27,
@@ -627,9 +627,9 @@
       "id": "bc3__X-ARRAY",
       "rusty_dds": {
         "error": null,
-        "max_abs": 32,
+        "max_abs": 31,
         "ok": true,
-        "psnr_db": 28.68,
+        "psnr_db": 28.73,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -745,7 +745,7 @@
       ],
       "content": "bc7",
       "context": "X-ARRAY",
-      "delta_rusty_minus_dxtex_db": -0.02,
+      "delta_rusty_minus_dxtex_db": 1.96,
       "directxtex": {
         "error": null,
         "max_abs": 28,
@@ -759,10 +759,10 @@
         "error": null,
         "max_abs": 25,
         "ok": true,
-        "psnr_db": 29.14,
+        "psnr_db": 31.11,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -828,7 +828,7 @@
       ],
       "content": "bc1",
       "context": "X-CUBE",
-      "delta_rusty_minus_dxtex_db": -0.36,
+      "delta_rusty_minus_dxtex_db": -0.31,
       "directxtex": {
         "error": null,
         "max_abs": 27,
@@ -840,9 +840,9 @@
       "id": "bc1__X-CUBE",
       "rusty_dds": {
         "error": null,
-        "max_abs": 32,
+        "max_abs": 31,
         "ok": true,
-        "psnr_db": 27.44,
+        "psnr_db": 27.48,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -856,7 +856,7 @@
       ],
       "content": "bc3",
       "context": "X-CUBE",
-      "delta_rusty_minus_dxtex_db": -0.36,
+      "delta_rusty_minus_dxtex_db": -0.31,
       "directxtex": {
         "error": null,
         "max_abs": 27,
@@ -868,9 +868,9 @@
       "id": "bc3__X-CUBE",
       "rusty_dds": {
         "error": null,
-        "max_abs": 32,
+        "max_abs": 31,
         "ok": true,
-        "psnr_db": 28.68,
+        "psnr_db": 28.73,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -884,7 +884,7 @@
       ],
       "content": "bc7",
       "context": "X-CUBE",
-      "delta_rusty_minus_dxtex_db": -0.02,
+      "delta_rusty_minus_dxtex_db": 1.96,
       "directxtex": {
         "error": null,
         "max_abs": 28,
@@ -898,10 +898,10 @@
         "error": null,
         "max_abs": 25,
         "ok": true,
-        "psnr_db": 29.14,
+        "psnr_db": 31.11,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -939,7 +939,7 @@
       ],
       "content": "bc1",
       "context": "X-NPOT",
-      "delta_rusty_minus_dxtex_db": -0.35,
+      "delta_rusty_minus_dxtex_db": -0.36,
       "directxtex": {
         "error": null,
         "max_abs": 86,
@@ -953,7 +953,7 @@
         "error": null,
         "max_abs": 96,
         "ok": true,
-        "psnr_db": 16.21,
+        "psnr_db": 16.2,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -967,7 +967,7 @@
       ],
       "content": "bc2",
       "context": "X-NPOT",
-      "delta_rusty_minus_dxtex_db": -0.35,
+      "delta_rusty_minus_dxtex_db": -0.36,
       "directxtex": {
         "error": null,
         "max_abs": 86,
@@ -981,7 +981,7 @@
         "error": null,
         "max_abs": 96,
         "ok": true,
-        "psnr_db": 17.46,
+        "psnr_db": 17.44,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -995,7 +995,7 @@
       ],
       "content": "bc3",
       "context": "X-NPOT",
-      "delta_rusty_minus_dxtex_db": -0.35,
+      "delta_rusty_minus_dxtex_db": -0.36,
       "directxtex": {
         "error": null,
         "max_abs": 86,
@@ -1009,7 +1009,7 @@
         "error": null,
         "max_abs": 96,
         "ok": true,
-        "psnr_db": 17.46,
+        "psnr_db": 17.45,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -1125,7 +1125,7 @@
       ],
       "content": "bc7",
       "context": "X-NPOT",
-      "delta_rusty_minus_dxtex_db": -0.1,
+      "delta_rusty_minus_dxtex_db": 12.46,
       "directxtex": {
         "error": null,
         "max_abs": 85,
@@ -1137,12 +1137,12 @@
       "id": "bc7__X-NPOT",
       "rusty_dds": {
         "error": null,
-        "max_abs": 100,
+        "max_abs": 27,
         "ok": true,
-        "psnr_db": 17.66,
+        "psnr_db": 30.22,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -1208,7 +1208,7 @@
       ],
       "content": "bc1",
       "context": "X-VOL",
-      "delta_rusty_minus_dxtex_db": -0.38,
+      "delta_rusty_minus_dxtex_db": -0.36,
       "directxtex": {
         "error": null,
         "max_abs": 50,
@@ -1220,9 +1220,9 @@
       "id": "bc1__X-VOL",
       "rusty_dds": {
         "error": null,
-        "max_abs": 65,
+        "max_abs": 59,
         "ok": true,
-        "psnr_db": 21.46,
+        "psnr_db": 21.49,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -1236,7 +1236,7 @@
       ],
       "content": "bc2",
       "context": "X-VOL",
-      "delta_rusty_minus_dxtex_db": -0.49,
+      "delta_rusty_minus_dxtex_db": -0.47,
       "directxtex": {
         "error": null,
         "max_abs": 50,
@@ -1248,9 +1248,9 @@
       "id": "bc2__X-VOL",
       "rusty_dds": {
         "error": null,
-        "max_abs": 65,
+        "max_abs": 59,
         "ok": true,
-        "psnr_db": 22.54,
+        "psnr_db": 22.56,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -1264,7 +1264,7 @@
       ],
       "content": "bc3",
       "context": "X-VOL",
-      "delta_rusty_minus_dxtex_db": -0.38,
+      "delta_rusty_minus_dxtex_db": -0.36,
       "directxtex": {
         "error": null,
         "max_abs": 50,
@@ -1276,9 +1276,9 @@
       "id": "bc3__X-VOL",
       "rusty_dds": {
         "error": null,
-        "max_abs": 65,
+        "max_abs": 59,
         "ok": true,
-        "psnr_db": 22.71,
+        "psnr_db": 22.74,
         "psnr_infinite": false
       },
       "verdict": "directxtex_higher_psnr"
@@ -1394,7 +1394,7 @@
       ],
       "content": "bc7",
       "context": "X-VOL",
-      "delta_rusty_minus_dxtex_db": -0.01,
+      "delta_rusty_minus_dxtex_db": 3.0,
       "directxtex": {
         "error": null,
         "max_abs": 58,
@@ -1406,12 +1406,12 @@
       "id": "bc7__X-VOL",
       "rusty_dds": {
         "error": null,
-        "max_abs": 50,
+        "max_abs": 49,
         "ok": true,
-        "psnr_db": 23.1,
+        "psnr_db": 26.1,
         "psnr_infinite": false
       },
-      "verdict": "tie"
+      "verdict": "rusty_higher_psnr"
     },
     {
       "channels": [
@@ -1474,7 +1474,7 @@
     "cases": 54,
     "compared": 54,
     "directxtex_higher_psnr": 17,
-    "rusty_higher_psnr": 12,
-    "tie": 25
+    "rusty_higher_psnr": 19,
+    "tie": 18
   }
 }
