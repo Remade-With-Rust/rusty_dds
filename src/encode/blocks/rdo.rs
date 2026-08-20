@@ -632,39 +632,79 @@ fn mode6_sse(
     mode6_chan_errs(pixels, q0, p0, q1, p1, indices).iter().sum()
 }
 
+/// `(quantized value, squared reconstruction error)` for every channel value and
+/// both p-bits.
+///
+/// The search this replaces is a pure function of `(value, p)` over a **256 x 2**
+/// domain — 512 answers total — yet it ran 33 times per block, each time scanning
+/// three candidates and calling `unquantize_7p_chan` on each. The table is 2 KiB
+/// and built at compile time.
+///
+/// The error is carried alongside because [`dp0_choice`] needs exactly that sum
+/// and was recomputing it through a second quantize plus an unquantize.
+///
+/// Tie-break is the scalar's: strict `<`, so the lowest candidate wins, and the
+/// scan order is `base-1, base, base+1` clamped to `0..=127`.
+const fn build_q7_table() -> [[(u8, u16); 256]; 2] {
+    let mut t = [[(0u8, 0u16); 256]; 2];
+    let mut p = 0usize;
+    while p < 2 {
+        let mut v = 0usize;
+        while v < 256 {
+            let base = (v >> 1) as u8;
+            let lo = if base == 0 { 0 } else { base - 1 };
+            let hi = if base + 1 > 127 { 127 } else { base + 1 };
+            let mut bq = if base < 127 { base } else { 127 };
+            let mut be = i32::MAX;
+            let mut cand = lo;
+            while cand <= hi {
+                let recon = (((cand as u32) << 1) | p as u32) as u8;
+                let d = recon as i32 - v as i32;
+                let e = d * d;
+                if e < be {
+                    be = e;
+                    bq = cand;
+                }
+                cand += 1;
+            }
+            t[p][v] = (bq, be as u16);
+            v += 1;
+        }
+        p += 1;
+    }
+    t
+}
+
+static Q7: [[(u8, u16); 256]; 2] = build_q7_table();
+
 /// Per-channel best 7-bit quantization under a FIXED p-bit.
 fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
-    let mut q = [0u8; 4];
-    for i in 0..4 {
-        let base = c[i] >> 1;
-        let mut bq = base.min(127);
-        let mut be = i32::MAX;
-        for cand in base.saturating_sub(1)..=(base + 1).min(127) {
-            let recon = unquantize_7p_chan(cand, p);
-            let e = (recon as i32 - c[i] as i32).pow(2);
-            if e < be {
-                be = e;
-                bq = cand;
-            }
-        }
-        q[i] = bq;
-    }
-    (q, p)
+    let row = &Q7[p as usize];
+    (
+        [
+            row[c[0] as usize].0,
+            row[c[1] as usize].0,
+            row[c[2] as usize].0,
+            row[c[3] as usize].0,
+        ],
+        p,
+    )
 }
 
 /// Pick our own p0 for the tail-reuse candidate (endpoint 0 is free).
 fn dp0_choice(pixels: &[[u8; 4]; 16], e0: [u8; 4]) -> u8 {
     let _ = pixels;
-    // Cheap: pick the p that reconstructs e0 best on average.
-    let mut errs = [0i32; 2];
-    for (p, e) in errs.iter_mut().enumerate() {
-        let (q, _) = quantize_7p_fixed(e0, p as u8);
-        let r = unquantize_7p(q, p as u8);
-        for c in 0..4 {
-            *e += (r[c] as i32 - e0[c] as i32).pow(2);
-        }
-    }
-    (errs[1] < errs[0]) as u8
+    // The reconstruction error this compares is already in the table, so the
+    // two quantize passes and two unquantize passes it used to run are just
+    // eight lookups and six adds. Same `errs[1] < errs[0]` tie-break.
+    let sum = |p: usize| -> i32 {
+        let row = &Q7[p];
+        row[e0[0] as usize].1 as i32
+            + row[e0[1] as usize].1 as i32
+            + row[e0[2] as usize].1 as i32
+            + row[e0[3] as usize].1 as i32
+    };
+    (sum(1) < sum(0)) as u8
 }
 
 /// Parse a mode-6 block back to (q0, p0, q1, p1, indices).
