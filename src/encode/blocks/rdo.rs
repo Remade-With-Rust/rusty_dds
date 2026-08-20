@@ -67,6 +67,8 @@ pub(crate) fn encode_image_bc1_rdo(
     // the index tables, keep the most popular DICT_N as global candidates.
     // The baseline blocks are kept and reused by pass 2 (no re-encode).
     let (dict, base_blocks) = build_table_dict(rgba, w, h, blocks_x, blocks_y);
+    // The dictionary is fixed for the whole image, so its LS terms are too.
+    let dict_ls: Vec<Option<TableLs>> = dict.iter().map(|&t| table_ls(t)).collect();
 
     // Previous ROW of emitted blocks: vertical repetition is the dominant
     // long-range structure in textures, and deflate's 32KB window covers a
@@ -76,6 +78,8 @@ pub(crate) fn encode_image_bc1_rdo(
     // Ring buffers of recently emitted structures.
     let mut recent_blocks: [[u8; 8]; WINDOW] = [[0u8; 8]; WINDOW];
     let mut recent_tables: [u32; WINDOW] = [0; WINDOW];
+    // Computed once as a table enters the window, not once per block that tries it.
+    let mut recent_ls: [Option<TableLs>; WINDOW] = [None; WINDOW];
     let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
     let mut filled = 0usize;
     let mut prev_block = [0u8; 8];
@@ -96,6 +100,7 @@ pub(crate) fn encode_image_bc1_rdo(
                 let slot = (by * blocks_x + bx) % WINDOW;
                 recent_blocks[slot] = base;
                 recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
+                recent_ls[slot] = table_ls(recent_tables[slot]);
                 recent_eps[slot] = (
                     u16::from_le_bytes([base[0], base[1]]),
                     u16::from_le_bytes([base[2], base[3]]),
@@ -144,7 +149,10 @@ pub(crate) fn encode_image_bc1_rdo(
                     let table = recent_tables[k];
                     let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                     if lim > 0 {
-                        if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
+                        if let Some(cand) = recent_ls[k]
+                            .as_ref()
+                            .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                        {
                             if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
                                 let j = err as f32 - lam * SAVE_PART;
                                 if j < best_j {
@@ -173,7 +181,7 @@ pub(crate) fn encode_image_bc1_rdo(
                 }
                 // 4. Global popular tables (two-pass dictionary): the whole
                 // image converges on the same few 4-byte index strings.
-                for &table in dict.iter() {
+                for (di, &table) in dict.iter().enumerate() {
                     if recent_tables[..n].contains(&table) {
                         continue; // already tried via the window
                     }
@@ -181,7 +189,10 @@ pub(crate) fn encode_image_bc1_rdo(
                     if lim <= 0 {
                         break;
                     }
-                    if let Some(cand) = refit_endpoints_for_table(&pixels, table) {
+                    if let Some(cand) = dict_ls[di]
+                        .as_ref()
+                        .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                    {
                         if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
                             let j = err as f32 - lam * SAVE_PART;
                             if j < best_j {
@@ -210,6 +221,7 @@ pub(crate) fn encode_image_bc1_rdo(
             recent_blocks[slot] = best;
             recent_tables[slot] =
                 u32::from_le_bytes([best[4], best[5], best[6], best[7]]);
+            recent_ls[slot] = table_ls(recent_tables[slot]);
             recent_eps[slot] = (
                 u16::from_le_bytes([best[0], best[1]]),
                 u16::from_le_bytes([best[2], best[3]]),
@@ -270,30 +282,72 @@ fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
 /// and emit a 4-color block carrying exactly that table. Returns None for
 /// degenerate weight layouts or when quantized endpoints collapse into the
 /// punch-mode ordering (which would reinterpret the table).
-fn refit_endpoints_for_table(pixels: &[[u8; 4]; 16], table: u32) -> Option<[u8; 8]> {
+/// The half of the normal equations that depends **only on the index table**.
+///
+/// `a00`, `a01`, `a11` and therefore `det` are sums over per-pixel weights, and
+/// those weights come from the table alone — no pixel value enters them. Yet
+/// `refit_endpoints_for_table` ran **17 times per block** (measured), rebuilding
+/// them every time, for tables drawn from a 16-entry sliding window and a
+/// 24-entry dictionary. Computing them once as a table enters either structure
+/// removes a 16-iteration accumulation, a determinant and a degeneracy test from
+/// every one of those calls.
+///
+/// The raw terms are stored rather than `a11/det` etc. because the caller's
+/// expression is `(a11 * b0 - a01 * b1) / det`, and pre-dividing would change
+/// the floating-point result.
+#[derive(Clone, Copy)]
+struct TableLs {
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+    /// `(1 - w, w)` per pixel position — also table-only.
+    uw: [(f32, f32); 16],
+}
+
+fn table_ls(table: u32) -> Option<TableLs> {
     // 4-color weights toward c1 by index: 0 -> 0, 1 -> 1, 2 -> 1/3, 3 -> 2/3.
     const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
     let mut a00 = 0f32;
     let mut a01 = 0f32;
     let mut a11 = 0f32;
-    let mut b0 = [0f32; 3];
-    let mut b1 = [0f32; 3];
-    for (i, p) in pixels.iter().enumerate() {
+    let mut uw = [(0f32, 0f32); 16];
+    for (i, slot) in uw.iter_mut().enumerate() {
         let wgt = W[((table >> (2 * i)) & 3) as usize];
         let u = 1.0 - wgt;
         a00 += u * u;
         a01 += u * wgt;
         a11 += wgt * wgt;
+        *slot = (u, wgt);
+    }
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() < 1e-4 {
+        return None;
+    }
+    Some(TableLs { a00, a01, a11, det, uw })
+}
+
+fn refit_endpoints_for_table(pixels: &[[u8; 4]; 16], table: u32) -> Option<[u8; 8]> {
+    refit_with_ls(pixels, &table_ls(table)?, table)
+}
+
+/// The pixel-dependent half: accumulate `b0`/`b1` and solve.
+///
+/// The accumulation order is the original's — ascending `i`, `b0` then `b1` —
+/// so the float sums are bit-identical, and the solve is the original
+/// expression unchanged.
+fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8; 8]> {
+    let mut b0 = [0f32; 3];
+    let mut b1 = [0f32; 3];
+    for (i, p) in pixels.iter().enumerate() {
+        let (u, wgt) = ls.uw[i];
         for c in 0..3 {
             let x = p[c] as f32;
             b0[c] += u * x;
             b1[c] += wgt * x;
         }
     }
-    let det = a00 * a11 - a01 * a01;
-    if det.abs() < 1e-4 {
-        return None;
-    }
+    let (a00, a01, a11, det) = (ls.a00, ls.a01, ls.a11, ls.det);
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
     for c in 0..3 {
