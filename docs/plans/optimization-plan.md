@@ -3554,3 +3554,64 @@ Two mechanisms, and the second is the real one:
 Same wall as the three refutations already recorded on `bc5_block_rgba`: the
 lever is chain length, not operation count. Recorded on the function itself so it
 is not retried.
+
+## §61 — RDO: the most expensive path in the crate, and the first time it was measured
+
+The RDO ladder in the README has always reported rate and quality. Nobody had
+ever measured what it *costs*. 512^2, pinned, process CPU, `probe_rdo_speed`:
+
+| format | RDO off (λ=0) | RDO on (λ=25) | |
+|---|---|---|---|
+| BC1 | 2.60 ms | **67.71 ms** | **26x** |
+| BC7 | 46.88 ms | **312.5 ms** | 6.7x |
+
+**And the RDO path is entirely serial.** BC7 at λ=0 reads 46.9 ms CPU against
+10.7 ms wall — 4.4x parallel. At λ=25 it reads 312.5 CPU against 320 wall, i.e.
+one thread. The normal encoder parallelises; the RDO encoder does not, because
+each block is scored against a sliding window of blocks already emitted.
+
+That single structural fact is worth more than every function below combined.
+It is listed separately because unlike them it would **change output**: per-strip
+windows produce different match decisions, so the rate/quality ladder moves. That
+makes it a quality-gated change, not a byte-identical one.
+
+## §62 — Ten RDO functions, with the evidence for each
+
+Call counts are per block, from atomic counters. Shares are doubling probes
+(marginal cost of a second identical call), which are lower bounds on
+latency-bound code.
+
+### BC7 RDO
+
+| # | function | calls/block | evidence | the opportunity |
+|---|---|---|---|---|
+| 1 | `mode6_sse` | **201.5** | **~51% of BC7 RDO** | Its caller perturbs **one channel of one endpoint by ±1**, yet it rebuilds all 16 palette entries across all 4 channels and re-sums all 64 error terms. Keeping per-channel error contributions and recomputing only the perturbed channel is ~4x less work. The 16x4 error loop is also exactly the shape already vectorised in `encode/blocks/simd.rs`. |
+| 2 | `polish_mode6_endpoints` | 8.27 | owns the `2 x 4 x 2` sweep driving #1 | Same incremental-error state as #1. It also copies `t0`/`t1` afresh for every one of the 16 candidates. |
+| 3 | `quantize_7p_fixed` | **33.1** | — | Per channel it scans three candidates, calling `unquantize_7p_chan` each time. The result is a pure function of `(c[i], p)` over a **256 x 2 domain** — a 512-entry compile-time table replaces the whole search. |
+| 4 | `bc7_block_sse` | 2.99 | — | It calls **`bcdec_rs::bc7`** — the general reference decoder — when this crate ships `bc7_fast_block`, measured **10.4x faster against that exact reference**. The fast path is right there. |
+| 5 | `dp0_choice` | 8.27 | — | Calls `quantize_7p_fixed` twice plus `unquantize_7p` twice to make a **binary** decision that is a pure function of `e0`. Folds into #3's table. |
+| 6 | `parse_mode6` | 8.27 | — | Re-parses, from bits, a block this same code path just produced. Carrying the parsed form alongside the packed one removes it entirely. |
+| 7 | `score_bc7` | 1.0 | O(window) per call | Linear scan comparing 16-byte arrays against the whole recent window. Exact matches want a hash; the half-match test is two `u64` key compares. |
+
+### BC1 RDO
+
+| # | function | calls/block | evidence | the opportunity |
+|---|---|---|---|---|
+| 8 | `refit_endpoints_for_table` | **17.1** | **~23% of BC1 RDO** | `a00`, `a01`, `a11` and `det` depend **only on the index table**, not on the pixels — and tables come from a `DICT_N = 24` dictionary. Twenty-four precomputed normal-equation sets replace a 16-iteration accumulation done 17 times per block. Only `b0`/`b1` are pixel-dependent. |
+| 9 | `bc1_block_sse` + `bc1_block_sse_limited` | 8.86 each (**17.7**) | — | Near-duplicate bodies: identical palette build and identical 16-pixel loop, differing only in the early abort. One function with a const-generic abort removes the copy. The palette build also duplicates decode's `bc1_palette`, and the 16x3 error loop is the `bc1_fit_4color_avx2` shape. |
+| 10 | `polish_endpoints_fixed_table` | 0.38 | — | A ±1 perturbation loop calling `bc1_block_sse` per candidate — the same incremental-error opportunity as #1, on the BC1 side. |
+
+Honourable mention: `build_table_dict` runs a **whole extra encode pass** over the
+image to histogram index tables before pass 2 begins.
+
+### Two cautions before any of this is attempted
+
+- **The obvious lever has already lost twice on this codebase.** The
+  `base + k*delta` identity and the batched-seed boundary hoist were both built,
+  oracle-tested, byte-identical — and reverted for failing to measure (§59, §60).
+  Nothing above is a win until it is paired and z-scored.
+- **RDO is not byte-identity-gated the way the rest of the encoder is.** Its
+  output is a rate/quality tradeoff, so the gate for these changes is the ladder
+  in `harvest_rdo` moving no worse, not a payload hash. Items 1-10 as described
+  are all *exact* (same arithmetic, less of it), so they should hold the hash
+  anyway — which makes the hash a useful check that an "exact" refactor really was.
