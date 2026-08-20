@@ -577,6 +577,50 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
 }
 
 /// Mode-6 SSE from quantized endpoints + fixed indices (native math).
+/// Mode-6 SSE for **one channel**, from that channel's two unquantized
+/// endpoints and fixed indices.
+///
+/// The whole point of splitting it out: mode-6 SSE is a sum over channels, and
+/// each channel's palette depends only on that channel's endpoints. So the ±1
+/// endpoint sweep in [`polish_mode6_endpoints`] — which moves exactly one
+/// channel of one endpoint — can rescore **one** channel instead of four.
+///
+/// The arithmetic is [`palette_mode6`]'s, one column of it, including the `as
+/// u8` truncation, so the sum over channels is bit-identical to the whole-
+/// palette form.
+#[inline]
+fn mode6_chan_sse(pixels: &[[u8; 4]; 16], c: usize, v0: u8, v1: u8, indices: &[u8; 16]) -> i64 {
+    let base = v0 as i32 * 64 + 32;
+    let delta = v1 as i32 - v0 as i32;
+    let mut err = 0i64;
+    for (i, px) in pixels.iter().enumerate() {
+        let w = W6M[indices[i] as usize] as i32;
+        let v = ((base + w * delta) >> 6) as u8;
+        let d = v as i64 - px[c] as i64;
+        err += d * d;
+    }
+    err
+}
+
+/// The four channel errors, which sum to the block's mode-6 SSE.
+#[inline]
+fn mode6_chan_errs(
+    pixels: &[[u8; 4]; 16],
+    q0: [u8; 4],
+    p0: u8,
+    q1: [u8; 4],
+    p1: u8,
+    indices: &[u8; 16],
+) -> [i64; 4] {
+    let c0 = unquantize_7p(q0, p0);
+    let c1 = unquantize_7p(q1, p1);
+    let mut e = [0i64; 4];
+    for (c, ec) in e.iter_mut().enumerate() {
+        *ec = mode6_chan_sse(pixels, c, c0[c], c1[c], indices);
+    }
+    e
+}
+
 fn mode6_sse(
     pixels: &[[u8; 4]; 16],
     q0: [u8; 4],
@@ -585,16 +629,7 @@ fn mode6_sse(
     p1: u8,
     indices: &[u8; 16],
 ) -> i64 {
-    let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
-    let mut err = 0i64;
-    for (i, px) in pixels.iter().enumerate() {
-        let p = pal[indices[i] as usize];
-        for c in 0..4 {
-            let d = p[c] as i64 - px[c] as i64;
-            err += d * d;
-        }
-    }
-    err
+    mode6_chan_errs(pixels, q0, p0, q1, p1, indices).iter().sum()
 }
 
 /// Per-channel best 7-bit quantization under a FIXED p-bit.
@@ -691,24 +726,46 @@ fn polish_mode6_endpoints(
     indices: &[u8; 16],
     err: &mut i64,
 ) {
+    // Per-channel error, carried across the sweep. A candidate moves one channel
+    // of one endpoint by ±1, which can only change that channel's term — so a
+    // candidate costs ONE channel rescore, not four, and the block's total is a
+    // three-add fixup. Measured at 201 `mode6_sse` calls per block before this,
+    // ~51% of BC7 RDO encode.
+    let mut ce = mode6_chan_errs(pixels, *q0, p0, *q1, p1, indices);
+    debug_assert_eq!(ce.iter().sum::<i64>(), *err);
     for _round in 0..2 {
         let prev = *err;
         for which in 0..2 {
             for c in 0..4 {
+                // Both endpoints' unquantized values for this channel; only the
+                // perturbed one moves.
                 for d in [-1i32, 1] {
-                    let mut t0 = *q0;
-                    let mut t1 = *q1;
-                    let target = if which == 0 { &mut t0 } else { &mut t1 };
-                    let nv = target[c] as i32 + d;
+                    let cur = if which == 0 { (*q0)[c] } else { (*q1)[c] };
+                    let nv = cur as i32 + d;
                     if nv < 0 || nv > 127 {
                         continue;
                     }
-                    target[c] = nv as u8;
-                    let e = mode6_sse(pixels, t0, p0, t1, p1, indices);
-                    if e < *err {
-                        *err = e;
-                        *q0 = t0;
-                        *q1 = t1;
+                    let (qa, qb) = if which == 0 {
+                        (nv as u8, (*q1)[c])
+                    } else {
+                        ((*q0)[c], nv as u8)
+                    };
+                    let cand = mode6_chan_sse(
+                        pixels,
+                        c,
+                        unquantize_7p_chan(qa, p0),
+                        unquantize_7p_chan(qb, p1),
+                        indices,
+                    );
+                    let total = *err - ce[c] + cand;
+                    if total < *err {
+                        *err = total;
+                        ce[c] = cand;
+                        if which == 0 {
+                            (*q0)[c] = nv as u8;
+                        } else {
+                            (*q1)[c] = nv as u8;
+                        }
                     }
                 }
             }
