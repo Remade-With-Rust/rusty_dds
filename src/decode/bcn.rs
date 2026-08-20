@@ -1073,7 +1073,7 @@ fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px
 /// Returns `false` for the reserved encoding, which falls through to the
 /// general decoder to be zero-filled per spec.
 #[inline]
-fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
+pub(crate) fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] == 0 {
         // Reserved: no mode bit set in the low byte.
         return false;

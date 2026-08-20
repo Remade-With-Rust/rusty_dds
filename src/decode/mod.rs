@@ -8,7 +8,7 @@
 //! in-house.
 
 mod bc6h;
-mod bcn;
+pub(crate) mod bcn;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 mod simd;
 mod uncompressed;
