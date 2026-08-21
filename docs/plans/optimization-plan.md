@@ -4150,3 +4150,55 @@ Recorded in `rdo.rs` so it is not retried.
 
 Every item byte-identical on the RDO ladder and the encode corpus, 108 tests,
 zero warnings.
+
+## §71 — RDO round 5
+
+| # | change | measurement |
+|---|---|---|
+| 1 | LS accumulator: both chains in one register, pixels converted once | kernel **144 -> 81** (-43.8%); **-1,462 instr/blk**, -10.1% of BC1 RDO |
+| 2 | a channel that did not move cannot move again | `mode6_chan_sse` **205.446 -> 164.889** calls/blk (-19.7%), **-933/blk** |
+| 3 | mode-6 least-squares vectorised, normal equations tabled | **272 -> 218** per call, **-407/blk** |
+| 4 | both endpoint directions scored in one call | polish body **611 -> 293** (-52%), calls -36.8%, **-2,714/blk**, -16% of BC7 RDO |
+| 5 | `bc1_fit_4color`'s scalar tail folded into vector code | **258 -> 187** (-27.5%), **-1,063/blk** |
+
+### The lesson of the round: what the compiler will and will not do for you
+
+Three ideas this round were textbook source-level redundancies, and all three
+measured as nothing:
+
+- **`Mode6Fixed` built twice per donor** — removing the second build: **-6**
+  instructions, against the ~50 that sixteen table lookups and stores imply.
+- **A loop-invariant `unquantize_7p_chan` inside the candidate loop** — hoisting
+  it: **-7**. LLVM had already done the motion.
+- **`bc1_colors_packed`'s dead byte arrays** (§70 #9) — **-6.2%**, not the -40%
+  the structure suggested, because LLVM was already sinking them.
+
+The five that DID land are all things a compiler cannot do:
+
+- **change the register shape** (#1, #3: two 3-lane chains -> one 8-lane one)
+- **skip work by an argument about the problem** (#2: convexity of the accept
+  test in `cand` vs `ce[c]`)
+- **move a `#[target_feature]` boundary** (#4: two calls -> one)
+- **replace a memory round-trip with a different algorithm** (#5: Morton
+  interleave instead of a sixteen-iteration reload)
+
+The rule to carry forward: **source-level redundancy is usually already gone.
+Look for redundancy the compiler is not ALLOWED to remove** — across a
+`target_feature` call, across a register-width choice, or behind a fact about
+the data that only the author knows.
+
+### Instrument failures worth recording
+
+- **A whole A/B measured nothing** because it marked the function under test
+  `#[inline(never)]` in both arms — the old arm then held a call, not the inline
+  loop it was supposed to hold. Mark the BOUNDARY, never the subject.
+- **`grep -c` exits nonzero on zero matches**, silently breaking a `&&` chain and
+  skipping a commit.
+- **An empty `test result` line was read as a pass** and a broken test build was
+  committed. An absent number is not a zero.
+- **`ls_endpoints_bc1` looked like a 209-instruction target and runs 0.001 times
+  a block** — `encode_bc1_bytes` returns before its LS loop at this quality.
+  Counted before building.
+- **`gather_block`'s 243 instructions are mostly its cold edge path**; the
+  interior fast path already existed. The both-arms trap applies to every
+  rarely-taken branch, not just feature dispatch.

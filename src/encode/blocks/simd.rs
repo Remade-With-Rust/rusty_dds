@@ -211,23 +211,65 @@ unsafe fn bc1_fit_4color_avx2_impl(
         idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
     }
 
-    let mut e = [0i32; 16];
-    let mut ix = [0i32; 16];
-    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, best_lo);
-    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, best_hi);
-    _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx_lo);
-    _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx_hi);
+    // The tail used to store 64 bytes of errors and 64 of indices and read them
+    // straight back in a scalar sixteen-iteration loop — vector code writing an
+    // array that scalar code immediately reloads, the store-forwarding shape
+    // this codebase has removed six times. Both halves fold in registers.
 
-    let mut table = 0u32;
-    let mut err = 0i32;
-    for i in 0..16 {
-        table |= (ix[i] as u32) << (2 * i);
-        err += e[i];
-        if err >= err_limit {
-            return None;
-        }
+    // Total error: eight lane-pairs, then the usual hadd chain. Each lane is at
+    // most 3*255^2 = 195_075, so the pairwise sum is under 390_150 and the total
+    // under 3.2M — nowhere near i32.
+    let s = _mm256_add_epi32(best_lo, best_hi);
+    let h = _mm256_hadd_epi32(s, s);
+    let h = _mm256_hadd_epi32(h, h);
+    let err = _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    ));
+    // The old loop bailed as soon as the RUNNING sum reached the limit. Every
+    // term is a sum of squares and so non-negative, which makes the running sum
+    // monotone — "some prefix reaches the limit" and "the total reaches the
+    // limit" are the same statement. One comparison decides it.
+    if err >= err_limit {
+        return None;
     }
+
+    // Indices: 32-bit lanes in pixel order down to sixteen bytes of 0..=3.
+    // `packs` saturates, which cannot bite on values that small.
+    let i0 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_lo),
+        _mm256_extracti128_si256(idx_lo, 1),
+    );
+    let i1 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_hi),
+        _mm256_extracti128_si256(idx_hi, 1),
+    );
+    let iv = _mm_packs_epi16(i0, i1);
+    // Each index is two bits, so two movemasks lift them out as two 16-bit
+    // planes, and the 2-bit table is their bit-interleave.
+    let m0 = _mm_movemask_epi8(_mm_cmpeq_epi8(
+        _mm_and_si128(iv, _mm_set1_epi8(1)),
+        _mm_set1_epi8(1),
+    )) as u32;
+    let m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(
+        _mm_and_si128(iv, _mm_set1_epi8(2)),
+        _mm_set1_epi8(2),
+    )) as u32;
+    let table = spread2(m0) | (spread2(m1) << 1);
     Some((table, err))
+}
+
+/// Spread the low sixteen bits of `x` into even bit positions — the standard
+/// Morton interleave, used here to rebuild a 2-bit-per-pixel index table from
+/// two 1-bit planes without needing BMI2.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn spread2(x: u32) -> u32 {
+    let mut x = x & 0x0000_FFFF;
+    x = (x | (x << 8)) & 0x00FF_00FF;
+    x = (x | (x << 4)) & 0x0F0F_0F0F;
+    x = (x | (x << 2)) & 0x3333_3333;
+    (x | (x << 1)) & 0x5555_5555
 }
 
 
