@@ -290,11 +290,12 @@ pub(super) fn bc1_widen_palette(colors: &[[u8; 3]; 4]) -> Bc1Pal {
 pub(super) fn bc1_fit_4color_pre_avx2(
     pixels: &[[u8; 4]; 16],
     pal: &Bc1Pal,
+    psq: i32,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
-    unsafe { bc1_fit_4color_pre_avx2_impl(pixels, pal, err_limit) }
+    unsafe { bc1_fit_4color_pre_avx2_impl(pixels, pal, psq, err_limit) }
 }
 
 pub(super) fn bc1_fit_4color_avx2(
@@ -326,7 +327,47 @@ unsafe fn bc1_fit_4color_avx2_impl(
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     let pal = widen_palette(colors);
-    bc1_fit_4color_pre_avx2_impl(pixels, &pal, err_limit)
+    bc1_fit_4color_pre_avx2_impl(pixels, &pal, bc1_psq_rgb_avx2_impl(pixels), err_limit)
+}
+
+/// Sum over the block of (r^2 + g^2 + b^2) — the pixel-only term of the SSE.
+///
+/// A property of the BLOCK, not of any candidate palette, so the encoder
+/// computes it once and hands it to every fit. Alpha is masked out here, which
+/// is the only place it could otherwise reach the result.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_psq_rgb_avx2(pixels: &[[u8; 4]; 16]) -> i32 {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_psq_rgb_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_psq_rgb_avx2_impl(pixels: &[[u8; 4]; 16]) -> i32 {
+    use std::arch::x86_64::*;
+    let base = pixels.as_ptr() as *const u8;
+    let keep = _mm256_set1_epi64x(
+        u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
+    );
+    let ld = |off: usize| {
+        _mm256_and_si256(
+            _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
+            keep,
+        )
+    };
+    let (p0, p1, p2, p3) = (ld(0), ld(16), ld(32), ld(48));
+    let v = _mm256_add_epi32(
+        _mm256_add_epi32(_mm256_madd_epi16(p0, p0), _mm256_madd_epi16(p1, p1)),
+        _mm256_add_epi32(_mm256_madd_epi16(p2, p2), _mm256_madd_epi16(p3, p3)),
+    );
+    // Lane assignment does not matter: this is a full horizontal total.
+    let h = _mm256_hadd_epi32(v, v);
+    let h = _mm256_hadd_epi32(h, h);
+    _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    ))
 }
 
 /// The 565 fit with the palette built in registers and never spilled.
@@ -342,11 +383,12 @@ pub(super) fn bc1_fit_565_avx2(
     pixels: &[[u8; 4]; 16],
     c0: u16,
     c1: u16,
+    psq: i32,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
-    unsafe { bc1_fit_565_avx2_impl(pixels, c0, c1, err_limit) }
+    unsafe { bc1_fit_565_avx2_impl(pixels, c0, c1, psq, err_limit) }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -355,10 +397,11 @@ unsafe fn bc1_fit_565_avx2_impl(
     pixels: &[[u8; 4]; 16],
     c0: u16,
     c1: u16,
+    psq: i32,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     let (p8, cst4) = prep_palette_regs(bc1_palette_565_avx2(c0, c1));
-    bc1_fit_core_avx2(pixels, p8, cst4, err_limit)
+    bc1_fit_core_avx2(pixels, p8, cst4, psq, err_limit)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -366,6 +409,7 @@ unsafe fn bc1_fit_565_avx2_impl(
 unsafe fn bc1_fit_4color_pre_avx2_impl(
     pixels: &[[u8; 4]; 16],
     pal: &Bc1Pal,
+    psq: i32,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
@@ -373,6 +417,7 @@ unsafe fn bc1_fit_4color_pre_avx2_impl(
         pixels,
         _mm256_loadu_si256(pal.p8.as_ptr() as *const __m256i),
         _mm_loadu_si128(pal.cst.as_ptr() as *const __m128i),
+        psq,
         err_limit,
     )
 }
@@ -384,30 +429,20 @@ unsafe fn bc1_fit_core_avx2(
     pixels: &[[u8; 4]; 16],
     p8: std::arch::x86_64::__m256i,
     cst4: std::arch::x86_64::__m128i,
+    psq: i32,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
     let base = pixels.as_ptr() as *const u8;
     let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
-    let keep = _mm256_set1_epi64x(
-        u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
-    );
-    // Sixteen pixels widened to i16 with alpha masked off, four at a time.
-    let ld = |off: usize| {
-        _mm256_and_si256(
-            _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
-            keep,
-        )
-    };
+    // Sixteen pixels widened to i16, four at a time. NOT masked: the alpha lane
+    // needs zeroing only where it could reach the result, and it cannot. The
+    // dot product is against a palette whose every entry is [R,G,B,0] by
+    // construction, so the alpha term is multiplied by zero; and the sum of
+    // squares, the one place pixel alpha WOULD contribute, is now supplied by
+    // the caller. Four vpand retire with the mask.
+    let ld = |off: usize| _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i));
     let (p0, p1, p2, p3) = (ld(0), ld(16), ld(32), ld(48));
-
-    // The `sum p^2` term dropped from the inner loop, summed back once here.
-    // It is the same for every palette entry, which is exactly why it can leave
-    // the loop; it is NOT the same across blocks, so it cannot leave the call.
-    let psq = _mm256_add_epi32(
-        _mm256_add_epi32(_mm256_madd_epi16(p0, p0), _mm256_madd_epi16(p1, p1)),
-        _mm256_add_epi32(_mm256_madd_epi16(p2, p2), _mm256_madd_epi16(p3, p3)),
-    );
 
     // Nearest palette entry, with the index riding in the low two bits.
     //
@@ -458,16 +493,17 @@ unsafe fn bc1_fit_core_avx2(
     // signed, and `4*v + k` floors back to `v` for negative `v` too), add the
     // per-pixel term back, then the usual hadd chain. The true SSE is at most
     // 16*3*255^2 = 3.1M, nowhere near i32.
-    let s = _mm256_add_epi32(
-        psq,
-        _mm256_add_epi32(_mm256_srai_epi32(best_lo, 2), _mm256_srai_epi32(best_hi, 2)),
-    );
+    let s = _mm256_add_epi32(_mm256_srai_epi32(best_lo, 2), _mm256_srai_epi32(best_hi, 2));
     let h = _mm256_hadd_epi32(s, s);
     let h = _mm256_hadd_epi32(h, h);
-    let err = _mm_cvtsi128_si32(_mm_add_epi32(
-        _mm256_castsi256_si128(h),
-        _mm256_extracti128_si256(h, 1),
-    ));
+    // The pixel-only term rejoins here, as one scalar add rather than four
+    // vpmaddwd and three vpaddd per call. It is a property of the BLOCK, and
+    // the lattice fits the same block about seven times.
+    let err = psq
+        + _mm_cvtsi128_si32(_mm_add_epi32(
+            _mm256_castsi256_si128(h),
+            _mm256_extracti128_si256(h, 1),
+        ));
     // Every term is a squared distance and so non-negative, which makes the
     // running sum monotone — "some prefix reaches the limit" and "the total
     // reaches the limit" are the same statement. One comparison decides it, and
@@ -721,11 +757,24 @@ unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
     let e = expand(c0);
     let f = expand(c1);
     let sum = _mm_add_epi32(e, f);
+    // `(x * 21846) >> 16` is the /3, done with a HIGH-half 16-bit multiply.
+    //
+    // `x` here is `e + f + e` or `e + f + f` on expanded 8-bit channels, so it
+    // is at most 765 and lives entirely in the low half of its 32-bit lane —
+    // which means `set1_epi32(21846)` puts the multiplier in the even u16 lanes
+    // and zero in the odd ones, and `mulhi_epu16` returns the high 16 bits of
+    // each 32-bit product in the even lanes with zero above. That is exactly
+    // `(x * 21846) >> 16`, bit for bit, for every x in range.
+    //
+    // It replaces `mullo_epi32` + `srli`: two instructions and three uops
+    // become one and one, and `vpmulld` is 10-cycle latency on Intel against 5
+    // for `vpmulhuw`. Two of these per palette build, about eleven builds a
+    // block.
     let third = _mm_set1_epi32(21846);
     let (p2, p3) = if c0 > c1 {
         (
-            _mm_srli_epi32(_mm_mullo_epi32(_mm_add_epi32(sum, e), third), 16),
-            _mm_srli_epi32(_mm_mullo_epi32(_mm_add_epi32(sum, f), third), 16),
+            _mm_mulhi_epu16(_mm_add_epi32(sum, e), third),
+            _mm_mulhi_epu16(_mm_add_epi32(sum, f), third),
         )
     } else {
         // 3-colour + punch-through: the third entry is the midpoint (integer

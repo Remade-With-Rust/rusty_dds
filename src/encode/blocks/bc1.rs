@@ -12,6 +12,26 @@ pub fn encode_bc1(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     out[..8].copy_from_slice(&encode_bc1_bytes(pixels));
 }
 
+/// Sum over the block of (r^2 + g^2 + b^2) — the pixel-only term of the SSE.
+///
+/// Every candidate fit needs it and none of them can change it, so the encoder
+/// computes it once a block and passes it down. See `bc1_fit_core_avx2`: the
+/// fit works in `sum q^2 - 2*dot`, which is the true SSE short of exactly this.
+pub(super) fn psq_rgb(pixels: &[[u8; 4]; 16]) -> i32 {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::bc1_psq_rgb_avx2(pixels);
+    }
+    let mut t = 0i32;
+    for p in pixels {
+        for c in 0..3 {
+            let v = p[c] as i32;
+            t += v * v;
+        }
+    }
+    t
+}
+
 pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     // A single fused walk producing BOTH reductions was tried here and REFUTED:
     // `extrema_opaque` and `channel_minmax_rgb` do issue the same four loads
@@ -22,9 +42,11 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     // L1 loads a block, against a lattice that fits eleven times a block.
     // Fusing two once-per-block walks cannot matter at this scale.
     let (max_c, min_c) = extrema_opaque(&pixels);
+    // Once a block, for every fit below — see `psq_rgb`.
+    let psq = psq_rgb(&pixels);
     // Fused pack+score: the index fit's per-pixel argmin distance IS the SSE
     // contribution, so the old pack-then-bc1_sse re-walk is pure recompute.
-    let (a, a_err) = pack_bc1_scored(&pixels, max_c, min_c, i32::MAX)
+    let (a, a_err) = pack_bc1_scored(&pixels, max_c, min_c, psq, i32::MAX)
         .expect("unbounded pack always packs");
     // `rgb_channel_span_sum` and `channel_minmax_rgb` are character-for-character
     // the same sixteen-pixel walk — the first just sums the second's spans — and
@@ -41,7 +63,7 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
         return best;
     }
     if !(mx == max_c && mn == min_c) {
-        consider_bc1(&pixels, mx, mn, &mut best, &mut best_err);
+        consider_bc1(&pixels, mx, mn, psq, &mut best, &mut best_err);
     }
     // Refine gate: a tiny residual can't repay PCA + LS (gain <= best_err).
     // Smooth-map blocks skip the whole refine; busy blocks keep the quality.
@@ -55,7 +77,7 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     // luminance seed and the 565 lattice have already found the same answer.
     if bc1_pca_seed_enabled() {
         if let Some((pa, pb)) = pca_extremes_rgb(&pixels) {
-            consider_bc1(&pixels, pa, pb, &mut best, &mut best_err);
+            consider_bc1(&pixels, pa, pb, psq, &mut best, &mut best_err);
         }
     }
     // Least-squares endpoint refine from the winner's indices, iterated while
@@ -69,13 +91,13 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
             break;
         };
         let prev = best_err;
-        consider_bc1(&pixels, e0, e1, &mut best, &mut best_err);
+        consider_bc1(&pixels, e0, e1, psq, &mut best, &mut best_err);
         if best_err >= prev {
             break;
         }
     }
     if best_err > bc1_lattice_min_err() {
-        lattice_refine_bc1(&pixels, &mut best, &mut best_err);
+        lattice_refine_bc1(&pixels, psq, &mut best, &mut best_err);
     }
     best
 }
@@ -85,10 +107,11 @@ pub(super) fn consider_bc1(
     pixels: &[[u8; 4]; 16],
     e0: [u8; 3],
     e1: [u8; 3],
+    psq: i32,
     best: &mut [u8; 8],
     best_err: &mut i32,
 ) {
-    if let Some((cand, err)) = pack_bc1_scored(pixels, e0, e1, *best_err) {
+    if let Some((cand, err)) = pack_bc1_scored(pixels, e0, e1, psq, *best_err) {
         *best = cand;
         *best_err = err;
     }
@@ -149,6 +172,7 @@ pub(super) fn pack_bc1_scored_565(
     pixels: &[[u8; 4]; 16],
     a: u16,
     b: u16,
+    psq: i32,
     err_limit: i32,
 ) -> Option<([u8; 8], i32)> {
     debug_assert_ne!(a, b);
@@ -159,7 +183,7 @@ pub(super) fn pack_bc1_scored_565(
     // `pack_bc1_scored`. Both come from the 565 words directly here.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        let (table, err) = simd::bc1_fit_565_avx2(pixels, hi, lo, err_limit)?;
+        let (table, err) = simd::bc1_fit_565_avx2(pixels, hi, lo, psq, err_limit)?;
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
@@ -236,11 +260,12 @@ pub(super) fn pack_bc1_scored_pre(
     lo: u16,
     colors: &[[u8; 3]; 4],
     pal16: &Pal16,
+    psq: i32,
     err_limit: i32,
 ) -> Option<([u8; 8], i32)> {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, pal16, err_limit)?;
+        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, pal16, psq, err_limit)?;
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
@@ -283,7 +308,12 @@ pub(super) fn pack_bc1_scored_with(
 /// fifth of candidates to break even. It does not: the lattice makes
 /// CONTRACT-ONLY moves from an already-good incumbent, so a candidate's palette
 /// range rarely excludes enough of the block to reach `best_err`.
-pub(super) fn lattice_refine_bc1(pixels: &[[u8; 4]; 16], best: &mut [u8; 8], best_err: &mut i32) {
+pub(super) fn lattice_refine_bc1(
+    pixels: &[[u8; 4]; 16],
+    psq: i32,
+    best: &mut [u8; 8],
+    best_err: &mut i32,
+) {
     // Contract-only, harvest-chosen (1.3M wins over the bc1 corpus): moves
     // that SHRINK the endpoint interval (hi component down / lo component
     // up) carry ~82% of the full ±1 neighborhood's gain at half the packs —
@@ -309,7 +339,7 @@ pub(super) fn lattice_refine_bc1(pixels: &[[u8; 4]; 16], best: &mut [u8; 8], bes
                 if cand == other {
                     continue;
                 }
-                if let Some((blk, e)) = pack_bc1_scored_565(pixels, cand, other, *best_err) {
+                if let Some((blk, e)) = pack_bc1_scored_565(pixels, cand, other, psq, *best_err) {
                     *best = blk;
                     *best_err = e;
                     if e == 0 {
@@ -331,6 +361,7 @@ pub(super) fn pack_bc1_scored(
     pixels: &[[u8; 4]; 16],
     max_c: [u8; 3],
     min_c: [u8; 3],
+    psq: i32,
     err_limit: i32,
 ) -> Option<([u8; 8], i32)> {
     let mut max565 = to_565(max_c);
@@ -367,7 +398,7 @@ pub(super) fn pack_bc1_scored(
     // of the roughly six calls a block that take the vector path.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if !punch && simd::has_avx2() {
-        let (table, err) = simd::bc1_fit_565_avx2(pixels, c0, c1, err_limit)?;
+        let (table, err) = simd::bc1_fit_565_avx2(pixels, c0, c1, psq, err_limit)?;
         let v = (c0 as u64) | ((c1 as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }

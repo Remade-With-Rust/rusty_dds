@@ -241,7 +241,7 @@ mod fuse_oracle {
             let old_block = pack_bc1(px, e0, e1);
             let old_err = bc1_sse(&px, &old_block);
             let (new_block, new_err) =
-                pack_bc1_scored(&px, e0, e1, i32::MAX).expect("unbounded");
+                pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), i32::MAX).expect("unbounded");
             // The projection index fit (bc1_fit_4color) is a RESTRICTED
             // search: its SSE can only be >= the exhaustive fit, and only
             // negligibly (rounding cross-term on far-off-line pixels; the
@@ -257,9 +257,9 @@ mod fuse_oracle {
                 assert!(new_err >= old_err);
             }
             // Early-abort contract: limit == err must return None (>= abort).
-            assert!(pack_bc1_scored(&px, e0, e1, new_err).is_none());
+            assert!(pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), new_err).is_none());
             if new_err > 0 {
-                assert!(pack_bc1_scored(&px, e0, e1, new_err + 1).is_some());
+                assert!(pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), new_err + 1).is_some());
             }
         }
     }

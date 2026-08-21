@@ -210,6 +210,10 @@ pub(crate) fn encode_image_bc1_rdo(
 
                             // Block-invariant: the accumulator runs 25.4 times on these.
                             let pxv = ls_pixels(&pixels);
+                            // Pixel-only SSE term: a property of the block, so
+                            // it is computed once here rather than inside each
+                            // windowed fit. See `bc1::psq_rgb`.
+                            let psq = super::bc1::psq_rgb(&pixels);
                             let n = filled.min(WINDOW);
                             // The window can hold the SAME table more than once
                             // — repetitive content emits repeats constantly —
@@ -272,7 +276,8 @@ pub(crate) fn encode_image_bc1_rdo(
                                 }
                                 if c0 > c1 && lim > 0 && !edup {
                                     if let Some((blk, err)) = super::bc1::pack_bc1_scored_pre(
-                                        &pixels, c0, c1, &recent_pal[k], &recent_pal16[k], lim,
+                                        &pixels, c0, c1, &recent_pal[k], &recent_pal16[k], psq,
+                                        lim,
                                     ) {
                                         let j = err as f32 - lam * SAVE_PART;
                                         if j < best_j {
