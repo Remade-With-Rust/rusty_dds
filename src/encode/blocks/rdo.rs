@@ -41,6 +41,40 @@ enum Class {
     Endpoints,
 }
 
+/// Split `blocks_y` into one row-strip per worker.
+///
+/// Pass 2 carries a sliding match window and a reference to the row above, so
+/// strips cannot share state — each gets its own, starting cold. That is what
+/// makes this the one change in the RDO campaign that moves output: a block at a
+/// strip boundary sees an empty window where the serial encoder saw sixteen
+/// candidates. The ladder is the gate, not a hash.
+/// # Why strips start COLD
+///
+/// Seeding a strip's window from pass 1's baseline blocks for the row above was
+/// tried and measured **worse**: deflated size at λ=200 went 76.45% (cold) to
+/// 76.63% (seeded). Baseline blocks are candidates that never appear in the
+/// output, so matching against them compresses nothing while displacing history
+/// that would. An empty window costs one row; a wrong window costs the strip.
+fn rdo_strips(blocks_y: usize) -> Vec<(usize, usize)> {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, blocks_y.max(1));
+    // Strips must be at least a few rows or the cold-window cost dominates the
+    // parallel gain: every strip boundary is a row that starts with no history.
+    let workers = workers.min(blocks_y.div_ceil(8).max(1));
+    let mut v = Vec::with_capacity(workers);
+    let base = blocks_y / workers;
+    let extra = blocks_y % workers;
+    let mut start = 0;
+    for wi in 0..workers {
+        let len = base + usize::from(wi < extra);
+        v.push((start, start + len));
+        start += len;
+    }
+    v
+}
+
 pub(crate) fn encode_image_bc1_rdo(
     rgba: &[u8],
     width: u32,
@@ -73,174 +107,195 @@ pub(crate) fn encode_image_bc1_rdo(
     // Previous ROW of emitted blocks: vertical repetition is the dominant
     // long-range structure in textures, and deflate's 32KB window covers a
     // full block row at any sane width.
-    let mut prev_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
-    let mut cur_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
-    // Ring buffers of recently emitted structures.
-    let mut recent_blocks: [[u8; 8]; WINDOW] = [[0u8; 8]; WINDOW];
-    let mut recent_tables: [u32; WINDOW] = [0; WINDOW];
-    // Computed once as a table enters the window, not once per block that tries it.
-    let mut recent_ls: [Option<TableLs>; WINDOW] = [None; WINDOW];
-    let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
-    // The donor's 4-colour palette, built once on entry rather than by every
-    // block that tries it.
-    let mut recent_pal: [[[u8; 3]; 4]; WINDOW] = [[[0u8; 3]; 4]; WINDOW];
-    let mut filled = 0usize;
-    let mut prev_block = [0u8; 8];
+    let strips = rdo_strips(blocks_y);
+    let q = super::QUALITY.with(|c| c.get());
+    let dict = &dict;
+    let dict_ls = &dict_ls;
+    let base_blocks = &base_blocks;
+    std::thread::scope(|scope| {
+        let mut rest = out;
+        for &(by0, by1) in &strips {
+            let band_len = (by1 - by0) * blocks_x * 8;
+            let (band, tail) = rest.split_at_mut(band_len);
+            rest = tail;
+            scope.spawn(move || {
+                super::with_quality(q, || {
+                // Per-strip row history: a strip never reads the row above its
+                // own first row, so these cannot be shared.
+                let mut prev_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
+                let mut cur_row: Vec<[u8; 8]> = vec![[0u8; 8]; blocks_x];
+                // Ring buffers of recently emitted structures.
+                let mut recent_blocks: [[u8; 8]; WINDOW] = [[0u8; 8]; WINDOW];
+                let mut recent_tables: [u32; WINDOW] = [0; WINDOW];
+                // Computed once as a table enters the window, not once per block that tries it.
+                let mut recent_ls: [Option<TableLs>; WINDOW] = [None; WINDOW];
+                let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
+                // The donor's 4-colour palette, built once on entry rather than by every
+                // block that tries it.
+                let mut recent_pal: [[[u8; 3]; 4]; WINDOW] = [[[0u8; 3]; 4]; WINDOW];
+                let mut filled = 0usize;
+                let mut prev_block = [0u8; 8];
 
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let pixels = gather_block(rgba, w, h, bx, by);
+                for by in by0..by1 {
+                    for bx in 0..blocks_x {
+                        let pixels = gather_block(rgba, w, h, bx, by);
 
-            // Baseline: the normal quality path (from pass 1).
-            let base = base_blocks[by * blocks_x + bx];
-            let base_err = bc1_block_sse(&pixels, &base);
+                        // Baseline: the normal quality path (from pass 1).
+                        let base = base_blocks[by * blocks_x + bx];
+                        let base_err = bc1_block_sse(&pixels, &base);
 
-            if base_err == 0 {
-                let oi = (by * blocks_x + bx) * 8;
-                out[oi..oi + 8].copy_from_slice(&base);
-                prev_block = base;
-                cur_row[bx] = base;
-                let slot = (by * blocks_x + bx) % WINDOW;
-                recent_blocks[slot] = base;
-                recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
-                recent_ls[slot] = table_ls(recent_tables[slot]);
-                recent_eps[slot] = (
-                    u16::from_le_bytes([base[0], base[1]]),
-                    u16::from_le_bytes([base[2], base[3]]),
-                );
-                recent_pal[slot] = super::bc1::bc1_palette_565(
-                    recent_eps[slot].0.max(recent_eps[slot].1),
-                    recent_eps[slot].0.min(recent_eps[slot].1),
-                );
-                filled += 1;
-                continue;
-            }
-            let mut best = base;
-            // The baseline may ALREADY repeat naturally — credit it, or a
-            // substitution can book phantom savings while destroying real
-            // ones (computer_key: payload GREW 5% before this correction).
-            let n0 = filled.min(WINDOW);
-            let above: Option<&[u8; 8]> = if by > 0 { Some(&prev_row[bx]) } else { None };
-            let mut base_score = score_bc1(&base, &recent_blocks[..n0]);
-            if let Some(ab) = above {
-                if ab == &base {
-                    base_score = SAVE_WHOLE;
-                } else if (ab[4..8] == base[4..8] || ab[0..4] == base[0..4])
-                    && base_score < SAVE_PART
-                {
-                    base_score = SAVE_PART;
-                }
-            }
-            // Activity masking via allowance scaling (see the BC7 note).
-            let lam = lambda * (base_err as f32 / 192.0).min(1.0);
-            let mut best_j = base_err as f32 - lam * base_score;
-            let mut best_class = Class::Base;
-
-            if filled > 0 {
-                // 1. Whole previous block.
-                let lim = (best_j + lam * SAVE_WHOLE).ceil() as i32;
-                if lim > 0 {
-                    if let Some(err) = bc1_block_sse_limited(&pixels, &prev_block, lim) {
-                        let j = err as f32 - lambda * SAVE_WHOLE;
-                        if j < best_j {
-                            best_j = j;
-                            best = prev_block;
-                            best_class = Class::Whole;
+                        if base_err == 0 {
+                            let oi = ((by - by0) * blocks_x + bx) * 8;
+                            band[oi..oi + 8].copy_from_slice(&base);
+                            prev_block = base;
+                            cur_row[bx] = base;
+                            let slot = (by * blocks_x + bx) % WINDOW;
+                            recent_blocks[slot] = base;
+                            recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
+                            recent_ls[slot] = table_ls(recent_tables[slot]);
+                            recent_eps[slot] = (
+                                u16::from_le_bytes([base[0], base[1]]),
+                                u16::from_le_bytes([base[2], base[3]]),
+                            );
+                            recent_pal[slot] = super::bc1::bc1_palette_565(
+                                recent_eps[slot].0.max(recent_eps[slot].1),
+                                recent_eps[slot].0.min(recent_eps[slot].1),
+                            );
+                            filled += 1;
+                            continue;
                         }
-                    }
-                }
+                        let mut best = base;
+                        // The baseline may ALREADY repeat naturally — credit it, or a
+                        // substitution can book phantom savings while destroying real
+                        // ones (computer_key: payload GREW 5% before this correction).
+                        let n0 = filled.min(WINDOW);
+                        let above: Option<&[u8; 8]> = if by > by0 { Some(&prev_row[bx]) } else { None };
+                        let mut base_score = score_bc1(&base, &recent_blocks[..n0]);
+                        if let Some(ab) = above {
+                            if ab == &base {
+                                base_score = SAVE_WHOLE;
+                            } else if (ab[4..8] == base[4..8] || ab[0..4] == base[0..4])
+                                && base_score < SAVE_PART
+                            {
+                                base_score = SAVE_PART;
+                            }
+                        }
+                        // Activity masking via allowance scaling (see the BC7 note).
+                        let lam = lambda * (base_err as f32 / 192.0).min(1.0);
+                        let mut best_j = base_err as f32 - lam * base_score;
+                        let mut best_class = Class::Base;
 
-                let n = filled.min(WINDOW);
-                for k in 0..n {
-                    // 2. Reuse index table, LS-refit endpoints.
-                    let table = recent_tables[k];
-                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
-                    if lim > 0 {
-                        if let Some(cand) = recent_ls[k]
-                            .as_ref()
-                            .and_then(|ls| refit_with_ls(&pixels, ls, table))
-                        {
-                            if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
-                                let j = err as f32 - lam * SAVE_PART;
-                                if j < best_j {
-                                    best_j = j;
-                                    best = cand;
-                                    best_class = Class::Table;
+                        if filled > 0 {
+                            // 1. Whole previous block.
+                            let lim = (best_j + lam * SAVE_WHOLE).ceil() as i32;
+                            if lim > 0 {
+                                if let Some(err) = bc1_block_sse_limited(&pixels, &prev_block, lim) {
+                                    let j = err as f32 - lambda * SAVE_WHOLE;
+                                    if j < best_j {
+                                        best_j = j;
+                                        best = prev_block;
+                                        best_class = Class::Whole;
+                                    }
+                                }
+                            }
+
+                            let n = filled.min(WINDOW);
+                            for k in 0..n {
+                                // 2. Reuse index table, LS-refit endpoints.
+                                let table = recent_tables[k];
+                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                if lim > 0 {
+                                    if let Some(cand) = recent_ls[k]
+                                        .as_ref()
+                                        .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                                    {
+                                        if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
+                                            let j = err as f32 - lam * SAVE_PART;
+                                            if j < best_j {
+                                                best_j = j;
+                                                best = cand;
+                                                best_class = Class::Table;
+                                            }
+                                        }
+                                    }
+                                }
+                                // 3. Reuse endpoints, re-fit indices.
+                                let (c0, c1) = recent_eps[k];
+                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                if c0 > c1 && lim > 0 {
+                                    if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
+                                        &pixels, c0, c1, &recent_pal[k], lim,
+                                    ) {
+                                        let j = err as f32 - lam * SAVE_PART;
+                                        if j < best_j {
+                                            best_j = j;
+                                            best = blk;
+                                            best_class = Class::Endpoints;
+                                        }
+                                    }
+                                }
+                            }
+                            // 4. Global popular tables (two-pass dictionary): the whole
+                            // image converges on the same few 4-byte index strings.
+                            for (di, &table) in dict.iter().enumerate() {
+                                if recent_tables[..n].contains(&table) {
+                                    continue; // already tried via the window
+                                }
+                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                if lim <= 0 {
+                                    break;
+                                }
+                                if let Some(cand) = dict_ls[di]
+                                    .as_ref()
+                                    .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                                {
+                                    if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
+                                        let j = err as f32 - lam * SAVE_PART;
+                                        if j < best_j {
+                                            best_j = j;
+                                            best = cand;
+                                            best_class = Class::Table;
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                    // 3. Reuse endpoints, re-fit indices.
-                    let (c0, c1) = recent_eps[k];
-                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
-                    if c0 > c1 && lim > 0 {
-                        if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
-                            &pixels, c0, c1, &recent_pal[k], lim,
-                        ) {
-                            let j = err as f32 - lam * SAVE_PART;
-                            if j < best_j {
-                                best_j = j;
-                                best = blk;
-                                best_class = Class::Endpoints;
-                            }
-                        }
-                    }
-                }
-                // 4. Global popular tables (two-pass dictionary): the whole
-                // image converges on the same few 4-byte index strings.
-                for (di, &table) in dict.iter().enumerate() {
-                    if recent_tables[..n].contains(&table) {
-                        continue; // already tried via the window
-                    }
-                    let lim = (best_j + lam * SAVE_PART).ceil() as i32;
-                    if lim <= 0 {
-                        break;
-                    }
-                    if let Some(cand) = dict_ls[di]
-                        .as_ref()
-                        .and_then(|ls| refit_with_ls(&pixels, ls, table))
-                    {
-                        if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
-                            let j = err as f32 - lam * SAVE_PART;
-                            if j < best_j {
-                                best_j = j;
-                                best = cand;
-                                best_class = Class::Table;
-                            }
-                        }
-                    }
-                }
-            }
 
-            // Endpoint polish for table-reuse winners: the 4 index bytes must
-            // stay matched, but the endpoint bytes are literals anyway - the
-            // 565 contract lattice recovers quality at ZERO rate cost.
-            if best_class == Class::Table {
-                polish_endpoints_fixed_table(&pixels, &mut best);
-            }
-            let _ = best_class;
+                        // Endpoint polish for table-reuse winners: the 4 index bytes must
+                        // stay matched, but the endpoint bytes are literals anyway - the
+                        // 565 contract lattice recovers quality at ZERO rate cost.
+                        if best_class == Class::Table {
+                            polish_endpoints_fixed_table(&pixels, &mut best);
+                        }
+                        let _ = best_class;
 
-            let oi = (by * blocks_x + bx) * 8;
-            out[oi..oi + 8].copy_from_slice(&best);
-            prev_block = best;
-            cur_row[bx] = best;
-            let slot = (by * blocks_x + bx) % WINDOW;
-            recent_blocks[slot] = best;
-            recent_tables[slot] =
-                u32::from_le_bytes([best[4], best[5], best[6], best[7]]);
-            recent_ls[slot] = table_ls(recent_tables[slot]);
-            recent_eps[slot] = (
-                u16::from_le_bytes([best[0], best[1]]),
-                u16::from_le_bytes([best[2], best[3]]),
-            );
-            recent_pal[slot] = super::bc1::bc1_palette_565(
-                recent_eps[slot].0.max(recent_eps[slot].1),
-                recent_eps[slot].0.min(recent_eps[slot].1),
-            );
-            filled += 1;
+                        let oi = ((by - by0) * blocks_x + bx) * 8;
+                        band[oi..oi + 8].copy_from_slice(&best);
+                        prev_block = best;
+                        cur_row[bx] = best;
+                        let slot = (by * blocks_x + bx) % WINDOW;
+                        recent_blocks[slot] = best;
+                        recent_tables[slot] =
+                            u32::from_le_bytes([best[4], best[5], best[6], best[7]]);
+                        recent_ls[slot] = table_ls(recent_tables[slot]);
+                        recent_eps[slot] = (
+                            u16::from_le_bytes([best[0], best[1]]),
+                            u16::from_le_bytes([best[2], best[3]]),
+                        );
+                        recent_pal[slot] = super::bc1::bc1_palette_565(
+                            recent_eps[slot].0.max(recent_eps[slot].1),
+                            recent_eps[slot].0.min(recent_eps[slot].1),
+                        );
+                        filled += 1;
+                    }
+                    std::mem::swap(&mut prev_row, &mut cur_row);
+                }
+
+                });
+            });
         }
-        std::mem::swap(&mut prev_row, &mut cur_row);
-    }
+        debug_assert!(rest.is_empty());
+    });
     Ok(())
 }
 
@@ -653,141 +708,159 @@ pub(crate) fn encode_image_bc7_rdo(
         return Err(Error::TruncatedData);
     }
 
-    let mut recent: [([u8; 16], bool); BC7_WINDOW] = [([0u8; 16], false); BC7_WINDOW];
-    // Parsed once when a block enters the window, not once per block that later
-    // examines it. `parse_mode6` measured 8.27 calls per block, every one of them
-    // re-extracting bitfields from a block this driver had already emitted.
-    type Mode6Parts = ([u8; 4], u8, [u8; 4], u8, [u8; 16]);
-    let mut recent_m6: [Option<Mode6Parts>; BC7_WINDOW] = [None; BC7_WINDOW];
-    let mut prev_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
-    let mut cur_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
-    let mut filled = 0usize;
-    let mut prev_block = [0u8; 16];
+    let strips = rdo_strips(blocks_y);
+    let q = super::QUALITY.with(|c| c.get());
+    std::thread::scope(|scope| {
+        let mut rest = out;
+        for &(by0, by1) in &strips {
+            let band_len = (by1 - by0) * blocks_x * 16;
+            let (band, tail) = rest.split_at_mut(band_len);
+            rest = tail;
+            scope.spawn(move || {
+                super::with_quality(q, || {
+                // Per-strip row history, as in the BC1 driver.
 
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let pixels = gather_block(rgba, w, h, bx, by);
+                let mut recent: [([u8; 16], bool); BC7_WINDOW] = [([0u8; 16], false); BC7_WINDOW];
+                // Parsed once when a block enters the window, not once per block that later
+                // examines it. `parse_mode6` measured 8.27 calls per block, every one of them
+                // re-extracting bitfields from a block this driver had already emitted.
+                type Mode6Parts = ([u8; 4], u8, [u8; 4], u8, [u8; 16]);
+                let mut recent_m6: [Option<Mode6Parts>; BC7_WINDOW] = [None; BC7_WINDOW];
+                let mut prev_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
+                let mut cur_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
+                let mut filled = 0usize;
+                let mut prev_block = [0u8; 16];
 
-            let mut base = [0u8; 16];
-            encode_bc7_mode6(pixels, &mut base);
-            let base_err = bc7_block_sse(&pixels, &base);
+                for by in by0..by1 {
+                    for bx in 0..blocks_x {
+                        let pixels = gather_block(rgba, w, h, bx, by);
 
-            // Exact blocks are untouchable: preservation is structural,
-            // not an emergent property of the acceptance math.
-            if base_err == 0 {
-                let oi = (by * blocks_x + bx) * 16;
-                out[oi..oi + 16].copy_from_slice(&base);
-                prev_block = base;
-                cur_row[bx] = base;
-                let slot = (by * blocks_x + bx) % BC7_WINDOW;
-                recent[slot] = (base, base[0] & 0x7F == 0x40);
-                recent_m6[slot] = parse_mode6(&base);
-                filled += 1;
-                continue;
-            }
-            let mut best = base;
-            let n0 = filled.min(BC7_WINDOW);
-            let above: Option<&[u8; 16]> = if by > 0 { Some(&prev_row[bx]) } else { None };
-            let mut base_score = score_bc7(&base, &recent[..n0]);
-            if let Some(ab) = above {
-                if ab == &base {
-                    base_score = SAVE_WHOLE16;
-                } else if (ab[8..16] == base[8..16] || ab[0..8] == base[0..8])
-                    && base_score < SAVE_HALF8
-                {
-                    base_score = SAVE_HALF8;
-                }
-            }
-            // Activity masking done as ALLOWANCE SCALING: the Lagrangian
-            // budget a block may spend scales with the error it already
-            // carries (lambda_eff = lambda * min(1, base_err/T)). Pristine
-            // blocks get ~zero budget, so per-block nicks cannot compound
-            // into map-level dB loss on smooth content; busy blocks (where
-            // error hides) trade at full lambda.
-            let lam = lambda * (base_err as f32 / 256.0).min(1.0);
-            let mut best_j = base_err as f32 - lam * base_score;
+                        let mut base = [0u8; 16];
+                        encode_bc7_mode6(pixels, &mut base);
+                        let base_err = bc7_block_sse(&pixels, &base);
 
-            if filled > 0 {
-                // 1. Whole previous block + the block one ROW above.
-                let mut wholes: [Option<[u8; 16]>; 2] = [Some(prev_block), None];
-                if let Some(ab) = above {
-                    wholes[1] = Some(*ab);
-                }
-                for cand in wholes.into_iter().flatten() {
-                    let err = bc7_block_sse(&pixels, &cand);
-                    let j = err as f32 - lam * SAVE_WHOLE16;
-                    if j < best_j {
-                        best_j = j;
-                        best = cand;
-                    }
-                }
-
-                let n = filled.min(BC7_WINDOW);
-                for k in 0..n {
-                    let (donor, is_m6) = recent[k];
-                    if !is_m6 {
-                        continue;
-                    }
-                    let _ = &donor;
-                    let Some((dq0, dp0, dq1, dp1, didx)) = recent_m6[k] else {
-                        continue;
-                    };
-                    // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
-                    if let Some((e0, e1)) = ls_endpoints_mode6(&pixels, &didx) {
-                        let q0 = quantize_7p_fixed(e0, dp0_choice(&pixels, e0));
-                        let q1 = quantize_7p_fixed(e1, dp1);
-                        // p0 is ours (head byte); try both cheaply via helper.
-                        let (mut q0a, p0a) = q0;
-                        let mut q1a = q1.0;
-                        // Endpoint polish with indices FIXED: the tail bytes
-                        // are the LZ match, head endpoint bytes are literals
-                        // either way — ±1 moves recover quality for free.
-                        let mut err = mode6_sse(&pixels, q0a, p0a, q1a, dp1, &didx);
-                        polish_mode6_endpoints(
-                            &pixels, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
-                        );
-                        // Packed only if it wins, as above.
-                        let j = err as f32 - lam * SAVE_HALF8;
-                        if j < best_j {
-                            best_j = j;
-                            best = pack_bc7_mode6(q0a, p0a, q1a, dp1, didx);
-                            debug_assert_eq!(&best[8..16], &donor[8..16]);
+                        // Exact blocks are untouchable: preservation is structural,
+                        // not an emergent property of the acceptance math.
+                        if base_err == 0 {
+                            let oi = ((by - by0) * blocks_x + bx) * 16;
+                            band[oi..oi + 16].copy_from_slice(&base);
+                            prev_block = base;
+                            cur_row[bx] = base;
+                            let slot = (by * blocks_x + bx) % BC7_WINDOW;
+                            recent[slot] = (base, base[0] & 0x7F == 0x40);
+                            recent_m6[slot] = parse_mode6(&base);
+                            filled += 1;
+                            continue;
                         }
-                    }
-                    // 3. Head reuse: donor endpoints + p0, our p1 + indices.
-                    // The donor endpoint does not vary with p1, so it is
-                    // unquantized once rather than twice.
-                    let du0 = unquantize_7p(dq0, dp0);
-                    for p1 in 0..2u8 {
-                        let pal = palette_mode6(du0, unquantize_7p(dq1, p1));
-                        let (idx, errv) = fit_indices_mode6(&pixels, &pal);
-                        if idx[0] > 7 {
-                            continue; // swap would rewrite the head bytes
+                        let mut best = base;
+                        let n0 = filled.min(BC7_WINDOW);
+                        let above: Option<&[u8; 16]> = if by > by0 { Some(&prev_row[bx]) } else { None };
+                        let mut base_score = score_bc7(&base, &recent[..n0]);
+                        if let Some(ab) = above {
+                            if ab == &base {
+                                base_score = SAVE_WHOLE16;
+                            } else if (ab[8..16] == base[8..16] || ab[0..8] == base[0..8])
+                                && base_score < SAVE_HALF8
+                            {
+                                base_score = SAVE_HALF8;
+                            }
                         }
-                        // Packed only if it wins. Most candidates do not, and
-                        // packing costs 99 instructions — it ran 19 times a
-                        // block to produce a block usually thrown away.
-                        let j = errv as f32 - lam * SAVE_HALF8;
-                        if j < best_j {
-                            best_j = j;
-                            best = pack_bc7_mode6(dq0, dp0, dq1, p1, idx);
-                            debug_assert_eq!(&best[0..8], &donor[0..8]);
-                        }
-                    }
-                }
-            }
+                        // Activity masking done as ALLOWANCE SCALING: the Lagrangian
+                        // budget a block may spend scales with the error it already
+                        // carries (lambda_eff = lambda * min(1, base_err/T)). Pristine
+                        // blocks get ~zero budget, so per-block nicks cannot compound
+                        // into map-level dB loss on smooth content; busy blocks (where
+                        // error hides) trade at full lambda.
+                        let lam = lambda * (base_err as f32 / 256.0).min(1.0);
+                        let mut best_j = base_err as f32 - lam * base_score;
 
-            let oi = (by * blocks_x + bx) * 16;
-            out[oi..oi + 16].copy_from_slice(&best);
-            prev_block = best;
-            cur_row[bx] = best;
-            let slot = (by * blocks_x + bx) % BC7_WINDOW;
-            recent[slot] = (best, best[0] & 0x7F == 0x40);
-            recent_m6[slot] = parse_mode6(&best);
-            filled += 1;
+                        if filled > 0 {
+                            // 1. Whole previous block + the block one ROW above.
+                            let mut wholes: [Option<[u8; 16]>; 2] = [Some(prev_block), None];
+                            if let Some(ab) = above {
+                                wholes[1] = Some(*ab);
+                            }
+                            for cand in wholes.into_iter().flatten() {
+                                let err = bc7_block_sse(&pixels, &cand);
+                                let j = err as f32 - lam * SAVE_WHOLE16;
+                                if j < best_j {
+                                    best_j = j;
+                                    best = cand;
+                                }
+                            }
+
+                            let n = filled.min(BC7_WINDOW);
+                            for k in 0..n {
+                                let (donor, is_m6) = recent[k];
+                                if !is_m6 {
+                                    continue;
+                                }
+                                let _ = &donor;
+                                let Some((dq0, dp0, dq1, dp1, didx)) = recent_m6[k] else {
+                                    continue;
+                                };
+                                // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
+                                if let Some((e0, e1)) = ls_endpoints_mode6(&pixels, &didx) {
+                                    let q0 = quantize_7p_fixed(e0, dp0_choice(&pixels, e0));
+                                    let q1 = quantize_7p_fixed(e1, dp1);
+                                    // p0 is ours (head byte); try both cheaply via helper.
+                                    let (mut q0a, p0a) = q0;
+                                    let mut q1a = q1.0;
+                                    // Endpoint polish with indices FIXED: the tail bytes
+                                    // are the LZ match, head endpoint bytes are literals
+                                    // either way — ±1 moves recover quality for free.
+                                    let mut err = mode6_sse(&pixels, q0a, p0a, q1a, dp1, &didx);
+                                    polish_mode6_endpoints(
+                                        &pixels, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
+                                    );
+                                    // Packed only if it wins, as above.
+                                    let j = err as f32 - lam * SAVE_HALF8;
+                                    if j < best_j {
+                                        best_j = j;
+                                        best = pack_bc7_mode6(q0a, p0a, q1a, dp1, didx);
+                                        debug_assert_eq!(&best[8..16], &donor[8..16]);
+                                    }
+                                }
+                                // 3. Head reuse: donor endpoints + p0, our p1 + indices.
+                                // The donor endpoint does not vary with p1, so it is
+                                // unquantized once rather than twice.
+                                let du0 = unquantize_7p(dq0, dp0);
+                                for p1 in 0..2u8 {
+                                    let pal = palette_mode6(du0, unquantize_7p(dq1, p1));
+                                    let (idx, errv) = fit_indices_mode6(&pixels, &pal);
+                                    if idx[0] > 7 {
+                                        continue; // swap would rewrite the head bytes
+                                    }
+                                    // Packed only if it wins. Most candidates do not, and
+                                    // packing costs 99 instructions — it ran 19 times a
+                                    // block to produce a block usually thrown away.
+                                    let j = errv as f32 - lam * SAVE_HALF8;
+                                    if j < best_j {
+                                        best_j = j;
+                                        best = pack_bc7_mode6(dq0, dp0, dq1, p1, idx);
+                                        debug_assert_eq!(&best[0..8], &donor[0..8]);
+                                    }
+                                }
+                            }
+                        }
+
+                        let oi = ((by - by0) * blocks_x + bx) * 16;
+                        band[oi..oi + 16].copy_from_slice(&best);
+                        prev_block = best;
+                        cur_row[bx] = best;
+                        let slot = (by * blocks_x + bx) % BC7_WINDOW;
+                        recent[slot] = (best, best[0] & 0x7F == 0x40);
+                        recent_m6[slot] = parse_mode6(&best);
+                        filled += 1;
+                    }
+                    std::mem::swap(&mut prev_row, &mut cur_row);
+                }
+
+                });
+            });
         }
-        std::mem::swap(&mut prev_row, &mut cur_row);
-    }
+        debug_assert!(rest.is_empty());
+    });
     Ok(())
 }
 

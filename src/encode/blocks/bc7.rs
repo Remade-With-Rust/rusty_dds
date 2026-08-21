@@ -1021,6 +1021,20 @@ pub(super) fn try_bc7_mode6(
 /// larger share.
 ///
 /// Timing agreed it was not there: +2.0%, z = +1.41, 8 ties of 16.
+/// # A second refuted optimisation, for a different reason than the first
+///
+/// Vectorising the `b0`/`b1` accumulation with the same kernel that won **-51.7%**
+/// on BC1's `refit_with_ls` measured **272 -> 605 instructions here**.
+///
+/// The difference is not the loop, it is what the caller already has. BC1's
+/// version receives a `TableLs` that **already carries** `(1-w, w)` per pixel, so
+/// handing it to the kernel is free. This function computes `w` and `u` inline
+/// and uses each for *both* the `a`-accumulation and the `b`-accumulation, so
+/// vectorising only the second half forces a 128-byte `uw` array into existence
+/// that nothing needed before — and that costs more than the vectorisation saves.
+///
+/// Caching the index-only half was refuted separately above. Both routes are
+/// now closed with numbers.
 pub(super) fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 4], [u8; 4])> {
     const W: [f32; 16] = [
         0.0, 4.0 / 64.0, 9.0 / 64.0, 13.0 / 64.0, 17.0 / 64.0, 21.0 / 64.0, 26.0 / 64.0,
