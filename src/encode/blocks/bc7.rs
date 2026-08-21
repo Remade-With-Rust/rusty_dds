@@ -377,6 +377,15 @@ fn fit_indices_alpha8(alpha: &[u8; 16], pal: &[u8; 8]) -> ([u8; 16], i32) {
     if simd::has_avx2() {
         return simd::alpha_fit_avx2(pal, alpha);
     }
+    fit_indices_alpha8_scalar(alpha, pal)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn fit_indices_alpha8_scalar(alpha: &[u8; 16], pal: &[u8; 8]) -> ([u8; 16], i32) {
     let mut idx = [0u8; 16];
     let mut err = 0i32;
     for (i, &a) in alpha.iter().enumerate() {
@@ -941,6 +950,20 @@ pub(super) fn palette_and_fit_mode6(
     if simd::has_avx2() {
         return simd::palette_fit_mode6_avx2(pixels, base, c0, c1);
     }
+    palette_and_fit_mode6_scalar(pixels, base, c0, c1)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed on a
+/// machine with AVX2, but inlined at the dispatch it drags both
+/// `palette_mode6_from_base` and `fit_indices_mode6` into the hot body with it.
+#[cold]
+#[inline(never)]
+fn palette_and_fit_mode6_scalar(
+    pixels: &[[u8; 4]; 16],
+    base: [i32; 4],
+    c0: [u8; 4],
+    c1: [u8; 4],
+) -> ([u8; 16], i64) {
     let pal = palette_mode6_from_base(base, c0, c1);
     fit_indices_mode6(pixels, &pal)
 }
@@ -1132,6 +1155,12 @@ pub(super) fn ls_endpoints_mode6_pxv(
     Some(simd::bc1_ls_solve(b0, b1, a00, a01, a11, det))
 }
 
+/// Kept OUT of line: this is the fallback arm of an AVX2 dispatch, so on
+/// any machine that has AVX2 it is never executed — but inlined at the
+/// dispatch it lands in the hot body and interleaves with the code that
+/// does run.
+#[cold]
+#[inline(never)]
 pub(super) fn ls_endpoints_mode6_scalar(
     pixels: &[[u8; 4]; 16],
     indices: &[u8; 16],

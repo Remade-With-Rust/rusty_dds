@@ -432,6 +432,20 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
         let err = simd::bc1_fixed_sse_565_avx2(pixels, c0, c1, table);
         return (err < limit).then_some(err);
     }
+    bc1_block_sse_limited_scalar(pixels, block, table, limit)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn bc1_block_sse_limited_scalar(
+    pixels: &[[u8; 4]; 16],
+    block: &[u8; 8],
+    table: u32,
+    limit: i32,
+) -> Option<i32> {
     let packed = bc1_colors_packed(block);
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
@@ -581,7 +595,12 @@ fn table_ls(table: u32) -> Option<TableLs> {
 /// so the float sums are bit-identical, and the solve is the original
 /// expression unchanged.
 /// Scalar twin of [`simd::ls_accum_sse`], and its oracle.
-#[inline]
+/// Kept OUT of line: this is the fallback arm of an AVX2 dispatch, so on
+/// any machine that has AVX2 it is never executed — but inlined at the
+/// dispatch it lands in the hot body and interleaves with the code that
+/// does run.
+#[cold]
+#[inline(never)]
 fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 3], [f32; 3]) {
     let mut b0 = [0f32; 3];
     let mut b1 = [0f32; 3];
@@ -832,8 +851,17 @@ fn bc1_chan_sse(planar: &[[u8; 16]; 3], ch: usize, c0: u16, c1: u16, table: u32)
     if simd::has_avx2() {
         return simd::bc1_chan_sse_avx2(&planar[ch], cols, table);
     }
+    bc1_chan_sse_scalar(&planar[ch], cols, table)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn bc1_chan_sse_scalar(plane: &[u8; 16], cols: [u8; 4], table: u32) -> i32 {
     let mut e = 0i32;
-    for (i, &x) in planar[ch].iter().enumerate() {
+    for (i, &x) in plane.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
         let d = cols[idx] as i32 - x as i32;
         e += d * d;
@@ -1236,11 +1264,20 @@ fn mode6_chan_sse(fixed: &Mode6Fixed, c: usize, v0: u8, v1: u8) -> i64 {
     if simd::has_avx2() {
         return simd::mode6_chan_sse_avx2(&fixed.planar.planar[c], &fixed.w, v0, v1);
     }
+    mode6_chan_sse_scalar(&fixed.planar.planar[c], &fixed.w, v0, v1)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn mode6_chan_sse_scalar(plane: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8) -> i64 {
     let base = v0 as i32 * 64 + 32;
     let delta = v1 as i32 - v0 as i32;
     let mut err = 0i64;
-    for (i, &x) in fixed.planar.planar[c].iter().enumerate() {
-        let v = ((base + fixed.w[i] as i32 * delta) >> 6) as u8;
+    for (i, &x) in plane.iter().enumerate() {
+        let v = ((base + w[i] as i32 * delta) >> 6) as u8;
         let d = v as i64 - x as i64;
         err += d * d;
     }
@@ -1278,7 +1315,23 @@ fn mode6_chan_sse_pair(
             ddelta,
         );
     }
-    // Scalar fallback rebuilds the second candidate from the same deltas.
+    mode6_chan_sse_pair_scalar(fixed, c, a, b, dbase, ddelta)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed on a
+/// machine with AVX2, but inlined at the dispatch it drags two whole
+/// `mode6_chan_sse` bodies into the hot path with it.
+#[cold]
+#[inline(never)]
+fn mode6_chan_sse_pair_scalar(
+    fixed: &Mode6Fixed,
+    c: usize,
+    a: u8,
+    b: u8,
+    dbase: i16,
+    ddelta: i16,
+) -> (i64, i64) {
+    // Rebuilds the second candidate from the same deltas.
     let (a1, b1) = if dbase != 0 {
         ((a as i16 + dbase / 64) as u8, b)
     } else {

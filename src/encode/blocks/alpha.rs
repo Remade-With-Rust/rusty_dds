@@ -981,19 +981,22 @@ pub(super) fn alpha_sse_s(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
 }
 
 pub(super) fn pack_alpha_indices(a0: u8, a1: u8, palette: &[u8; 8], samples: &[u8; 16]) -> [u8; 8] {
-    let mut indices = [0u8; 16];
-    for (i, &s) in samples.iter().enumerate() {
-        let mut best = 0u8;
-        let mut best_d = i32::MAX;
-        for (j, &p) in palette.iter().enumerate() {
-            let d = (p as i32 - s as i32).abs();
-            if d < best_d {
-                best_d = d;
-                best = j as u8;
-            }
-        }
-        indices[i] = best;
-    }
+    // Sixteen samples against eight entries by |p - s|, first minimum wins.
+    //
+    // That is character-for-character what `alpha_select_avx2` does, and what
+    // the signed twin `pack_alpha_indices_s` has routed to since the presweep
+    // work — this one was simply never wired up and stayed a 677-instruction
+    // scalar double loop. Same comparison, same strict `<`, so the same
+    // lowest-index tie-break: byte-identical, and the shared oracle already
+    // guards the kernel.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let indices = if simd::has_avx2() {
+        simd::alpha_select_avx2(palette, samples).0
+    } else {
+        alpha_select_scalar(palette, samples).0
+    };
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let indices = alpha_select_scalar(palette, samples).0;
     let mut out = [0u8; 8];
     out[0] = a0;
     out[1] = a1;
@@ -1011,6 +1014,12 @@ pub(super) fn pack_alpha_indices(a0: u8, a1: u8, palette: &[u8; 8], samples: &[u
 ///
 /// Scalar twin of [`simd::alpha_select_avx2`]; the vector form must match it
 /// exactly, including the FIRST-minimum tie-break of the strict `<`.
+/// Kept OUT of line: this is the fallback arm of an AVX2 dispatch, so on
+/// any machine that has AVX2 it is never executed — but inlined at the
+/// dispatch it lands in the hot body and interleaves with the code that
+/// does run.
+#[cold]
+#[inline(never)]
 pub(super) fn alpha_select_scalar(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
     let mut indices = [0u8; 16];
     let mut err = 0i32;

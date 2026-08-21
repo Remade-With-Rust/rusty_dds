@@ -107,6 +107,12 @@ fn fit(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
 }
 
 /// Scalar twin and oracle for [`fit_avx2`].
+/// Kept OUT of line: this is the fallback arm of an AVX2 dispatch, so on
+/// any machine that has AVX2 it is never executed — but inlined at the
+/// dispatch it lands in the hot body and interleaves with the code that
+/// does run.
+#[cold]
+#[inline(never)]
 fn fit_scalar(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], i64) {
     let mut idx = [0u8; 16];
     let mut err = 0i64;

@@ -22,6 +22,15 @@ pub(super) fn psq_rgb(pixels: &[[u8; 4]; 16]) -> i32 {
     if simd::has_avx2() {
         return simd::bc1_psq_rgb_avx2(pixels);
     }
+    psq_rgb_scalar(pixels)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn psq_rgb_scalar(pixels: &[[u8; 4]; 16]) -> i32 {
     let mut t = 0i32;
     for p in pixels {
         for c in 0..3 {
@@ -139,7 +148,12 @@ pub(super) fn bc1_fit_4color(
 /// Scalar oracle/fallback: prefix early-abort and total-abort agree because
 /// squared errors are non-negative (prefix >= limit iff total >= limit for
 /// the acceptance decision).
-#[inline]
+/// Kept OUT of line: this is the fallback arm of an AVX2 dispatch, so on
+/// any machine that has AVX2 it is never executed — but inlined at the
+/// dispatch it lands in the hot body and interleaves with the code that
+/// does run.
+#[cold]
+#[inline(never)]
 pub(super) fn bc1_fit_4color_scalar(
     pixels: &[[u8; 4]; 16],
     colors: &[[u8; 3]; 4],
@@ -244,8 +258,17 @@ pub(super) fn pal16_from_565(hi: u16, lo: u16) -> Pal16 {
     if simd::has_avx2() {
         simd::bc1_palette_565_i16_avx2(hi, lo)
     } else {
-        widen_pal(&bc1_palette_565(hi, lo))
+        pal16_from_565_scalar(hi, lo)
     }
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
+/// on a machine with AVX2, but inlined at the dispatch it lands in the hot
+/// body and interleaves with the code that does run.
+#[cold]
+#[inline(never)]
+fn pal16_from_565_scalar(hi: u16, lo: u16) -> Pal16 {
+    widen_pal(&bc1_palette_565(hi, lo))
 }
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 pub(super) fn pal16_from_565(_hi: u16, _lo: u16) -> Pal16 {}
