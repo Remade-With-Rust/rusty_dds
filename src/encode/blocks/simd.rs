@@ -225,10 +225,29 @@ unsafe fn bc1_fit_4color_avx2_impl(
     let mut idx_lo = _mm256_setzero_si256();
     let mut idx_hi = _mm256_setzero_si256();
 
-    for (k, c) in colors.iter().enumerate() {
-        let pv = _mm256_set1_epi64x(
-            u64::from_le_bytes([c[0], 0, c[1], 0, c[2], 0, 0, 0]) as i64,
-        );
+    // `u64::from_le_bytes([r,0,g,0,b,0,0,0])` is a byte-to-i16 widen written as
+    // bytes, and it emitted about nine scalar instructions per colour — the
+    // histogram showed twelve `movzbl`, nine `orl` and sixteen shift/or pairs
+    // across the unrolled loop. Widening all four up front leaves a broadcast.
+    //
+    // `colors` is `[[u8; 3]; 4]` — twelve bytes — so it cannot be loaded as a
+    // sixteen-byte vector directly; the entries are restrided to four bytes with
+    // a zero alpha, which is also what keeps `pv`'s fourth lane zero so the
+    // masked pixel alpha subtracts to nothing.
+    let mut cb = [0u8; 16];
+    for k in 0..4usize {
+        cb[k * 4] = colors[k][0];
+        cb[k * 4 + 1] = colors[k][1];
+        cb[k * 4 + 2] = colors[k][2];
+    }
+    let mut c16 = [0i16; 16];
+    _mm256_storeu_si256(
+        c16.as_mut_ptr() as *mut __m256i,
+        _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr() as *const __m128i)),
+    );
+
+    for k in 0..4usize {
+        let pv = _mm256_set1_epi64x(*(c16.as_ptr().add(k * 4) as *const i64));
         let kv = _mm256_set1_epi32(k as i32);
         let cur_lo = sse8_rgb(base, 0, pv, keep, perm);
         let cur_hi = sse8_rgb(base, 32, pv, keep, perm);
