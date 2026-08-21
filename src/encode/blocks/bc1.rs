@@ -145,6 +145,17 @@ pub(super) fn pack_bc1_scored_565(
 ) -> Option<([u8; 8], i32)> {
     debug_assert_ne!(a, b);
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    // The lattice runs this ~6.6 times a block, and it used to build the BYTE
+    // palette scalar (77 instructions) only for the fit kernel to widen it
+    // straight back to i16 — the same pack-then-unpack round trip removed from
+    // `pack_bc1_scored`. Both come from the 565 words directly here.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let pal16 = simd::bc1_palette_565_i16_avx2(hi, lo);
+        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, &pal16, err_limit)?;
+        let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
+        return Some((v.to_le_bytes(), err));
+    }
     pack_bc1_scored_with(pixels, hi, lo, &bc1_palette_565(hi, lo), err_limit)
 }
 
