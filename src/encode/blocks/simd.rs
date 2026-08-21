@@ -1450,6 +1450,19 @@ unsafe fn palette_fit_mode6_avx2_impl(
 /// Written as a single body rather than two helpers on purpose: a
 /// `#[target_feature]` function cannot be force-inlined on stable, so factoring
 /// would reintroduce exactly the call this removes.
+///
+/// # Do not also fold the SCORING in
+///
+/// Fusing one step further — refit, then build the palette and score against
+/// the block, so `bc1_block_sse_limited` disappears — was tried and REFUTED.
+/// The composed kernel needs nine parameters (`pxv`, `uw`, four normal-equation
+/// terms, the pixels, the table and the limit), and the argument marshalling
+/// plus the `Option<(u16, u16, i32)>` return cost more than the one boundary it
+/// removes: the glue alone measured **~102 instructions** against the 83 of the
+/// two separate wrappers it replaced.
+///
+/// **Fusion stops paying when the fused signature gets wide.** The wins in this
+/// campaign all shared few arguments; this one did not.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn ls_accum_solve_565(
     pxv: &[[f32; 8]; 16],
