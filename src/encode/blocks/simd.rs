@@ -384,14 +384,35 @@ unsafe fn prep_palette_regs(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn widen_palette(colors: &[[u8; 3]; 4]) -> Bc1Pal {
+    prep_palette_bytes(restride_palette_3to4(colors))
+}
+
+/// Four `[R,G,B]` triples as sixteen bytes of `[R,G,B,0]`, in one register.
+///
+/// The obvious spelling writes the sixteen bytes with twelve scalar stores and
+/// loads them straight back as a vector — scalar code writing memory that
+/// vector code immediately reads, which is the store-forwarding shape this file
+/// has removed repeatedly, and it sits in front of every mode-4/5 fit in BC7.
+///
+/// The source is exactly twelve bytes, so it cannot be read with a 16-byte
+/// load without running off the end of the array. A `u64` plus a `u32` covers
+/// it precisely, and one `pshufb` opens the 3-byte stride out to 4 with a zero
+/// alpha — which is also what keeps the broadcast's fourth lane zero, so the
+/// dot product against it contributes nothing.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn restride_palette_3to4(colors: &[[u8; 3]; 4]) -> std::arch::x86_64::__m128i {
     use std::arch::x86_64::*;
-    let mut cb = [0u8; 16];
-    for k in 0..4usize {
-        cb[k * 4] = colors[k][0];
-        cb[k * 4 + 1] = colors[k][1];
-        cb[k * 4 + 2] = colors[k][2];
-    }
-    prep_palette_bytes(_mm_loadu_si128(cb.as_ptr() as *const __m128i))
+    let base = colors.as_ptr() as *const u8;
+    // Exactly the twelve bytes that exist: never a byte past the array.
+    let lo = (base as *const u64).read_unaligned();
+    let hi = (base.add(8) as *const u32).read_unaligned();
+    let v = _mm_insert_epi32(_mm_cvtsi64_si128(lo as i64), hi as i32, 2);
+    _mm_shuffle_epi8(
+        v,
+        _mm_setr_epi8(0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1),
+    )
 }
 
 /// Widen a palette once, for reuse across fits.
@@ -443,8 +464,52 @@ unsafe fn bc1_fit_4color_avx2_impl(
     colors: &[[u8; 3]; 4],
     err_limit: i32,
 ) -> Option<(u32, i32)> {
-    let pal = widen_palette(colors);
-    bc1_fit_4color_pre_avx2_impl(pixels, &pal, bc1_psq_rgb_avx2_impl(pixels), err_limit)
+    // Straight to registers. Going through `Bc1Pal` would write the prepared
+    // palette to memory for the core to read back — the same round trip the
+    // 565 entry point already avoids, and this path carries every BC7 mode-4/5
+    // fit, which a doubling probe puts at about 24% of BC7 encode.
+    let (p8, cst4) = prep_palette_regs(restride_palette_3to4(colors));
+    bc1_fit_core_avx2(pixels, p8, cst4, bc1_psq_rgb_avx2_impl(pixels), err_limit)
+}
+
+/// Sixteen 3-bit alpha indices packed into one 48-bit word.
+///
+/// The scalar form is sixteen shift-and-or steps with a loop-carried dependency
+/// on the accumulator, and it runs on every alpha block in BC2, BC3, BC4 and
+/// BC5 — three copies of it existed.
+///
+/// Vectorised by weighted accumulation, the same shape the BC1 index table
+/// uses. `maddubs` folds adjacent BYTES with weights 1 and 8, giving eight
+/// 6-bit groups (at most 7 + 56 = 63). `madd` then folds adjacent WORDS with
+/// weights 1 and 64, giving four 12-bit groups (at most 4095). Neither
+/// saturates, and a 3-bit index is unsigned and small, so `maddubs`'s
+/// signed-byte multiplier is never negative.
+///
+/// The last step stays scalar deliberately: twelve is not a byte multiple, so
+/// assembling four 12-bit groups into 48 bits is three shifts and three ors,
+/// which no shuffle does better.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_pack_indices_avx2(indices: &[u8; 16]) -> u64 {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_pack_indices_avx2_impl(indices) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_pack_indices_avx2_impl(indices: &[u8; 16]) -> u64 {
+    use std::arch::x86_64::*;
+    let iv = _mm_loadu_si128(indices.as_ptr() as *const __m128i);
+    let g6 = _mm_maddubs_epi16(
+        iv,
+        _mm_setr_epi8(1, 8, 1, 8, 1, 8, 1, 8, 1, 8, 1, 8, 1, 8, 1, 8),
+    );
+    let g12 = _mm_madd_epi16(g6, _mm_setr_epi16(1, 64, 1, 64, 1, 64, 1, 64));
+    let q0 = _mm_extract_epi32::<0>(g12) as u32 as u64;
+    let q1 = _mm_extract_epi32::<1>(g12) as u32 as u64;
+    let q2 = _mm_extract_epi32::<2>(g12) as u32 as u64;
+    let q3 = _mm_extract_epi32::<3>(g12) as u32 as u64;
+    q0 | (q1 << 12) | (q2 << 24) | (q3 << 36)
 }
 
 /// Sum over the block of (r^2 + g^2 + b^2) — the pixel-only term of the SSE.
@@ -2285,7 +2350,41 @@ mod oracle {
     /// The vector LS accumulation must be **bit-identical** to the scalar loop,
     /// which means the same order and no fused multiply-add.
     #[cfg(target_arch = "x86_64")]
-        #[test]
+            #[test]
+    fn alpha_pack_indices_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x1d3b_77aa_5c19_e024u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut idx = [0u8; 16];
+            for (i, q) in idx.iter_mut().enumerate() {
+                // All-zero and all-sevens are the extremes: every group at its
+                // floor and at its ceiling, where a saturating fold would show.
+                *q = match case {
+                    0 => 0,
+                    1 => 7,
+                    _ => ((next() >> 11) as u8) & 7,
+                };
+                let _ = i;
+            }
+            let got = alpha_pack_indices_avx2(&idx);
+            let mut want = 0u64;
+            for (i, &v) in idx.iter().enumerate() {
+                want |= (v as u64) << (3 * i);
+            }
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
+#[test]
     fn alpha_fixed_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {

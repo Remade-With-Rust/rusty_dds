@@ -423,17 +423,55 @@ impl AlphaSelect {
 /// Pack indices + SSE; returns `None` if SSE cannot beat `err_limit` (early abort).
 /// Pack endpoints plus sixteen 3-bit indices into the eight-byte alpha block.
 #[inline]
+/// Sixteen 3-bit indices as one 48-bit word.
+///
+/// This loop existed in FOUR places; see `simd::alpha_pack_indices_avx2` for
+/// the vector form and why its folds cannot saturate.
+fn pack_index_bits(indices: &[u8; 16]) -> u64 {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_pack_indices_avx2(indices);
+    }
+    pack_index_bits_scalar(indices)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch.
+#[cold]
+#[inline(never)]
+fn pack_index_bits_scalar(indices: &[u8; 16]) -> u64 {
+    let mut acc = 0u64;
+    for (i, idx) in indices.iter().enumerate() {
+        acc |= (*idx as u64) << (3 * i);
+    }
+    acc
+}
+
+/// The six index bytes of an alpha block, as one little-endian word.
+///
+/// A BC4/BC5 block is two endpoint bytes then six bytes of packed 3-bit
+/// indices, little-endian and contiguous — so this is a load, not a
+/// six-iteration shift-and-or. The loop it replaces existed in THREE places.
+#[inline]
+fn alpha_index_bits(block: &[u8; 8]) -> u64 {
+    u64::from_le_bytes([
+        block[2], block[3], block[4], block[5], block[6], block[7], 0, 0,
+    ])
+}
+
+/// The inverse: write the low six bytes of `bits` into the block's index area.
+///
+/// Existed in FOUR places as a six-iteration shift-mask-store.
+#[inline]
+fn write_index_bits(out: &mut [u8; 8], bits: u64) {
+    out[2..8].copy_from_slice(&bits.to_le_bytes()[..6]);
+}
+
 fn pack_alpha_out(a0: u8, a1: u8, indices: &[u8; 16], err: i32) -> ([u8; 8], i32) {
     let mut out = [0u8; 8];
     out[0] = a0;
     out[1] = a1;
-    let mut bits: u64 = 0;
-    for (i, idx) in indices.iter().enumerate() {
-        bits |= (*idx as u64) << (3 * i);
-    }
-    for b in 0..6 {
-        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
-    }
+    let bits = pack_index_bits(indices);
+    write_index_bits(&mut out, bits);
     (out, err)
 }
 
@@ -520,10 +558,7 @@ pub(super) fn ls_alpha_endpoints_u(samples: &[u8; 16], block: &[u8; 8]) -> Optio
     if a0 <= a1 {
         return None; // 4-lerp uses 0/255 sentinels — skip LS.
     }
-    let mut bits = 0u64;
-    for b in 0..6 {
-        bits |= (block[2 + b] as u64) << (8 * b);
-    }
+    let bits = alpha_index_bits(block);
     // BC4 6-lerp: idx 0→e0, 1→e1, 2..7 → (6..1)*e0 + (1..6)*e1 over 7.
     const W: [f32; 8] = [0.0, 1.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0];
     let mut sw = 0.0f32;
@@ -572,7 +607,6 @@ pub(super) const SNORM_TO_UNORM: [u8; 255] = {
 };
 
 /// SNORM i32 → UNORM u8, matching the corpus scoreboard (`snorm_bits_to_unorm`).
-#[inline]
 pub(super) fn snorm_i32_to_unorm_u8(s: i32) -> u8 {
     SNORM_TO_UNORM[(s.clamp(-127, 127) + 127) as usize]
 }
@@ -915,13 +949,8 @@ pub(super) fn pack_alpha_indices_s_err(
     let mut out = [0u8; 8];
     out[0] = a0 as i8 as u8;
     out[1] = a1 as i8 as u8;
-    let mut bits: u64 = 0;
-    for (i, idx) in indices.iter().enumerate() {
-        bits |= (*idx as u64) << (3 * i);
-    }
-    for b in 0..6 {
-        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
-    }
+    let bits = pack_index_bits(&indices);
+    write_index_bits(&mut out, bits);
     Some((out, err))
 }
 
@@ -931,10 +960,7 @@ pub(super) fn ls_alpha_endpoints_s(vals: &[i32; 16], block: &[u8; 8]) -> Option<
     if a0 <= a1 {
         return None;
     }
-    let mut bits = 0u64;
-    for b in 0..6 {
-        bits |= (block[2 + b] as u64) << (8 * b);
-    }
+    let bits = alpha_index_bits(block);
     const W: [f32; 8] = [0.0, 1.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0];
     let mut sw = 0.0f32;
     let mut sw2 = 0.0f32;
@@ -979,15 +1005,6 @@ pub(super) fn alpha_sse_u(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
     alpha_fixed_sse_scalar(samples, &palette, bits)
 }
 
-/// The sixteen packed 3-bit indices of an alpha block as one word.
-#[inline]
-fn alpha_index_bits(block: &[u8; 8]) -> u64 {
-    let mut bits = 0u64;
-    for b in 0..6 {
-        bits |= (block[2 + b] as u64) << (8 * b);
-    }
-    bits
-}
 
 /// Kept OUT of line: the fallback arm of an AVX2 dispatch.
 #[cold]
@@ -1045,13 +1062,8 @@ pub(super) fn pack_alpha_indices(a0: u8, a1: u8, palette: &[u8; 8], samples: &[u
     let mut out = [0u8; 8];
     out[0] = a0;
     out[1] = a1;
-    let mut bits: u64 = 0;
-    for (i, idx) in indices.iter().enumerate() {
-        bits |= (*idx as u64) << (3 * i);
-    }
-    for b in 0..6 {
-        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
-    }
+    let bits = pack_index_bits(&indices);
+    write_index_bits(&mut out, bits);
     out
 }
 
@@ -1103,44 +1115,63 @@ pub(super) fn pack_alpha_indices_s(a0: i32, a1: i32, palette: &[i32; 8], samples
     let mut out = [0u8; 8];
     out[0] = a0 as i8 as u8;
     out[1] = a1 as i8 as u8;
-    let mut bits: u64 = 0;
-    for (i, idx) in indices.iter().enumerate() {
-        bits |= (*idx as u64) << (3 * i);
-    }
-    for b in 0..6 {
-        out[2 + b] = ((bits >> (8 * b)) & 0xFF) as u8;
-    }
+    let bits = pack_index_bits(&indices);
+    write_index_bits(&mut out, bits);
     out
 }
 
 pub(super) fn alpha_palette6_u(max_v: u8, min_v: u8) -> [u8; 8] {
     // Match bcdec_rs / DirectXTex: fixed-point weights with +32768 rounding.
     const W6: [i32; 6] = [9363, 18724, 28086, 37450, 46812, 56173];
-    let max = max_v as i32;
+    // The two weights of every entry sum to 65536 — W6[k] + W6[5-k] is exactly
+    // 1.0 in this fixed point — so
+    //
+    //     W_hi*max + W_lo*min + 32768
+    //   = 65536*min + W_hi*(max - min) + 32768
+    //
+    // and 65536*min is an exact multiple of the shift, so it separates out
+    // cleanly: the entry is `min + ((W_hi*d + 32768) >> 16)`. One multiply per
+    // entry instead of two, and identical bit for bit — including for a
+    // negative `min` or a negative `d`, because an arithmetic shift floors and
+    // the separated term contributes no fraction to floor over.
     let min = min_v as i32;
+    let d = max_v as i32 - min;
+    let lerp = |w: i32| (min + ((w * d + 32768) >> 16)) as u8;
     [
         max_v,
         min_v,
-        ((W6[5] * max + W6[0] * min + 32768) >> 16) as u8,
-        ((W6[4] * max + W6[1] * min + 32768) >> 16) as u8,
-        ((W6[3] * max + W6[2] * min + 32768) >> 16) as u8,
-        ((W6[2] * max + W6[3] * min + 32768) >> 16) as u8,
-        ((W6[1] * max + W6[4] * min + 32768) >> 16) as u8,
-        ((W6[0] * max + W6[5] * min + 32768) >> 16) as u8,
+        lerp(W6[5]),
+        lerp(W6[4]),
+        lerp(W6[3]),
+        lerp(W6[2]),
+        lerp(W6[1]),
+        lerp(W6[0]),
     ]
 }
 
 pub(super) fn alpha_palette4_u(max_v: u8, min_v: u8) -> [u8; 8] {
     const W4: [i32; 4] = [13107, 26215, 39321, 52429];
-    let max = max_v as i32;
+    // The two weights of every entry sum to 65536 — W4[k] + W4[3-k] is exactly
+    // 1.0 in this fixed point — so
+    //
+    //     W_hi*max + W_lo*min + 32768
+    //   = 65536*min + W_hi*(max - min) + 32768
+    //
+    // and 65536*min is an exact multiple of the shift, so it separates out
+    // cleanly: the entry is `min + ((W_hi*d + 32768) >> 16)`. One multiply per
+    // entry instead of two, and identical bit for bit — including for a
+    // negative `min` or a negative `d`, because an arithmetic shift floors and
+    // the separated term contributes no fraction to floor over.
     let min = min_v as i32;
+    let d = max_v as i32 - min;
+    let lerp = |w: i32| (min + ((w * d + 32768) >> 16)) as u8;
     [
         max_v,
         min_v,
-        ((W4[3] * max + W4[0] * min + 32768) >> 16) as u8,
-        ((W4[2] * max + W4[1] * min + 32768) >> 16) as u8,
-        ((W4[1] * max + W4[2] * min + 32768) >> 16) as u8,
-        ((W4[0] * max + W4[3] * min + 32768) >> 16) as u8,
+        lerp(W4[3]),
+        lerp(W4[2]),
+        lerp(W4[1]),
+        lerp(W4[0]),
         0,
         255,
     ]
@@ -1148,27 +1179,53 @@ pub(super) fn alpha_palette4_u(max_v: u8, min_v: u8) -> [u8; 8] {
 
 pub(super) fn alpha_palette6_s(max_v: i32, min_v: i32) -> [i32; 8] {
     const W6: [i32; 6] = [9363, 18724, 28086, 37450, 46812, 56173];
+    // The two weights of every entry sum to 65536 — W6[k] + W6[5-k] is exactly
+    // 1.0 in this fixed point — so
+    //
+    //     W_hi*max + W_lo*min + 32768
+    //   = 65536*min + W_hi*(max - min) + 32768
+    //
+    // and 65536*min is an exact multiple of the shift, so it separates out
+    // cleanly: the entry is `min + ((W_hi*d + 32768) >> 16)`. One multiply per
+    // entry instead of two, and identical bit for bit — including for a
+    // negative `min` or a negative `d`, because an arithmetic shift floors and
+    // the separated term contributes no fraction to floor over.
+    let d = max_v - min_v;
+    let lerp = |w: i32| min_v + ((w * d + 32768) >> 16);
     [
         max_v,
         min_v,
-        (W6[5] * max_v + W6[0] * min_v + 32768) >> 16,
-        (W6[4] * max_v + W6[1] * min_v + 32768) >> 16,
-        (W6[3] * max_v + W6[2] * min_v + 32768) >> 16,
-        (W6[2] * max_v + W6[3] * min_v + 32768) >> 16,
-        (W6[1] * max_v + W6[4] * min_v + 32768) >> 16,
-        (W6[0] * max_v + W6[5] * min_v + 32768) >> 16,
+        lerp(W6[5]),
+        lerp(W6[4]),
+        lerp(W6[3]),
+        lerp(W6[2]),
+        lerp(W6[1]),
+        lerp(W6[0]),
     ]
 }
 
 pub(super) fn alpha_palette4_s(max_v: i32, min_v: i32) -> [i32; 8] {
     const W4: [i32; 4] = [13107, 26215, 39321, 52429];
+    // The two weights of every entry sum to 65536 — W4[k] + W4[3-k] is exactly
+    // 1.0 in this fixed point — so
+    //
+    //     W_hi*max + W_lo*min + 32768
+    //   = 65536*min + W_hi*(max - min) + 32768
+    //
+    // and 65536*min is an exact multiple of the shift, so it separates out
+    // cleanly: the entry is `min + ((W_hi*d + 32768) >> 16)`. One multiply per
+    // entry instead of two, and identical bit for bit — including for a
+    // negative `min` or a negative `d`, because an arithmetic shift floors and
+    // the separated term contributes no fraction to floor over.
+    let d = max_v - min_v;
+    let lerp = |w: i32| min_v + ((w * d + 32768) >> 16);
     [
         max_v,
         min_v,
-        (W4[3] * max_v + W4[0] * min_v + 32768) >> 16,
-        (W4[2] * max_v + W4[1] * min_v + 32768) >> 16,
-        (W4[1] * max_v + W4[2] * min_v + 32768) >> 16,
-        (W4[0] * max_v + W4[3] * min_v + 32768) >> 16,
+        lerp(W4[3]),
+        lerp(W4[2]),
+        lerp(W4[1]),
+        lerp(W4[0]),
         -127,
         127,
     ]

@@ -174,10 +174,16 @@ pub(super) fn bc1_fit_4color_scalar(
     let mut table = 0u32;
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
+        // The RGB triple is built once, not rebuilt inside all four
+        // comparisons, and entry 0 SEEDS the argmin rather than being compared
+        // against a sentinel. Seeding is exact: the scan uses a strict `<`, so
+        // entry 0 already won every tie it could reach, and starting from it
+        // just retires the comparison against `i32::MAX` that could never fail.
+        let px = [p[0], p[1], p[2]];
         let mut best = 0usize;
-        let mut best_d = i32::MAX;
-        for (j, c) in colors.iter().enumerate() {
-            let d = sqr_rgb([p[0], p[1], p[2]], *c);
+        let mut best_d = sqr_rgb(px, colors[0]);
+        for j in 1..4usize {
+            let d = sqr_rgb(px, colors[j]);
             if d < best_d {
                 best_d = d;
                 best = j;
