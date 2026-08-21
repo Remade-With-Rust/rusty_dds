@@ -104,10 +104,14 @@ unsafe fn fit_indices_mode6_avx2_impl(
     // Two palette entries a pass: the loop body is 22 instructions of which the
     // increment, compare and branch are pure overhead, so amortising them over
     // two entries removes about two instructions per entry.
+    // The index vector just counts 0..15 in order, so it is carried and
+    // incremented rather than rebuilt from a scalar `k` each entry — that was a
+    // `vmovd` plus a `vpbroadcastd` sixteen times a call.
+    let one = _mm256_set1_epi32(1);
+    let mut kv = _mm256_setzero_si256();
     for kk in 0..4usize {
       for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
         let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
-        let kv = _mm256_set1_epi32(k as i32);
 
         // The permute that puts lanes back in pixel order is NOT done here.
         // Everything downstream of it — the compare, both blends, and the
@@ -127,6 +131,7 @@ unsafe fn fit_indices_mode6_avx2_impl(
         best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
         idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
         idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
+        kv = _mm256_add_epi32(kv, one);
       }
     }
 
