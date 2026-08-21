@@ -555,10 +555,8 @@ fn refit_with_ls(
     let done = if simd::has_avx2() {
         let (v0, v1) = simd::ls_accum_sse(pxv, &ls.uw);
         let (s0, s1) = simd::bc1_ls_solve(v0, v1, a00, a01, a11, det);
-        for c in 0..3 {
-            e0[c] = round_clamp_u8(s0[c]);
-            e1[c] = round_clamp_u8(s1[c]);
-        }
+        e0.copy_from_slice(&s0[..3]);
+        e1.copy_from_slice(&s1[..3]);
         true
     } else {
         false

@@ -49,7 +49,7 @@ pub(crate) use rdo::encode_image_bc7_rdo;
 ///    non-negative values, and Rust's float-to-int casts saturate, so the
 ///    `255.5` produced by a clamped 255 lands on 255.
 #[inline]
-pub(super) fn round_clamp_u8(x: f32) -> u8 {
+pub(crate) fn round_clamp_u8(x: f32) -> u8 {
     (x.clamp(0.0, 255.0) as f64 + 0.5) as u8
 }
 

@@ -1071,14 +1071,9 @@ pub(super) fn ls_endpoints_mode6_pxv(
     // The same solve BC1 uses: six divisions become two `divps`, bit-identical
     // because IEEE defines division lane-wise. Rounding stays scalar — Rust's
     // `round` is half-away-from-zero and no SSE mode matches it.
-    let (s0, s1) = simd::bc1_ls_solve(b0, b1, a00, a01, a11, det);
-    let mut e0 = [0u8; 4];
-    let mut e1 = [0u8; 4];
-    for c in 0..4 {
-        e0[c] = super::round_clamp_u8(s0[c]);
-        e1[c] = super::round_clamp_u8(s1[c]);
-    }
-    Some((e0, e1))
+    // The solve returns the endpoints already clamped and rounded — see
+    // `bc1_ls_solve`, which folds `round_clamp_u8` in lane-wise.
+    Some(simd::bc1_ls_solve(b0, b1, a00, a01, a11, det))
 }
 
 pub(super) fn ls_endpoints_mode6_scalar(

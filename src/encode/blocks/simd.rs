@@ -773,7 +773,7 @@ pub(super) fn bc1_ls_solve(
     a01: f32,
     a11: f32,
     det: f32,
-) -> ([f32; 4], [f32; 4]) {
+) -> ([u8; 4], [u8; 4]) {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
     unsafe { bc1_ls_solve_impl(b0, b1, a00, a01, a11, det) }
@@ -788,7 +788,7 @@ unsafe fn bc1_ls_solve_impl(
     a01: f32,
     a11: f32,
     det: f32,
-) -> ([f32; 4], [f32; 4]) {
+) -> ([u8; 4], [u8; 4]) {
     use std::arch::x86_64::*;
     let v0 = _mm_loadu_ps(b0.as_ptr());
     let v1 = _mm_loadu_ps(b1.as_ptr());
@@ -801,11 +801,32 @@ unsafe fn bc1_ls_solve_impl(
         _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
         dv,
     );
-    let mut o0 = [0f32; 4];
-    let mut o1 = [0f32; 4];
-    _mm_storeu_ps(o0.as_mut_ptr(), e0);
-    _mm_storeu_ps(o1.as_mut_ptr(), e1);
-    (o0, o1)
+    // The rounding rides along INSIDE this kernel. The callers used to take the
+    // floats out and run `round_clamp_u8` per channel — six times in
+    // `refit_with_ls`, eight in the mode-6 solve — and every one of those is
+    // scalar work sitting immediately after a vector result. Folding it in adds
+    // no call boundary, because this kernel already is one.
+    (round_pack(e0), round_pack(e1))
+}
+
+/// `round_clamp_u8` for four lanes at once: clamp to `[0, 255]` in f32, widen to
+/// f64, add a half, truncate.
+///
+/// This is the same argument `round_clamp_u8` documents, lane-wise. The widen to
+/// f64 is the load-bearing step — in f32 the `+ 0.5` can tie and round up
+/// (`0.49999997f32 + 0.5 == 1.0`), which is exactly why no SSE rounding mode can
+/// be used here. `cvttpd` truncates toward zero, which is `floor` for the
+/// non-negative values a clamp to `[0, 255]` guarantees.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn round_pack(v: std::arch::x86_64::__m128) -> [u8; 4] {
+    use std::arch::x86_64::*;
+    let c = _mm_min_ps(_mm_max_ps(v, _mm_setzero_ps()), _mm_set1_ps(255.0));
+    let d = _mm256_add_pd(_mm256_cvtps_pd(c), _mm256_set1_pd(0.5));
+    let i = _mm256_cvttpd_epi32(d);
+    let mut out = [0i32; 4];
+    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, i);
+    [out[0] as u8, out[1] as u8, out[2] as u8, out[3] as u8]
 }
 
 
@@ -1142,21 +1163,39 @@ mod oracle {
             state ^= state << 17;
             state
         };
+        // Two generators: a wide one that mostly clamps, and a narrow one that
+        // lands inside 0..=255 where the rounding actually decides the answer.
         let mut f = move || (next() as u32 as f32) / 1.0e5 - 20_000.0;
         for case in 0..60_000u32 {
-            let b0 = [f(), f(), f(), f()];
-            let b1 = [f(), f(), f(), f()];
-            let (a00, a01, a11) = (f(), f(), f());
-            let det = if case == 0 { 1.0 } else { f() };
+            let narrow = case % 2 == 1;
+            let mut g = || {
+                if narrow {
+                    (f() % 300.0).abs()
+                } else {
+                    f()
+                }
+            };
+            let b0 = [g(), g(), g(), g()];
+            let b1 = [g(), g(), g(), g()];
+            let (a00, a01, a11) = (g(), g(), g());
+            let det = if case == 0 { 1.0 } else { g() };
             if det == 0.0 || !det.is_finite() {
                 continue;
             }
             let (g0, g1) = bc1_ls_solve(b0, b1, a00, a01, a11, det);
             for c in 0..4 {
+                // The kernel now rounds internally, so the oracle covers BOTH
+                // halves: the divide must be bit-identical and the lane-wise
+                // round must equal the scalar `round_clamp_u8`.
                 let w0 = (a11 * b0[c] - a01 * b1[c]) / det;
                 let w1 = (a00 * b1[c] - a01 * b0[c]) / det;
-                assert_eq!(g0[c].to_bits(), w0.to_bits(), "case {case} e0[{c}]");
-                assert_eq!(g1[c].to_bits(), w1.to_bits(), "case {case} e1[{c}]");
+                if !w0.is_finite() || !w1.is_finite() {
+                    continue; // det is bounded away from zero in real callers
+                }
+                let want0 = crate::encode::blocks::round_clamp_u8(w0);
+                let want1 = crate::encode::blocks::round_clamp_u8(w1);
+                assert_eq!(g0[c], want0, "case {case} e0[{c}] from {w0:?}");
+                assert_eq!(g1[c], want1, "case {case} e1[{c}] from {w1:?}");
             }
         }
     }
