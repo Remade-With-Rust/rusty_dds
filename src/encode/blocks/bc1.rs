@@ -261,6 +261,21 @@ pub(super) fn pack_bc1_scored_with(
 /// answer (the same discrete-lattice effect the signed window exploits).
 /// ±1 per component per endpoint (12 candidates/round), up to 2 rounds,
 /// strict `<` acceptance — quality-monotone.
+/// # A refuted prune, recorded so it is not retried
+///
+/// A per-candidate lower bound was tried here, the same one
+/// `signed_window_sweep` uses: a 4-colour palette's reconstructions lie between
+/// its endpoints, so a sample above the ceiling contributes at least
+/// `(smax - ceil)^2` and one below the floor at least `(floor - smin)^2`.
+/// Byte-identical, provably safe — and **measurably slower**: serial medians
+/// went 0.967 -> 1.102 (Bricks), 0.932 -> 1.053 (Metal), 1.019 -> 1.133 (Rock),
+/// 0.884 -> 1.038 (Wood).
+///
+/// The bound needs `from_565` on both endpoints — six table lookups, about 35
+/// instructions — against a fit of roughly 160, so it must fire on more than a
+/// fifth of candidates to break even. It does not: the lattice makes
+/// CONTRACT-ONLY moves from an already-good incumbent, so a candidate's palette
+/// range rarely excludes enough of the block to reach `best_err`.
 pub(super) fn lattice_refine_bc1(pixels: &[[u8; 4]; 16], best: &mut [u8; 8], best_err: &mut i32) {
     // Contract-only, harvest-chosen (1.3M wins over the bc1 corpus): moves
     // that SHRINK the endpoint interval (hi component down / lo component
