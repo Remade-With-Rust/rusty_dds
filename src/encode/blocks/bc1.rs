@@ -395,8 +395,8 @@ pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Optio
     for c in 0..3 {
         let x0 = (a11 * b0[c] - a01 * b1[c]) / det;
         let x1 = (a00 * b1[c] - a01 * b0[c]) / det;
-        e0[c] = x0.round().clamp(0.0, 255.0) as u8;
-        e1[c] = x1.round().clamp(0.0, 255.0) as u8;
+        e0[c] = super::round_clamp_u8(x0);
+        e1[c] = super::round_clamp_u8(x1);
     }
     Some((e0, e1))
 }

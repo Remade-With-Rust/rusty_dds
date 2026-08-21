@@ -556,8 +556,8 @@ fn refit_with_ls(
         let (v0, v1) = simd::ls_accum_sse(pxv, &ls.uw);
         let (s0, s1) = simd::bc1_ls_solve(v0, v1, a00, a01, a11, det);
         for c in 0..3 {
-            e0[c] = s0[c].round().clamp(0.0, 255.0) as u8;
-            e1[c] = s1[c].round().clamp(0.0, 255.0) as u8;
+            e0[c] = round_clamp_u8(s0[c]);
+            e1[c] = round_clamp_u8(s1[c]);
         }
         true
     } else {
@@ -568,8 +568,8 @@ fn refit_with_ls(
     if !done {
         let (b0, b1) = ls_accum_scalar(pixels, &ls.uw);
         for c in 0..3 {
-            e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 255.0) as u8;
-            e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 255.0) as u8;
+            e0[c] = round_clamp_u8((a11 * b0[c] - a01 * b1[c]) / det);
+            e1[c] = round_clamp_u8((a00 * b1[c] - a01 * b0[c]) / det);
         }
     }
     let q0 = to_565(e0);

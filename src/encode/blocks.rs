@@ -24,6 +24,35 @@ pub(crate) use rdo::encode_image_bc1_rdo;
 #[cfg(feature = "decode")]
 pub(crate) use rdo::encode_image_bc7_rdo;
 
+/// `x.round().clamp(0.0, 255.0) as u8`, without the libm call.
+///
+/// # Why this is worth a helper
+///
+/// `f32::round` is half-away-from-zero, which has no SSE rounding mode, so it
+/// lowers to a **`callq roundf`** — the binary carried 49 such call sites. The
+/// least-squares endpoint solves alone run six of them per `refit_with_ls` and
+/// eight per mode-6 solve, which is over 150 libm calls a block.
+///
+/// # Why it is exactly equivalent
+///
+/// 1. Clamping first cannot change the result, because the bounds are integers:
+///    for `x <= 0`, `round(x) <= 0` clamps to 0 and `clamp(x) = 0` rounds to 0;
+///    for `x >= 255`, both give 255.
+/// 2. After clamping, `x` is non-negative, and for non-negative `x`
+///    round-half-away-from-zero **is** `floor(x + 0.5)`.
+/// 3. The `+ 0.5` is done in `f64`. This matters: in `f32` it is NOT equivalent
+///    — `0.49999997f32 + 0.5` ties and rounds to exactly `1.0`, giving 1 where
+///    `round` gives 0. Widening to `f64` is exact for any `f32`, and the sum
+///    needs about 30 mantissa bits against `f64`'s 53, so no rounding occurs and
+///    the tie cannot arise.
+/// 4. `as u8` on a float truncates toward zero, which equals `floor` for
+///    non-negative values, and Rust's float-to-int casts saturate, so the
+///    `255.5` produced by a clamped 255 lands on 255.
+#[inline]
+pub(super) fn round_clamp_u8(x: f32) -> u8 {
+    (x.clamp(0.0, 255.0) as f64 + 0.5) as u8
+}
+
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]

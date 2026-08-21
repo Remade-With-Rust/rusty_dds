@@ -383,4 +383,41 @@ mod alpha_select_oracle {
             }
         }
     }
+    /// `round_clamp_u8` must equal `x.round().clamp(0.0, 255.0) as u8` for every
+    /// input the solves can produce — the whole point is that it removes a libm
+    /// call without moving a single result.
+    ///
+    /// The sweep deliberately includes the f32 tie that makes the naive
+    /// `(x + 0.5)` form WRONG in f32 (`0.49999997` rounds to `1.0` on add), plus
+    /// exact halves, both clamp boundaries, and negatives.
+    #[test]
+    fn round_clamp_u8_matches_round_then_clamp() {
+        use super::super::round_clamp_u8;
+        let mut cases: Vec<f32> = vec![
+            0.0, -0.0, -0.5, 0.5, 1.5, 2.5, -1.5, 254.5, 255.0, 255.5, 256.0,
+            -1.0, 300.0, -300.0, 0.49999997, -0.49999997, 127.5, 128.5,
+            f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let r = next();
+            // spread across the interesting range and well outside it
+            cases.push((r as u32 as f32 / u32::MAX as f32) * 600.0 - 50.0);
+            cases.push(f32::from_bits((r >> 32) as u32));
+        }
+        for x in cases {
+            if x.is_nan() {
+                continue; // the solves cannot produce NaN; det is bounded away from 0
+            }
+            let want = x.round().clamp(0.0, 255.0) as u8;
+            assert_eq!(round_clamp_u8(x), want, "x = {x:?} ({:#x})", x.to_bits());
+        }
+    }
+
 }

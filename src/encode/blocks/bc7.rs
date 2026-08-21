@@ -1075,8 +1075,8 @@ pub(super) fn ls_endpoints_mode6_pxv(
     let mut e0 = [0u8; 4];
     let mut e1 = [0u8; 4];
     for c in 0..4 {
-        e0[c] = s0[c].round().clamp(0.0, 255.0) as u8;
-        e1[c] = s1[c].round().clamp(0.0, 255.0) as u8;
+        e0[c] = super::round_clamp_u8(s0[c]);
+        e1[c] = super::round_clamp_u8(s1[c]);
     }
     Some((e0, e1))
 }
@@ -1117,8 +1117,8 @@ pub(super) fn ls_endpoints_mode6_scalar(
     for c in 0..4 {
         let x0 = (a11 * b0[c] - a01 * b1[c]) / det;
         let x1 = (a00 * b1[c] - a01 * b0[c]) / det;
-        e0[c] = x0.round().clamp(0.0, 255.0) as u8;
-        e1[c] = x1.round().clamp(0.0, 255.0) as u8;
+        e0[c] = super::round_clamp_u8(x0);
+        e1[c] = super::round_clamp_u8(x1);
     }
     Some((e0, e1))
 }
