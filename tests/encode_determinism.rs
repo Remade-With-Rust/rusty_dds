@@ -131,7 +131,13 @@ const FAST_HASHES: &[(&str, u64)] = &[
 /// RDO at a fixed lambda must also be deterministic (it encodes serially by
 /// design, precisely so that it is).
 const RDO_HASHES: &[(&str, u64)] = &[
-    ("bc1", 0x58d8f9bd90175c1e),
+    // Moved with BC1_PCA_SEED: the RDO baseline encoder reaches the seed on
+    // about 0.001 of blocks even on the fast path, so a handful of pass-1
+    // blocks differ. The reported LADDER is unchanged at its precision --
+    // re-measured lambda 25/50/100 at 92.87% / 89.64% / 84.35% and
+    // +0.173 / +0.106 / -0.066 dB, against the README's
+    // -7.1% / -10.4% / -15.6% and +0.17 / +0.11 / -0.07.
+    ("bc1", 0x7147d3d25c092b31),
     ("bc7", 0x84456f8b4e9df926),
 ];
 
