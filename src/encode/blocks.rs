@@ -271,9 +271,12 @@ pub(crate) use bc7::*;
 
 
 fn to_565(c: [u8; 3]) -> u16 {
-    let r = (c[0] as u16 >> 3) & 31;
-    let g = (c[1] as u16 >> 2) & 63;
-    let b = (c[2] as u16 >> 3) & 31;
+    // No masks: the inputs are bytes, so `255 >> 3` is 31 and `255 >> 2` is 63.
+    // Each shift has already produced a value inside its field, and the `& 31` /
+    // `& 63` that used to follow could not clear a bit on any input.
+    let r = c[0] as u16 >> 3;
+    let g = c[1] as u16 >> 2;
+    let b = c[2] as u16 >> 3;
     (r << 11) | (g << 5) | b
 }
 

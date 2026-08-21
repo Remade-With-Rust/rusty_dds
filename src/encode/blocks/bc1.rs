@@ -71,7 +71,19 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     if best_err == 0 {
         return best;
     }
-    if !(mx == max_c && mn == min_c) {
+    // The second seed is redundant whenever it QUANTIZES to the same 565 pair as
+    // the first — not merely when the byte triples match, which is what this
+    // used to test. 565 drops three bits from red and blue and two from green,
+    // so distinct extrema routinely land on the same pair, and when they do the
+    // whole candidate is identical: same nudge, same ordering, same palette,
+    // same indices, same error.
+    //
+    // Skipping is exact rather than a heuristic. `consider_bc1` passes
+    // `*best_err` as the limit and the fit returns `None` on `err >= limit`, so
+    // a candidate that merely TIES the incumbent is already rejected — which is
+    // precisely what an identical candidate does. The old byte test is a strict
+    // subset of this one.
+    if (to_565(mx), to_565(mn)) != (to_565(max_c), to_565(min_c)) {
         consider_bc1(&pixels, mx, mn, psq, &mut best, &mut best_err);
     }
     // Refine gate: a tiny residual can't repay PCA + LS (gain <= best_err).
@@ -201,6 +213,20 @@ pub(super) fn pack_bc1_scored_565(
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
+    pack_bc1_scored_565_cold(pixels, hi, lo, err_limit)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed on a
+/// machine with AVX2. Inlined at the dispatch it drags the scalar palette build
+/// and the whole scalar fit in with it.
+#[cold]
+#[inline(never)]
+fn pack_bc1_scored_565_cold(
+    pixels: &[[u8; 4]; 16],
+    hi: u16,
+    lo: u16,
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
     pack_bc1_scored_with(pixels, hi, lo, &bc1_palette_565(hi, lo), err_limit)
 }
 
@@ -391,46 +417,23 @@ pub(super) fn pack_bc1_scored(
     let min565 = to_565(min_c);
     if max565 == min565 {
         max565 = max565.saturating_add(1);
+        // Still equal after the nudge means both words are 0xFFFF — the
+        // all-white-565 block, and the only input that reaches true 3-color
+        // punch-through mode.
+        if max565 == min565 {
+            return pack_bc1_scored_cold(pixels, max565, min565, true, err_limit);
+        }
     }
-    // Endpoint ORDER first; the byte palette is built below, and only if
-    // something is going to read it.
+    // Everything past the quantization IS `pack_bc1_scored_565`: order the pair
+    // larger-first, fit against the decode-true 4-color palette, pack. This
+    // function carried its own copy of all three.
     //
-    // All three arms agreed on `from_565(c0)` and `from_565(c1)` once the pair
-    // was ordered — the three-way split was over the ORDERING, not the palette —
-    // so the build hoists out and the arms reduce to picking `(c0, c1)`.
-    let (c0, c1, punch) = if max565 > min565 {
-        (max565, min565, false)
-    } else if max565 < min565 {
-        // 565 quantization inverted the seed order: stored c0 > c1 still
-        // decodes as 4-COLOR mode, so fit indices against the decode-true
-        // 4-color palette. (The old code fitted a 3-color+black palette here
-        // that no decoder would ever reconstruct.)
-        (min565, max565, false)
-    } else {
-        // Equal even after the +1 nudge: true 3-color mode. The nudge has
-        // already separated the pair unless both are 0xFFFF, so this is the
-        // all-white-565 block and nothing else.
-        (min565, max565, true)
-    };
-    // The 4-colour branches just built `[ca, cb, lerp<2,1>, lerp<1,2>]` — which
-    // is `bc1_palette_565(c0, c1)` — and the fit kernel would immediately widen
-    // it to i16. Both come straight from the 565 words on the vector path, so
-    // the scalar palette is only consumed by the punch branch and the scalar
-    // fallback — so it is now built AFTER this dispatch rather than before it.
-    // It was about 77 instructions producing a value nothing reads on every one
-    // of the roughly six calls a block that take the vector path.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if !punch && simd::has_avx2() {
-        let (table, err) = simd::bc1_fit_565_avx2(pixels, c0, c1, psq, err_limit)?;
-        let v = (c0 as u64) | ((c1 as u64) << 16) | ((table as u64) << 32);
-        return Some((v.to_le_bytes(), err));
-    }
-    // Everything below is the punch branch and the scalar fallback, moved OUT
-    // of line. Inlined here they put the whole per-pixel `sqr_rgb` walk — 33
-    // `imull` and its loads — into a function whose vector path returns above,
-    // and `punch` requires both 565 words equal after the nudge, which is the
-    // all-white-565 block and nothing else.
-    pack_bc1_scored_cold(pixels, c0, c1, punch, err_limit)
+    // The two agree on the scalar arm as well, which is what makes the merge
+    // exact rather than merely equivalent-looking: the copy here built
+    // `[ca, cb, lerp<2,1>, lerp<1,2>]` and called `bc1_fit_4color`, and that
+    // array is `bc1_palette_565(c0, c1)` — the very argument the other one
+    // passes.
+    pack_bc1_scored_565(pixels, max565, min565, psq, err_limit)
 }
 
 #[cold]
