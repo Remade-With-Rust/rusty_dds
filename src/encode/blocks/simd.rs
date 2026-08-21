@@ -783,14 +783,20 @@ pub(super) fn ls_pixels_mode6(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
 #[target_feature(enable = "avx2")]
 unsafe fn ls_pixels_mode6_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
     use std::arch::x86_64::*;
-    let dup = _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+    // TWO pixels per pass: eight bytes widen to eight i32 in one
+    // `vpmovzxbd`, so one load and one convert serve both, and each pixel then
+    // costs a permute and a store. One pixel at a time left this rolled at
+    // seven instructions a pass -- 132 for the block.
+    let dup0 = _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+    let dup1 = _mm256_setr_epi32(4, 4, 5, 5, 6, 6, 7, 7);
+    let src = pixels.as_ptr() as *const u8;
     let mut out = [[0f32; 8]; 16];
-    for i in 0..16usize {
-        let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
-            u32::from_le_bytes(pixels[i]) as i32,
+    for i in (0..16usize).step_by(2) {
+        let two = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_loadl_epi64(
+            src.add(i * 4) as *const __m128i,
         )));
-        let v = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(px), dup);
-        _mm256_storeu_ps(out[i].as_mut_ptr(), v);
+        _mm256_storeu_ps(out[i].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup0));
+        _mm256_storeu_ps(out[i + 1].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup1));
     }
     out
 }
@@ -809,13 +815,18 @@ pub(super) fn ls_pixels(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
 #[target_feature(enable = "avx2")]
 unsafe fn ls_pixels_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
     use std::arch::x86_64::*;
+    // Two pixels per pass, as in `ls_pixels_mode6` — one load and one convert
+    // serve both, then a permute and a store each.
+    let dup0 = _mm256_setr_epi32(0, 1, 2, 3, 0, 1, 2, 3);
+    let dup1 = _mm256_setr_epi32(4, 5, 6, 7, 4, 5, 6, 7);
+    let src = pixels.as_ptr() as *const u8;
     let mut out = [[0f32; 8]; 16];
-    for i in 0..16usize {
-        let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
-            u32::from_le_bytes(pixels[i]) as i32,
+    for i in (0..16usize).step_by(2) {
+        let two = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_loadl_epi64(
+            src.add(i * 4) as *const __m128i,
         )));
-        _mm_storeu_ps(out[i].as_mut_ptr(), px);
-        _mm_storeu_ps(out[i].as_mut_ptr().add(4), px);
+        _mm256_storeu_ps(out[i].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup0));
+        _mm256_storeu_ps(out[i + 1].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup1));
     }
     out
 }
