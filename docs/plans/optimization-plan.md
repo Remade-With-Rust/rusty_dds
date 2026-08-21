@@ -4365,9 +4365,10 @@ instructions. Worth grepping for after any new kernel lands.
 
 ## §75 — RDO round 9: the exhaustion pass
 
-Sixteen wins, about **-3,132 instructions/block**, and **twelve refutations** —
-the first round where refutations nearly matched wins. That ratio is the
-headline finding, not any single change.
+Twenty wins, about **-3,479 instructions/block**, and **twelve refutations** —
+the first round where refutations came close to matching wins. Sixteen of the
+wins came from the pass-2 call graph; the last four came from pass 1, which no
+ranking pass had ever touched (see below).
 
 | # | change | measurement |
 |---|---|---|
@@ -4416,6 +4417,32 @@ Every win above is one of three shapes, and nothing else worked:
   packed argmin (350→349), `quantize_7p_best` fusion (46→68), SWAR index
   inversion (no change), polish state in locals (293→296). Source-level
   redundancy is usually already gone.
+
+### Pass 1 — the half I had declared exhausted without measuring
+
+After writing the section below, four more wins turned up in `build_table_dict`
+and `encode_bc7_mode6` — the pass-1 path. I had ranked and re-ranked the pass-2
+call graph for three rounds and never counted pass 1's per-block work at all.
+
+| # | change | measurement |
+|---|---|---|
+| 17 | SipHash dropped from the dictionary histogram | worker closure **436 -> 310**; **-126/blk** |
+| 18 | `pack_bc1_scored`'s palette built in the kernel | executed **214 -> 90**; **-98/blk** |
+| 19 | `encode_bc7_mode6` returns the SSE it already computed | `bc7_block_sse` gone at 1.0/blk; **-52/blk** |
+| 20 | alpha min/max taken from the min/max already done | **5,135 -> 5,064**; **-71/blk** |
+
+`build_table_dict` takes one `HashMap::entry` per block and Rust's default
+SipHash-1-3 costs more to hash four bytes than the probe after it. Swapping the
+hasher is output-identical because the dictionary is chosen by a TOTAL order —
+count descending, then table ascending — so iteration order cannot reach the
+output.
+
+**The lesson is about the search, not the code.** "Exhausted" meant "exhausted in
+the region I kept re-measuring". Three rounds of ranking the same call graph
+produced a blind spot exactly where no ranking had ever been run.
+
+Round 9 final: **twenty wins, about -3,479 instructions/block, twelve
+refutations.**
 
 ### The honest state of RDO
 
