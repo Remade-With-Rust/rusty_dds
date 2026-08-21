@@ -1355,6 +1355,24 @@ fn polish_mode6_endpoints(
                 };
                 let pbit = if which == 0 { p0 } else { p1 };
                 let start = if which == 0 { (*q0)[c] } else { (*q1)[c] };
+                // Fusing all FOUR of a channel's candidates -- both endpoints,
+                // both directions -- into one call was tried and REFUTED.
+                // Swapping the channel and endpoint loops to make it possible is
+                // exact, and the speculation is valid 94% of the time (the
+                // `which = 0` step accepts on only 6.0% of channel visits), so
+                // the idea was sound. It just does not pay:
+                //
+                //   kernel calls   104.277 -> 78.347/blk  (-24.9%)
+                //   kernel instrs    3,679 ->  3,901/blk  (+222)
+                //   polish body        293 ->    287
+                //   net                            about -87/blk, ~1%
+                //
+                // The quad kernel is cheaper per candidate (82/4 = 20.5 against
+                // the pair's 44/2 = 22), but it must score all four whether or
+                // not the +/-1 range guards will discard them, and that gives
+                // back everything the saved call boundaries earn. Not worth a
+                // speculative quad, staleness checks and a loop swap.
+                //
                 // Both directions read the same sixteen pixels and weights, so
                 // they are scored in ONE call that loads them once. The two are
                 // sequentially dependent in principle — if `-1` is accepted,
