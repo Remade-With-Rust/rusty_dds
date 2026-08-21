@@ -1,183 +1,187 @@
-# super-funky: where we call the wrong compute
+# super-funky: the four cases where DirectXTex is still faster
 
-Nine cases in `corpus-vs-directxtex-serial.md` have DirectXTex ahead on speed.
-This plan is about those nine. It is NOT about RDO — RDO is not on the BC4/BC5
-path at all, and the two BC1 cases are a separate, much smaller story.
+## Where we stand
 
-## The finding, measured before writing any of this
+Full sweep against DirectXTex, idle machine, after the BC4/BC5 signed work:
 
-The nine slow cases split cleanly:
+| comparison | result |
+|-----------------------------------|-------------------------------|
+| decode speed (24) | **24 ahead / 0 behind** |
+| encode speed, shipped parallel (24) | **24 faster / 0 slower** |
+| encode speed, serial per core (24) | **20 faster / 4 slower** |
+| encode quality, corpus (24) | **22 win / 1 loss / 1 tie** |
+| encode quality, synthetic (54) | 19 win / 17 loss / 18 tie |
 
-| group | cases | serial ratio |
-|---|---|---|
-| **BC4S / BC5S (signed)** | 7 | **3.6 – 7.9** |
-| BC1 (albedo) | 2 | 1.55 – 1.66 |
+The four remaining per-core losses are **all BC1 albedo**:
 
-Seven of the nine are **signed** BC4/BC5. Their unsigned twins — same image, same
-block count, same sample values — run at **0.53–0.91**, i.e. FASTER than
-DirectXTex. A 6–9x gap between two paths doing nearly the same work is not a
-tuning problem, it is a structural one.
+| case                | ratio | our PSNR | DX PSNR | dB lead |
+|---------------------|-------|----------|---------|---------|
+| Metal063_Color bc1  | 1.656 | 40.23    | 38.93   | +1.31   |
+| Rock064_Color bc1   | 1.590 | 34.10    | 32.81   | +1.30   |
+| Bricks097_Color bc1 | 1.501 | 34.91    | 34.28   | +0.63   |
+| Wood095_Color bc1   | 1.438 | 41.70    | 40.41   | +1.29   |
 
-### The mechanism
+**We win quality on every one of them, by +0.63 to +1.31 dB.** That is the
+central fact of this plan and it changes what "fix" means: unlike the signed
+BC4/BC5 case — 5-8x CPU for 0.05-0.61 dB, which was plainly a bad trade — 1.5x
+CPU for +1.3 dB is a *defensible* trade. The goal here is to keep the dB and
+lose the multiple, not to buy speed with quality.
 
-`encode_alpha_block_signed` runs a ±4 exhaustive endpoint window — about 80
-candidate pairs a block — gated only by `signed_sweep_gate(span, best_err)`
-(`span in 8..=32 && best_err > 4`) and `!quality_is_fast()`.
+The synthetic set says the same thing from the other side: of its 17 losses,
+**BC1 x5, BC2 x5, BC3 x5** — the BC1-BC3 family is where we are weakest in both
+dimensions, while BC7 (5 wins) and BC4/BC5 (12 wins) carry us.
 
-Its unsigned twin, `unsigned_window_sweep`, is **DEFAULT OFF**, and the reasoning
-is already written in the tree:
+### What was resolved, and how (for context)
 
-> DEFAULT OFF: it costs ~3.2s corpus CPU for +0.15..0.45 dB on 14 cases that
-> already beat DirectXTex by 0.4-1.9 dB — the CPU budget instead funds the BC1
-> lattice and BC7 mode 5, whose gains are 2-20x larger.
+Both previously-tracked groups are closed:
 
-**The unsigned path did that cost/benefit review. The signed path never did.**
+- **Signed BC4/BC5, 7 cases at 3.6-7.9x.** `encode_alpha_block_signed` ran an
+  ~80-pair exhaustive window by default while its unsigned twin had the same
+  sweep `DEFAULT OFF` with the cost/benefit review already in the tree. Defaulted
+  off: ratios fell to 0.8-1.9. Cost: one case, `Wood095_NormalGL` bc5s, went from
+  tie to -0.51 dB.
+- **The remaining 1.18-1.86x** was the *presweep* path. `pack_alpha_indices_s`
+  assigned 16 samples to an 8-entry palette scalar — 738 instructions. Vectorised
+  to 252 executed, byte-identical, and every signed case now beats DirectXTex per
+  core (0.22-0.71).
 
-### What turning it off actually costs
+## Measured sizes on the BC1 path
 
-Measured on the corpus, serial, signed sweep forced off:
+Each measured in isolation, `#[inline(never)]` on that function alone:
 
-| case                     | ratio with | ratio without | dB given up |
-|--------------------------|------------|---------------|-------------|
-| Rock064 Roughness bc4s   | 7.870      | **1.464**     | -0.17       |
-| Metal063 Roughness bc4s  | 7.028      | **1.457**     | -0.17       |
-| Wood095 NormalGL bc5s    | 5.885      | **1.178**     | -0.42       |
-| Bricks097 Roughness bc4s | 5.490      | **1.858**     | -0.05       |
-| Bricks097 NormalGL bc5s  | 5.286      | **1.796**     | -0.05       |
-| Rock064 NormalGL bc5s    | 5.137      | **1.515**     | -0.17       |
-
-Two further cases — `Wood095 Roughness bc4s` (3.620 → 0.822) and
-`Metal063 NormalGL bc5s` (0.663 → 0.309) — are **fully resolved** by the same
-switch and are no longer tracked here.
-
-**3-5x the CPU for 0.05-0.61 dB.** And without it we STILL hold higher PSNR than
-DirectXTex on 6 of 8 — only Wood095 NormalGL flips (-0.51 dB). We are spending
-several times the encode budget to extend a lead we already have, on exactly the
-grounds the unsigned path rejected.
-
-## STATUS: item 1 is DONE
-
-`BC45_SIGNED_WINDOW` now defaults off. Shipped-config result: **all eight signed
-cases run FASTER than DirectXTex**, ratios 0.099-0.259 where they were 3.6-7.9.
-Corpus quality moved 22/0/2 to **22 win / 1 loss / 1 tie**.
-
-The remaining work is the six rows above — they are still **1.18-1.86x slower
-per core** with the sweep gone, so that slowness is in the *presweep* path
-(`encode_alpha_block_signed_presweep`: LS + ±2 search, `consider_alpha_s`,
-`refine_alpha_s`), not in the sweep. Items 5-13 below are that path.
+| function                | instructions | note |
+|-------------------------|--------------|------|
+| `encode_bc1_bytes`      | 951          | the whole per-block encoder |
+| `extrema_opaque`        | 330 -> 51    | already vectorised this campaign |
+| `pack_bc1_scored`       | 320          | executed path now ~90 |
+| `lattice_refine_bc1`    | 270          | **never measured for firing rate** |
+| `bc1_fit_4color_scalar` | 131          | fallback only; AVX2 arm is 125 |
+| `consider_bc1`          | 22           | thin wrapper |
+| `pca_extremes_rgb`      | 525          | **0.001 calls/blk — dead at this quality** |
 
 ---
 
 ## The twenty
 
-Items 1-4 are the structural fix. 5-13 are the compute-shape work behind it.
-14-20 keep us honest.
+### First, measure — three ideas died this campaign for skipping this
 
-### Structural — the signed sweep policy
+**1. Count every BC1 helper per block before touching any of them.**
+`pca_extremes_rgb` looked like a 525-instruction target and fires 0.001 times a
+block. `ls_endpoints_bc1` is 209 and fires 0.001. **Two of the seven functions
+above are already dead at shipped quality.** Get calls/block for
+`pack_bc1_scored`, `consider_bc1`, `lattice_refine_bc1` and `bc1_fit_4color`
+before ranking anything. The blocks module is private, so add the accessor in
+`encode/mod.rs`, not `lib.rs`.
 
-**1. Give the signed sweep the same default its unsigned twin has.**
-Not "delete it" — put it behind `RUSTY_DDS_BC45S_WINDOW`, mirroring
-`unsigned_window_enabled()`. Measured: ratios 3.6-7.9 collapse to 0.8-1.9 at a
-cost of 0.05-0.61 dB, and 6 of 8 still beat DirectXTex. This one change moves
-seven of the nine slow cases. **Gate: the corpus quality table must stay
-`directxtex_higher_psnr = 0`, or the change gets scoped down rather than shipped.**
+**2. Split `encode_bc1_bytes`'s 951 into executed vs cold.**
+Its tail (`pca_extremes_rgb`, the LS loop, `lattice_refine_bc1`) sits behind
+`quality_is_fast() || best_err <= 16` and mostly does not run. The executed
+figure is the only one worth ranking against DirectXTex's.
 
-**2. If #1 is too blunt, tighten `signed_sweep_gate` instead of disabling it.**
-The gate is `span in 8..=32 && best_err > 4`, harvest-tuned over 643k blocks for
-GAIN only. The per-case dB is strongly bimodal — Wood gives up 0.42-0.61 dB,
-Bricks only 0.05. Re-harvest with COST in the objective and find the gate that
-keeps Wood's win and drops Bricks'.
+**3. Check the loop back-edges.** `ls_pixels_mode6` read 34 static and cost 132
+dynamic because LLVM left it rolled. A static count is a dynamic count only when
+the loop is unrolled.
 
-**3. Make the sweep adaptive rather than a fixed ±4.**
-80 pairs unconditionally. Start at ±1 (8 pairs) and widen only while the last
-ring improved `best_err`. On smooth blocks the optimum is adjacent; on busy ones
-the range-bound prune already kills most candidates.
+### The lattice — the prime suspect
 
-**4. Order the sweep by likelihood, not `d0` then `d1`.**
-`best_err == 0` returns early and the range prune compares against the *current*
-best, so a good candidate found sooner prunes more of what follows. Spiral out
-from the centre instead of raster-scanning.
+**4. Measure `lattice_refine_bc1`'s firing rate and per-call cost.**
+Its gate is `best_err > bc1_lattice_min_err()` where the constant is **0** — so
+it refines on *every* imperfect block, which on albedo is nearly all of them. At
+270 instructions x 3 rounds (`BC1_LATTICE_ROUNDS = 3`) this is the single most
+likely source of the 1.5x.
 
-### Compute shape — the signed inner loop
+**5. Re-harvest `BC1_LATTICE_MIN_ERR` with cost in the objective.**
+This is precisely the `signed_sweep_gate` story again: a gate tuned for GAIN
+only. The signed gate was harvest-tuned over 643k blocks and still cost 5x. Find
+the residual below which a lattice round cannot repay itself.
 
-**5. Vectorise `consider_alpha_s`.** The sweep's inner call, ~80x a block, scalar.
-Sixteen samples against an 8-entry palette is the shape `fit_indices_mode6_avx2`
-already solves in 18 instructions.
+**6. Re-harvest `BC1_LATTICE_ROUNDS`.** Three rounds, fixed. Measure the marginal
+dB of round 2 and round 3 separately — if round 3 is worth 0.02 dB it is the
+signed sweep in miniature.
 
-**6. Vectorise `alpha_sse_s` and `pack_alpha_indices_s`.** Same 16-sample walk,
-same per-sample argmin over 8 entries.
+**7. Make the lattice adaptive instead of fixed-round.** Stop when a round fails
+to improve `best_err`, exactly as `polish_mode6_endpoints` does. Free if most
+blocks converge in one round.
 
-**7. Hoist the per-candidate `snorm_i32_to_unorm_u8` conversions.** The signed
-path scores in the UNORM domain, so every candidate converts its endpoints back.
-Only 255 inputs exist — table it, or hoist it out of the candidate loop entirely.
+**8. Vectorise the lattice's inner scorer.** Whatever it evaluates per candidate
+is a 16-pixel walk against a 4-entry palette — the shape `bc1_fit_4color_avx2`
+already does in 125 instructions and `alpha_select_avx2` does in 85.
 
-**8. Build the palette once, in the layout the scorer wants.**
-`alpha_palette6_s` / `alpha_palette4_s` run per candidate. This is the same
-pack-then-immediately-unpack shape section 75 #2 removed from mode 6.
+### The seed path
 
-**9. BC4/BC5 never got the block-walk vectorisation BC1/BC7 got.**
-`encode_bc4` does `pixels.map(|p| p[0])` — a scalar 16-element gather per channel.
-`planar_avx2` already does that transpose in 22 instructions.
+**9. Count `consider_bc1` calls per block.** It is 22 instructions but calls
+`pack_bc1_scored` (executed ~90) plus a fit. Three seeds are possible
+(`extrema_opaque`, `channel_minmax_rgb`, `pca_extremes_rgb`); the third is dead,
+so measure whether the second earns its keep.
 
-**10. `encode_bc5` encodes its two channels sequentially.** Two independent
-16-sample problems that could share one pixel load.
+**10. Check whether the second seed fires when it cannot win.**
+`if !(mx == max_c && mn == min_c)` guards it. Measure the hit rate — if the two
+seeds agree often, that comparison is cheap and the guard is doing its job; if
+they rarely agree, the second seed is a full extra fit on most blocks.
 
-**11. Check whether the signed path is actually unrolled.** Every static count
-this campaign that looked cheap and was rolled turned out to be the opposite
-(`ls_pixels_mode6`: static 34, dynamic 132). Use a back-edge check, not a static
-count.
+**11. `bc1_fit_4color_avx2` is 125 instructions and runs ~15x a block.**
+That is ~1,875 a block, the largest *confirmed* item on this path. Its loop over
+4 colours is unrolled; the pixel loads are CSE'd. Look for the remaining scalar
+palette assembly, which was worth -449 the last time it was examined.
 
-**12. `unique_values_u_capped` and its signed twin.** A capped distinct-value scan
-per block, scalar. The presence-filter trick from section 75 #14 applies.
+**12. Fuse `pack_bc1_scored`'s palette build with the fit.** Same pack-then-widen
+round trip removed from mode 6 (-537) and from the RDO ring buffer. Partly done —
+verify no byte palette is still built on the AVX2 path.
 
-**13. `refine_alpha_s` neighbourhood search.** Unmeasured. **Size it before
-touching it** — three ideas this campaign died because the target was already at
-floor or outright dead code.
+**13. `to_565` / `from_565` round trips.** The 565 quantisation is exact and
+cheap, but check it is not being done twice per candidate.
 
-### BC1 — the smaller, separate story
+### Structural questions worth asking
 
-**14. Measure `lattice_refine_bc1`'s firing rate and cost.** BC1 is only 1.55-1.66x
-slower, and the tree says the unsigned sweep's CPU was redirected *into* the BC1
-lattice. If the lattice is what makes BC1 slow, that is the same trade in a
-different coat and deserves the same review.
+**14. Should BC1 spend its budget differently?**
+The tree says the unsigned BC4/BC5 window was turned off specifically to fund
+"the BC1 lattice and BC7 mode 5". That trade was made when the lattice's cost was
+unmeasured. Re-examine it now that BC4/BC5 no longer needs the budget.
 
-**15. Count `pack_bc1_scored` / `consider_bc1` per block.** `consider_bc1` is 22
-instructions but may run several times a block; `pack_bc1_scored` was 274 before
-section 75 #18 took its executed path to 90.
+**15. Is the 1.5x worth removing at all?**
+We are 1.44-1.66x slower and +0.63 to +1.31 dB better. DirectXTex's BC1 is a
+single-pass fit. **It may be correct to change nothing here** and instead say so
+explicitly in the README. Decide this deliberately rather than by default.
 
-**16. Weigh BC1's trade explicitly.** We win +0.63 to +1.31 dB while being 1.6x
-slower. That is defensible — unlike the signed case, where the dB is smaller and
-the multiple is 5x. It may be right to change nothing here.
+**16. Offer the trade as a quality tier.** If the lattice is what costs 1.5x,
+`EncodeQuality::Fast` should already skip it — verify, and if the Fast tier
+matches DirectXTex on speed while keeping most of the dB, that is the answer to
+ship rather than a code change.
 
-### Keeping ourselves honest
+### The synthetic-set quality losses
 
-**17. Confirm DirectXTex's BC7 flag reaches the encoder.** Nominally
-`TEX_COMPRESS_BC7_QUICK`, yet 4.7-10.7 s per 1K texture. If QUICK is not being
-applied, our ~130x BC7 win is against its slow path and the honest number is
-smaller. **Settle this before quoting BC7 publicly.**
+**17. Characterise the BC1/BC2/BC3 synthetic losses.** Fifteen of the seventeen.
+They are concentrated in X-MIP, X-ARRAY, X-CUBE, X-NPOT and X-VOL contexts, at
+-0.31 to -1.04 dB, while X-2D wins. That pattern says the loss is in **small mip
+levels or non-power-of-two edge blocks**, not in the core encoder.
 
-**18. Add BC4S/BC5S to the routine probe suite.** Every format that got attention
-this campaign had a probe. The signed paths did not — which is exactly why an
-80-pair sweep sat on the default path unnoticed.
+**18. Check `gather_block`'s edge path.** Its interior fast path is ~30
+instructions; the edge path clamps per pixel. NPOT and small mips hit the edge
+path constantly, and it is the one place where a correctness difference could
+masquerade as a quality difference.
 
-**19. Make serial-vs-serial the default reported artifact.**
-The parallel comparison reads 24/24 and mostly measures thread count. The serial
-one is the number that says something about the code.
+**19. Verify our mip generation matches DirectXTex's filter.** If we downsample
+differently, the synthetic mip losses are a *resampling* difference and not an
+encoder difference at all — which would explain why X-2D wins and every
+mip-bearing context loses.
 
-**20. Ask whether BC4/BC5 should have an RDO path at all.**
-RDO covers BC1 and BC7 only. Masks and normals are a large share of a real cook
-and their rate side is untouched. The one item here that adds capability rather
-than removing waste — and it gets measured against the same ladder, not assumed.
+### Honesty
+
+**20. Settle the DirectXTex BC7 flag before quoting 125-165x.**
+Nominally `TEX_COMPRESS_BC7_QUICK`, yet 4.7-10.7 s per 1K texture. If QUICK is
+not reaching the encoder we are beating its slow path, and the honest number is
+smaller. This is the one claim in the whole comparison that looks too good.
 
 ---
 
-## What this plan deliberately does not say
+## Sequencing
 
-It does not say RDO is at fault. RDO is not on the BC4/BC5 path, and its ladder
-was re-measured this session and is healthy. The instinct that something
-structural was wrong was correct; the location was one layer over.
+Items 1-3 first, always. Then 4-8, because the lattice is the prime suspect and
+`BC1_LATTICE_MIN_ERR = 0` is the same unmeasured-gate shape that made the signed
+sweep cost 5x. Only then 9-13.
 
-It also does not say "use more SIMD". Items 5-12 are vectorisation, but they are
-worth perhaps 2x on a path that item 1 fixes by 4x for free. **Do item 1,
-re-measure, and let the new numbers choose what follows** — three separate
-attempts this campaign optimised something already at floor or already dead.
+**Item 15 is a real possible outcome, not a formality.** The signed sweep was
+worth removing because it bought 0.05-0.61 dB for 5x. The BC1 lattice buys
++0.63-1.31 dB for 1.5x, which is an order of magnitude better trade. If the
+measurements say it is earning its cost, the correct action is to document it and
+stop.
