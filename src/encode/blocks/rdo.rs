@@ -671,6 +671,38 @@ const DICT_N: usize = 24;
 
 /// Pass 1: histogram the baseline encoder index tables, return the most
 /// popular DICT_N (the global match dictionary for pass 2).
+/// A trivial hasher for the `u32` index tables the dictionary counts.
+///
+/// The histogram takes one `HashMap::entry` per block, and Rust's default
+/// SipHash-1-3 costs far more to hash four bytes than the probe that follows it.
+/// A multiply-shift is enough here, and it changes nothing observable: the
+/// dictionary is chosen by a TOTAL order — count descending, then table value
+/// ascending — so iteration order cannot reach the output.
+#[derive(Default)]
+struct U32Hasher(u64);
+
+impl std::hash::Hasher for U32Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Not used by `write_u32`, but `Hasher` requires it.
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        // Fibonacci hashing: the high bits of a golden-ratio multiply are well
+        // spread, which is what the table's bucket index wants.
+        self.0 = (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type TableCounts = std::collections::HashMap<u32, u32, std::hash::BuildHasherDefault<U32Hasher>>;
+
 fn build_table_dict(
     rgba: &[u8],
     w: usize,
@@ -678,7 +710,6 @@ fn build_table_dict(
     blocks_x: usize,
     blocks_y: usize,
 ) -> (Vec<u32>, Vec<[u8; 8]>) {
-    use std::collections::HashMap;
     // Pass 1 is embarrassingly parallel and **byte-identical**, unlike pass 2.
     // Its only shared state is the count histogram, and integer addition is
     // order-independent, so per-strip histograms merge to the same map whatever
@@ -703,14 +734,14 @@ fn build_table_dict(
         start += len;
     }
     let q = super::QUALITY.with(|c| c.get());
-    let mut parts: Vec<(Vec<[u8; 8]>, HashMap<u32, u32>)> = Vec::with_capacity(workers);
+    let mut parts: Vec<(Vec<[u8; 8]>, TableCounts)> = Vec::with_capacity(workers);
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
         for &(by0, by1) in &strips {
             handles.push(scope.spawn(move || {
                 super::with_quality(q, || {
                     let mut local = Vec::with_capacity((by1 - by0) * blocks_x);
-                    let mut lc: HashMap<u32, u32> = HashMap::new();
+                    let mut lc = TableCounts::default();
                     for by in by0..by1 {
                         for bx in 0..blocks_x {
                             let pixels = gather_block(rgba, w, h, bx, by);
@@ -732,7 +763,7 @@ fn build_table_dict(
             parts.push(hnd.join().expect("rdo pass-1 worker panicked"));
         }
     });
-    let mut counts: HashMap<u32, u32> = HashMap::new();
+    let mut counts = TableCounts::default();
     let mut blocks = Vec::with_capacity(nblocks);
     for (local, lc) in parts {
         blocks.extend_from_slice(&local);
