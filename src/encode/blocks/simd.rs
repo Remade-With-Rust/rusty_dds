@@ -946,6 +946,23 @@ static UW6: [[f32; 2]; 16] = [
 /// `(u*u, u*w, w*w)` per mode-6 index — the three normal-equation terms, which
 /// depend only on the INDEX, never on the pixels.
 ///
+/// # Two refuted layout changes, recorded so they are not retried
+///
+/// Both were motivated by the same theory — that the row stride forces extra
+/// address arithmetic, since x86 SIB scales are limited to 1, 2, 4 and 8 — and
+/// both measured WORSE:
+///
+/// - Pre-spreading [`UW6`] to `[u,u,u,u,w,w,w,w]` rows to replace the per-pixel
+///   `vbroadcastsd` + `vpermps` with one load: **160 -> 177**. Scale 32 is not
+///   legal, and the address arithmetic cost more than the two ops it removed.
+/// - Dropping this table to `(u*w, w*w)` at stride 8 — a legal scale — and
+///   recovering `a00` as `16 - 2*a01 - a11` (exact, since `u + w == 1` makes
+///   `sum (u+w)^2 == 16` and every term an exact multiple of `1/4096`):
+///   **160 -> 183**.
+///
+/// The theory was simply wrong: LLVM was not paying the extra shift-and-add the
+/// stride seemed to imply, so there was nothing to win.
+///
 /// Every entry is an exact multiple of `1/4096` and bounded by 1, so each
 /// product is exact in f32 and so is every partial sum (they are multiples of
 /// `1/4096` bounded by 16, well inside a 24-bit mantissa). Reading them from a
