@@ -10,7 +10,7 @@
 mod bc6h;
 pub(crate) mod bcn;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-mod simd;
+pub(crate) mod simd;
 mod uncompressed;
 pub mod reference;
 

@@ -354,7 +354,7 @@ const fn build_bc1_sel() -> [[u8; 16]; 256] {
     t
 }
 
-static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
+pub(crate) static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
 
 /// Decode a whole BC1 surface, four pixels per `pshufb`.
 ///

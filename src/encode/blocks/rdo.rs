@@ -235,7 +235,10 @@ pub(crate) fn encode_image_bc1_rdo(
 
 /// Like `bc1_block_sse` but aborts once the partial sum reaches `limit`
 /// (a candidate at or past the limit can never be accepted).
-fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) -> Option<i32> {
+/// The four RGB palette entries of a BC1 block, packed one per `u32` with a zero
+/// alpha byte so the vector kernel can `pshufb` them directly.
+#[inline]
+fn bc1_colors_packed(block: &[u8; 8]) -> ([[u8; 3]; 4], [u32; 4]) {
     let c0 = u16::from_le_bytes([block[0], block[1]]);
     let c1 = u16::from_le_bytes([block[2], block[3]]);
     let a = from_565(c0);
@@ -245,7 +248,27 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
     } else {
         [a, b, lerp_rgb(a, b, 1, 1), [0, 0, 0]]
     };
+    let packed = [
+        u32::from_le_bytes([colors[0][0], colors[0][1], colors[0][2], 0]),
+        u32::from_le_bytes([colors[1][0], colors[1][1], colors[1][2], 0]),
+        u32::from_le_bytes([colors[2][0], colors[2][1], colors[2][2], 0]),
+        u32::from_le_bytes([colors[3][0], colors[3][1], colors[3][2], 0]),
+    ];
+    (colors, packed)
+}
+
+fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) -> Option<i32> {
+    let (colors, packed) = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    // The abort moves from the running prefix to the completed total, which is
+    // the same decision: squared errors are non-negative, so a prefix reaches
+    // `limit` if and only if the total does.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let err = simd::bc1_fixed_sse_avx2(pixels, &packed, table);
+        return (err < limit).then_some(err);
+    }
+    let _ = packed;
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
@@ -260,16 +283,13 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
 /// Decode-true SSE of an arbitrary BC1 block against source pixels
 /// (both 4-color and punch modes, matching the decoder's mode rule).
 fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
-    let c0 = u16::from_le_bytes([block[0], block[1]]);
-    let c1 = u16::from_le_bytes([block[2], block[3]]);
-    let a = from_565(c0);
-    let b = from_565(c1);
-    let colors = if c0 > c1 {
-        [a, b, lerp_rgb(a, b, 2, 1), lerp_rgb(a, b, 1, 2)]
-    } else {
-        [a, b, lerp_rgb(a, b, 1, 1), [0, 0, 0]]
-    };
+    let (colors, packed) = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::bc1_fixed_sse_avx2(pixels, &packed, table);
+    }
+    let _ = packed;
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
