@@ -129,11 +129,28 @@ pub(super) fn has_avx2() -> bool {
     static F: AtomicU8 = AtomicU8::new(0);
     match F.load(Ordering::Relaxed) {
         0 => {
-            let v = if std::is_x86_feature_detected!("avx2") { 2 } else { 1 };
+            let v = detect_avx2();
             F.store(v, Ordering::Relaxed);
             v == 2
         }
         v => v == 2,
+    }
+}
+
+/// The probe itself, OUT of line.
+///
+/// `has_avx2` is `#[inline(always)]` so its hot path -- one relaxed load and a
+/// compare -- lands directly at each dispatch. Without this split the cold arm
+/// inlines with it, and `std_detect`'s `detect_and_initialize` appeared FOUR
+/// times inside `encode_bc1_bytes` alone: a call site and a branch, per
+/// dispatch, for something that runs once per process.
+#[cold]
+#[inline(never)]
+fn detect_avx2() -> u8 {
+    if std::is_x86_feature_detected!("avx2") {
+        2
+    } else {
+        1
     }
 }
 

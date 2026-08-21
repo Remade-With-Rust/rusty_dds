@@ -55,7 +55,12 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     let psq = psq_rgb(&pixels);
     // Fused pack+score: the index fit's per-pixel argmin distance IS the SSE
     // contribution, so the old pack-then-bc1_sse re-walk is pure recompute.
-    let (a, a_err) = pack_bc1_scored(&pixels, max_c, min_c, psq, i32::MAX)
+    // Quantize ONCE. The seed guard below compares 565 pairs and
+    // `pack_bc1_scored` quantizes its own arguments, so `to_565(max_c)` and
+    // `to_565(min_c)` were each computed twice a block.
+    let s0 = to_565(max_c);
+    let s1 = to_565(min_c);
+    let (a, a_err) = pack_bc1_scored_565_nudged(&pixels, s0, s1, psq, i32::MAX)
         .expect("unbounded pack always packs");
     // `rgb_channel_span_sum` and `channel_minmax_rgb` are character-for-character
     // the same sixteen-pixel walk — the first just sums the second's spans — and
@@ -83,8 +88,12 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     // a candidate that merely TIES the incumbent is already rejected — which is
     // precisely what an identical candidate does. The old byte test is a strict
     // subset of this one.
-    if (to_565(mx), to_565(mn)) != (to_565(max_c), to_565(min_c)) {
-        consider_bc1(&pixels, mx, mn, psq, &mut best, &mut best_err);
+    let (t0, t1) = (to_565(mx), to_565(mn));
+    if (t0, t1) != (s0, s1) {
+        if let Some((cand, err)) = pack_bc1_scored_565_nudged(&pixels, t0, t1, psq, best_err) {
+            best = cand;
+            best_err = err;
+        }
     }
     // Refine gate: a tiny residual can't repay PCA + LS (gain <= best_err).
     // Smooth-map blocks skip the whole refine; busy blocks keep the quality.
@@ -456,15 +465,18 @@ pub(super) fn lattice_refine_bc1(
 /// Pack a BC1 block AND its decode-matched SSE in one walk, aborting early
 /// once the partial SSE reaches `err_limit` (an aborted candidate could
 /// never win under strict `<`, so selection is identical to pack+bc1_sse).
-pub(super) fn pack_bc1_scored(
+/// [`pack_bc1_scored`] with the endpoints already quantized.
+///
+/// The nudge and the punch check are properties of the QUANTIZED pair, not of
+/// the bytes it came from, which lets a caller holding the 565 words already
+/// skip re-deriving them.
+pub(super) fn pack_bc1_scored_565_nudged(
     pixels: &[[u8; 4]; 16],
-    max_c: [u8; 3],
-    min_c: [u8; 3],
+    mut max565: u16,
+    min565: u16,
     psq: i32,
     err_limit: i32,
 ) -> Option<([u8; 8], i32)> {
-    let mut max565 = to_565(max_c);
-    let min565 = to_565(min_c);
     if max565 == min565 {
         max565 = max565.saturating_add(1);
         // Still equal after the nudge means both words are 0xFFFF — the
@@ -474,16 +486,17 @@ pub(super) fn pack_bc1_scored(
             return pack_bc1_scored_cold(pixels, max565, min565, true, err_limit);
         }
     }
-    // Everything past the quantization IS `pack_bc1_scored_565`: order the pair
-    // larger-first, fit against the decode-true 4-color palette, pack. This
-    // function carried its own copy of all three.
-    //
-    // The two agree on the scalar arm as well, which is what makes the merge
-    // exact rather than merely equivalent-looking: the copy here built
-    // `[ca, cb, lerp<2,1>, lerp<1,2>]` and called `bc1_fit_4color`, and that
-    // array is `bc1_palette_565(c0, c1)` — the very argument the other one
-    // passes.
     pack_bc1_scored_565(pixels, max565, min565, psq, err_limit)
+}
+
+pub(super) fn pack_bc1_scored(
+    pixels: &[[u8; 4]; 16],
+    max_c: [u8; 3],
+    min_c: [u8; 3],
+    psq: i32,
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
+    pack_bc1_scored_565_nudged(pixels, to_565(max_c), to_565(min_c), psq, err_limit)
 }
 
 #[cold]
