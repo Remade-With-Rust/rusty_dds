@@ -89,9 +89,15 @@ fn encode_hash(content: DecodeContent, quality: EncodeQuality, rdo: Rdo) -> u64 
 
 /// Frozen payload hashes — the encoder's output contract.
 const QUALITY_HASHES: &[(&str, u64)] = &[
-    ("bc1", 0x42ac578e6c55e9a9),
-    ("bc2", 0x59c312d27ed5fb72),
-    ("bc3", 0x012a397f35276966),
+    // bc1/bc2/bc3 moved when BC1_PCA_SEED was defaulted OFF (bc2/bc3 share the
+    // colour encoder). Evidence, ablated serial on the corpus: the PCA seed cost
+    // 21-26% of BC1 encode time and bought 0.00-0.01 dB. Corpus PSNR deltas
+    // against DirectXTex move from +0.63/+1.31/+1.30/+1.29 to
+    // +0.62/+1.30/+1.28/+1.29, and the four BC1 ratios go 1.45/1.44/1.50/1.40
+    // to 1.042/0.998/1.109/0.993.
+    ("bc1", 0x1c9936780dbfecb5),
+    ("bc2", 0xcb9576059b8d1eca),
+    ("bc3", 0x8da14ee9e557d08e),
     ("bc4u", 0x9da20b575b3beeee),
     // bc4s/bc5s moved when BC45_SIGNED_WINDOW was defaulted OFF. Evidence,
     // measured serial against DirectXTex on the corpus: the sweep cost 3-5x the

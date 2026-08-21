@@ -36,6 +36,22 @@ pub(crate) const BC45_SIGNED_WINDOW: bool = false;
 /// BC2/BC3 alpha endpoint selection search (worth +1.8..+3.2 dB on the CryTIF set).
 pub(crate) const ALPHA_SELECT: bool = true;
 
+/// BC1 PCA-axis third seed. Off: the same shape as the BC4/BC5 signed window —
+/// an ungated expensive search with a negligible payoff.
+///
+/// Ablated on the corpus, serial: removing it takes **21-26% off BC1 encode
+/// time** and costs **0.00 to 0.01 dB**. It offers a candidate on essentially
+/// every block and that candidate WINS on only 1.9-6.2% of them; the luminance
+/// seed and the 565 lattice have already found the same answer almost
+/// everywhere.
+///
+/// For contrast, the two searches that stay on: the lattice costs ~40% of
+/// encode time and buys 0.29-0.99 dB, and the LS refine costs 3-6% for up to
+/// 0.41 dB. Those pay. This one does not.
+///
+/// Opt back in with `RUSTY_DDS_BC1_PCA=1` under the `tuning` feature.
+pub(crate) const BC1_PCA_SEED: bool = false;
+
 /// BC1 565-lattice contract-refine rounds.
 pub(crate) const BC1_LATTICE_ROUNDS: u32 = 3;
 
@@ -61,6 +77,10 @@ mod imp {
     #[inline(always)]
     pub(crate) fn alpha_sel_enabled() -> bool {
         ALPHA_SELECT
+    }
+    #[inline(always)]
+    pub(crate) fn bc1_pca_seed_enabled() -> bool {
+        BC1_PCA_SEED
     }
     #[inline(always)]
     pub(crate) fn bc1_lattice_rounds() -> u32 {
@@ -114,6 +134,15 @@ mod imp {
             std::env::var("RUSTY_DDS_ALPHA_SEL")
                 .map(|v| v != "0")
                 .unwrap_or(ALPHA_SELECT)
+        })
+    }
+
+    pub(crate) fn bc1_pca_seed_enabled() -> bool {
+        static E: OnceLock<bool> = OnceLock::new();
+        *E.get_or_init(|| {
+            std::env::var("RUSTY_DDS_BC1_PCA")
+                .map(|v| v == "1")
+                .unwrap_or(BC1_PCA_SEED)
         })
     }
 

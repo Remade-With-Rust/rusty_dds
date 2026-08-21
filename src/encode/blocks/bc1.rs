@@ -41,8 +41,14 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
         return best;
     }
     // PCA-axis extremes: luminance extrema mis-seed chroma-dominant blocks.
-    if let Some((pa, pb)) = pca_extremes_rgb(&pixels) {
-        consider_bc1(&pixels, pa, pb, &mut best, &mut best_err);
+    // DEFAULT OFF — see `BC1_PCA_SEED`. Ablated on the corpus, this seed costs
+    // 21-26% of BC1 encode time and buys 0.00-0.01 dB: it offers a candidate on
+    // essentially every block and wins on 1.9-6.2% of them, because the
+    // luminance seed and the 565 lattice have already found the same answer.
+    if bc1_pca_seed_enabled() {
+        if let Some((pa, pb)) = pca_extremes_rgb(&pixels) {
+            consider_bc1(&pixels, pa, pb, &mut best, &mut best_err);
+        }
     }
     // Least-squares endpoint refine from the winner's indices, iterated while
     // the decode-matched SSE keeps falling (candidates only ever ADD, picked

@@ -11,7 +11,7 @@ use std::cell::Cell;
 
 use crate::error::Error;
 use super::tuning::{
-    alpha_sel_enabled, bc1_lattice_min_err, bc1_lattice_rounds, bc7_m1_min_err,
+    alpha_sel_enabled, bc1_lattice_min_err, bc1_pca_seed_enabled, bc1_lattice_rounds, bc7_m1_min_err,
     signed_window_enabled, unsigned_window_enabled,
 };
 
