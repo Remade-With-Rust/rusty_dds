@@ -25,9 +25,9 @@
 | bc2__X-2D | bc2 | X-2D | 32.40 | 33.44 | -1.04 | directxtex_higher_psnr |
 | bc3__X-2D | bc3 | X-2D | 34.68 | 34.43 | +0.25 | rusty_higher_psnr |
 | bc4u__X-2D | bc4u | X-2D | 51.42 | 51.14 | +0.28 | rusty_higher_psnr |
-| bc4s__X-2D | bc4s | X-2D | 60.17 | 50.63 | +9.54 | rusty_higher_psnr |
+| bc4s__X-2D | bc4s | X-2D | 51.72 | 50.63 | +1.09 | rusty_higher_psnr |
 | bc5u__X-2D | bc5u | X-2D | 51.42 | 51.14 | +0.28 | rusty_higher_psnr |
-| bc5s__X-2D | bc5s | X-2D | 60.17 | 50.63 | +9.54 | rusty_higher_psnr |
+| bc5s__X-2D | bc5s | X-2D | 51.72 | 50.63 | +1.09 | rusty_higher_psnr |
 | bc7__X-2D | bc7 | X-2D | 36.09 | 35.13 | +0.96 | rusty_higher_psnr |
 | rgba8__X-2D | rgba8 | X-2D | ∞ | ∞ | — | tie_exact |
 | bgra8__X-2D | bgra8 | X-2D | ∞ | ∞ | — | tie_exact |

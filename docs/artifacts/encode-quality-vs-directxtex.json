@@ -127,7 +127,7 @@
       ],
       "content": "bc4s",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": 9.54,
+      "delta_rusty_minus_dxtex_db": 1.09,
       "directxtex": {
         "error": null,
         "max_abs": 193,
@@ -141,7 +141,7 @@
         "error": null,
         "max_abs": 128,
         "ok": true,
-        "psnr_db": 60.17,
+        "psnr_db": 51.72,
         "psnr_infinite": false
       },
       "verdict": "rusty_higher_psnr"
@@ -179,7 +179,7 @@
       ],
       "content": "bc5s",
       "context": "X-2D",
-      "delta_rusty_minus_dxtex_db": 9.54,
+      "delta_rusty_minus_dxtex_db": 1.09,
       "directxtex": {
         "error": null,
         "max_abs": 128,
@@ -193,7 +193,7 @@
         "error": null,
         "max_abs": 128,
         "ok": true,
-        "psnr_db": 60.17,
+        "psnr_db": 51.72,
         "psnr_infinite": false
       },
       "verdict": "rusty_higher_psnr"
