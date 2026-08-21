@@ -1456,6 +1456,10 @@ pub(super) fn extrema_opaque(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
 }
 
 pub(super) fn extrema_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::extrema_rgba_avx2(pixels);
+    }
     let mut min_l = i32::MAX;
     let mut max_l = i32::MIN;
     let mut min_p = [0u8; 4];

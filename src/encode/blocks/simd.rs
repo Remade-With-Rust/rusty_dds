@@ -1545,6 +1545,57 @@ unsafe fn ls_accum_solve_565_impl(
 }
 
 
+/// As [`extrema_opaque_avx2`], but over `r + g + b + a` and returning whole
+/// RGBA pixels — BC7's form of the same search.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn extrema_rgba_avx2(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { extrema_rgba_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn extrema_rgba_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+    use std::arch::x86_64::*;
+    let src = pixels.as_ptr() as *const u8;
+    let wv = _mm256_set1_epi16(1);
+    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+    let lum = |off: usize| {
+        let a = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(off) as *const __m128i));
+        let b = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(off + 16) as *const __m128i));
+        _mm256_permutevar8x32_epi32(
+            _mm256_hadd_epi32(_mm256_madd_epi16(a, wv), _mm256_madd_epi16(b, wv)),
+            perm,
+        )
+    };
+    let l0 = lum(0);
+    let l1 = lum(32);
+    let s0 = _mm256_slli_epi32(l0, 4);
+    let s1 = _mm256_slli_epi32(l1, 4);
+    let kmin = _mm256_min_epi32(
+        _mm256_or_si256(s0, _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)),
+        _mm256_or_si256(s1, _mm256_setr_epi32(8, 9, 10, 11, 12, 13, 14, 15)),
+    );
+    let kmax = _mm256_max_epi32(
+        _mm256_or_si256(s0, _mm256_setr_epi32(15, 14, 13, 12, 11, 10, 9, 8)),
+        _mm256_or_si256(s1, _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0)),
+    );
+    let fold = |v: __m256i, is_min: bool| -> i32 {
+        let a = _mm256_castsi256_si128(v);
+        let b = _mm256_extracti128_si256(v, 1);
+        let r = if is_min { _mm_min_epi32(a, b) } else { _mm_max_epi32(a, b) };
+        let r2 = _mm_shuffle_epi32(r, 0b01_00_11_10);
+        let r = if is_min { _mm_min_epi32(r, r2) } else { _mm_max_epi32(r, r2) };
+        let r3 = _mm_shuffle_epi32(r, 0b10_11_00_01);
+        let r = if is_min { _mm_min_epi32(r, r3) } else { _mm_max_epi32(r, r3) };
+        _mm_cvtsi128_si32(r)
+    };
+    let imin = (fold(kmin, true) & 15) as usize;
+    let imax = (15 - (fold(kmax, false) & 15)) as usize;
+    (pixels[imax], pixels[imin])
+}
+
 /// The block's luminance-extreme pixels: `(max, min)` by `2r + 3g + b`.
 ///
 /// The scalar form is a sixteen-iteration argmin/argmax with two unpredictable
