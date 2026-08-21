@@ -4362,3 +4362,70 @@ index is known at compile time.
 times** (§72 #1, §72 #3, and #5 here) — and #5 was in a kernel written during
 §72 itself. It reads as free in source and costs about thirty scalar
 instructions. Worth grepping for after any new kernel lands.
+
+## §75 — RDO round 9: the exhaustion pass
+
+Sixteen wins, about **-3,132 instructions/block**, and **twelve refutations** —
+the first round where refutations nearly matched wins. That ratio is the
+headline finding, not any single change.
+
+| # | change | measurement |
+|---|---|---|
+| 1 | both LS pixel builders, two pixels per pass | 87→72, 132→76; **-71/blk** |
+| 2 | mode-6 palette build fused with the index fit | 368→350 + a boundary; **-537/blk** |
+| 3 | BC1 accumulate + solve + 565 pack in one kernel | 168→158; **-254/blk** |
+| 4 | `lim` computed once per window entry | 31.766→17.090; **-59/blk** |
+| 5 | pair kernel derives the second candidate | 43→42; **-61/blk** |
+| 6 | luminance-extreme search vectorised | 310→51; **-259/blk** |
+| 7 | RGBA luminance-extreme search vectorised | 240→44; **-196/blk** |
+| 8 | per-channel min/max (BC1) vectorised | 261→23; **-238/blk** |
+| 9 | per-channel min/max (BC7) vectorised | 550→23; **-527/blk** |
+| 10 | planar transpose vectorised | 125→~31; **-94/blk** |
+| 11 | widened palette cached in the ring buffer | 125→120; **-47/blk** |
+| 12 | `quantize_7p` decides the p-bit first | 67→56; **-62/blk** |
+| 13 | widened palette built straight from 565 | 82→50; **-32/blk** |
+| 14 | 64-bit presence filter over the dedup scans | 361→95 visits; **-576/blk** |
+| 15 | BC7 index packing by SWAR | 99→84; **-42/blk** |
+| 16 | dead byte palette no longer built on AVX2 | **-77/blk** |
+
+### Where the wins came from
+
+Every win above is one of three shapes, and nothing else worked:
+
+1. **A scalar walk over the block that had never been vectorised** (#6–#10).
+   These were the largest and the easiest: five helpers nobody had looked at,
+   worth **-1,314/blk** between them.
+2. **A round trip between two stages** (#2, #3, #11, #13, #16) — something
+   packed and immediately unpacked, or built and never read.
+3. **An algorithmic bound the code did not exploit** (#4, #14).
+
+### Where they did NOT come from — twelve refutations
+
+- **`#[target_feature]` composition, four times.** Two-palette fusion (750 vs
+  720), refit+score fusion (~102 glue vs 83), a vectorised `contains` (553
+  instructions of call boundary against 1,083 of scanning), and the earlier
+  `bc1_colors_packed`. On stable Rust `#[inline(always)]` is REJECTED on a
+  `#[target_feature]` function and plain `#[inline]` is ignored, so **every
+  helper is a real call and no kernel can be refactored without measuring**.
+- **Table layout, three times.** `UW6` spread to 32-byte rows (160→177), `AW6`
+  at stride 8 (160→183), `table_ls` table-driven (70→234). All three failed on
+  the same point: **x86 SIB scales are 1, 2, 4, 8** and a data-dependent index
+  into a wider row costs real address arithmetic. The one time the same
+  transform WON (§74 #4) the index was a compile-time constant.
+- **Rewrites LLVM had already done, five times.** `parse_mode6` (110→114),
+  packed argmin (350→349), `quantize_7p_best` fusion (46→68), SWAR index
+  inversion (no change), polish state in locals (293→296). Source-level
+  redundancy is usually already gone.
+
+### The honest state of RDO
+
+The hot kernels are at roughly **0.3 instructions per channel-difference** —
+`palette_and_fit` scores 16 pixels against a palette entry in 18 instructions.
+Every remaining scalar helper is either under 100 instructions a block, dead at
+this quality (`pca_extremes_rgb` at 0.001 calls/blk, `ls_endpoints_bc1` at
+0.001, `seeds_extra` at 0.002, `fit_indices_mode6_exhaustive` at 0.000), or has
+been measured and refused to improve.
+
+**RDO is exhausted for deterministic instruction reduction by these methods.**
+Further gains would need a different lever: changing what the search explores
+(which moves output), or a wider ISA.
