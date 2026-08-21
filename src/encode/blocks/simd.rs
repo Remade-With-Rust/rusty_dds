@@ -314,32 +314,28 @@ unsafe fn bc1_fit_4color_avx2_impl(
         _mm256_extracti128_si256(idx_hi, 1),
     );
     let iv = _mm_packs_epi16(i0, i1);
-    // Each index is two bits, so two movemasks lift them out as two 16-bit
-    // planes, and the 2-bit table is their bit-interleave.
-    let m0 = _mm_movemask_epi8(_mm_cmpeq_epi8(
-        _mm_and_si128(iv, _mm_set1_epi8(1)),
-        _mm_set1_epi8(1),
-    )) as u32;
-    let m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(
-        _mm_and_si128(iv, _mm_set1_epi8(2)),
-        _mm_set1_epi8(2),
-    )) as u32;
-    let table = spread2(m0) | (spread2(m1) << 1);
+    // Sixteen 2-bit indices into one `u32`, by weighted accumulation rather than
+    // by lifting bit-planes and interleaving them.
+    //
+    // `maddubs` folds adjacent BYTES with weights 1 and 4, giving eight 4-bit
+    // groups (at most 3 + 12 = 15). `madd` then folds adjacent WORDS with
+    // weights 1 and 16, giving four 8-bit groups (at most 255). Two saturating
+    // packs bring those four bytes together in the right order, and the low
+    // dword is the finished table. Every intermediate is inside its lane's
+    // range, so neither pack actually saturates.
+    let g8 = _mm_maddubs_epi16(
+        iv,
+        _mm_setr_epi8(1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4),
+    );
+    let g16 = _mm_madd_epi16(g8, _mm_setr_epi16(1, 16, 1, 16, 1, 16, 1, 16));
+    let packed = _mm_packus_epi16(
+        _mm_packus_epi32(g16, _mm_setzero_si128()),
+        _mm_setzero_si128(),
+    );
+    let table = _mm_cvtsi128_si32(packed) as u32;
     Some((table, err))
 }
 
-/// Spread the low sixteen bits of `x` into even bit positions — the standard
-/// Morton interleave, used here to rebuild a 2-bit-per-pixel index table from
-/// two 1-bit planes without needing BMI2.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn spread2(x: u32) -> u32 {
-    let mut x = x & 0x0000_FFFF;
-    x = (x | (x << 8)) & 0x00FF_00FF;
-    x = (x | (x << 4)) & 0x0F0F_0F0F;
-    x = (x | (x << 2)) & 0x3333_3333;
-    (x | (x << 1)) & 0x5555_5555
-}
 
 
 
