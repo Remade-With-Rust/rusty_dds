@@ -200,6 +200,8 @@ pub enum ScenarioKind {
     Arrival,
     Hub,
     Soak,
+    /// A repeating gameplay loop — see [`camera`].
+    Mission,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -242,6 +244,17 @@ pub const SCENARIOS: &[Scenario] = &[
         frames: 108_000, // 30 min
         dt: 1.0 / 60.0,
         warmup: 600,
+    },
+    Scenario {
+        name: "mission",
+        kind: ScenarioKind::Mission,
+        // Six 30 s legs = one 3 min loop, run three times over. Three loops so
+        // the SECOND and THIRD are warm: the first pays cold-cache costs that a
+        // player only pays once, and reporting a session average over a single
+        // cold loop flatters whichever stack has the larger cache.
+        frames: 32_400, // 9 min at 60 Hz
+        dt: 1.0 / 60.0,
+        warmup: 300,
     },
     // Short scenario for harness development; not a reportable arm.
     Scenario {
@@ -352,6 +365,114 @@ pub fn camera(kind: ScenarioKind, frame: u32, dt: f32) -> [f32; 3] {
             let r = 70.0;
             [r * (t * 0.6).cos(), 0.0, r * (t * 0.6).sin()]
         }
+        ScenarioKind::Mission => mission_camera(frame, dt),
+    }
+}
+
+/// One loop of a gameplay session, in the order a player meets it.
+///
+/// The other scenarios each isolate ONE streaming behaviour. A session is not
+/// any of them on its own — it is all four in sequence, and the transitions
+/// between them are where a player actually sees a hitch: the moment a hangar
+/// gives way to open space, or a fast approach settles into walking pace.
+///
+/// Six thirty-second legs, repeating every three minutes:
+///
+/// | leg | s | what the player is doing | what it does to the stream |
+/// |-----|---:|--------------------------|----------------------------|
+/// | 0 | 0-30 | idling in a hangar | small set, mip 0, warm |
+/// | 1 | 30-60 | launching outward | resident set inflates, mips coarsen |
+/// | 2 | 60-90 | cruising | steady churn, the traverse workload |
+/// | 3 | 90-120 | quantum jump + approach | cold burst, then rapid refinement |
+/// | 4 | 120-150 | landing, on foot | back to mip 0, tight and slow |
+/// | 5 | 150-180 | back to the hangar | eviction of everything from leg 2-3 |
+///
+/// Pure in `frame`, like every other camera here: no state, no clock, so a run
+/// reproduces exactly and two arms see an identical request stream.
+fn mission_camera(frame: u32, dt: f32) -> [f32; 3] {
+    const LEG_FRAMES: u32 = 1_800; // 30 s at 60 Hz
+    const LOOP_FRAMES: u32 = LEG_FRAMES * 6;
+
+    let loop_idx = frame / LOOP_FRAMES;
+    let in_loop = frame % LOOP_FRAMES;
+    let leg = in_loop / LEG_FRAMES;
+    let lt = (in_loop % LEG_FRAMES) as f32 * dt; // 0..30 s within the leg
+
+    // Each loop visits a different part of the world, so loop two is not a
+    // byte-for-byte replay of loop one — the cache is warm, the CONTENT is not.
+    let mut rng = Rng::new(0x_5155_1043 ^ loop_idx as u64);
+    let anchor = [
+        rng.range_f32(-WORLD_EXTENT * 0.6, WORLD_EXTENT * 0.6),
+        0.0,
+        rng.range_f32(-WORLD_EXTENT * 0.6, WORLD_EXTENT * 0.6),
+    ];
+
+    match leg {
+        // Hangar: a slow, tight orbit. Few textures, all of them close.
+        0 => {
+            let r = 18.0;
+            [
+                anchor[0] + r * (lt * 0.25).cos(),
+                0.0,
+                anchor[2] + r * (lt * 0.25).sin(),
+            ]
+        }
+        // Launch: accelerating away. Distance grows quadratically, so the
+        // visible set widens and every texture in it coarsens a mip at a time.
+        //
+        // The coefficient is sized AGAINST the world box, not chosen for feel:
+        // at 2.2 the leg reached 1980 units by t=30 against a WORLD_EXTENT of
+        // 300, so the camera left the world entirely and the leg measured an
+        // empty scene. 0.28 puts t=30 at ~250 — out at the rim, still inside
+        // the content.
+        1 => {
+            let d = 0.28 * lt * lt;
+            [anchor[0] + d, 0.0, anchor[2] + d * 0.4]
+        }
+        // Cruise: the traverse workload, offset so it does not retrace launch.
+        2 => [
+            WORLD_EXTENT * 0.8 * (lt * 0.35 + loop_idx as f32).sin(),
+            0.0,
+            WORLD_EXTENT * 0.8 * (lt * 0.2149 + loop_idx as f32).cos(),
+        ],
+        // Jump and approach: a discontinuity, then closing on the target. The
+        // cold burst is the moment a player is most likely to see a stall.
+        3 => {
+            let mut jrng = Rng::new(0x_D06E_5EED ^ (loop_idx as u64) << 8);
+            let target = [
+                jrng.range_f32(-WORLD_EXTENT, WORLD_EXTENT),
+                0.0,
+                jrng.range_f32(-WORLD_EXTENT, WORLD_EXTENT),
+            ];
+            // Ease in: fast at first, settling as the target is reached.
+            let k = 1.0 - (1.0 - lt / 30.0).powi(3);
+            // Approach offsets kept inside the box for the same reason as the
+            // launch coefficient above.
+            [
+                target[0] + (1.0 - k) * 150.0,
+                0.0,
+                target[2] + (1.0 - k) * 60.0,
+            ]
+        }
+        // On foot: walking pace, everything at mip 0. Slow enough that the
+        // pool is not churning, close enough that it is full.
+        4 => {
+            let r = 9.0;
+            [
+                anchor[0] + 60.0 + r * (lt * 0.5).cos(),
+                0.0,
+                anchor[2] + 24.0 + r * (lt * 0.5).sin(),
+            ]
+        }
+        // Return: retrace toward the hangar, evicting the whole cruise set.
+        _ => {
+            let k = lt / 30.0;
+            [
+                anchor[0] + 60.0 * (1.0 - k),
+                0.0,
+                anchor[2] + 24.0 * (1.0 - k),
+            ]
+        }
     }
 }
 
@@ -441,6 +562,47 @@ mod tests {
             assert_eq!(a, b);
             assert!(a.windows(2).all(|p| p[0] <= p[1]));
             assert_eq!(request_hash(&a), request_hash(&b));
+        }
+    }
+
+    #[test]
+    fn mission_camera_is_pure_and_loops() {
+        let dt = 1.0 / 60.0;
+        // Pure: same frame, same position, every time.
+        for f in [0u32, 1, 1_799, 1_800, 5_400, 10_799, 10_800, 32_399] {
+            assert_eq!(
+                camera(ScenarioKind::Mission, f, dt),
+                camera(ScenarioKind::Mission, f, dt)
+            );
+        }
+        // Each leg boundary actually moves the camera somewhere new, so no leg
+        // is silently a no-op.
+        let legs: Vec<[f32; 3]> = (0..6)
+            .map(|l| camera(ScenarioKind::Mission, l * 1_800 + 900, dt))
+            .collect();
+        for i in 0..legs.len() {
+            for j in (i + 1)..legs.len() {
+                let d = (legs[i][0] - legs[j][0]).abs() + (legs[i][2] - legs[j][2]).abs();
+                assert!(d > 1.0, "legs {i} and {j} sit on top of each other");
+            }
+        }
+        // Loop two visits different ground than loop one: warm cache, new
+        // content, which is the point of running three loops.
+        let a = camera(ScenarioKind::Mission, 900, dt);
+        let b = camera(ScenarioKind::Mission, 900 + 10_800, dt);
+        assert!((a[0] - b[0]).abs() + (a[2] - b[2]).abs() > 1.0);
+    }
+
+    #[test]
+    fn mission_requests_are_deterministic() {
+        let w = world();
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for f in [0u32, 2_500, 6_100, 11_000] {
+            let cam = camera(ScenarioKind::Mission, f, 1.0 / 60.0);
+            requests(&w, cam, 0.0, &mut a);
+            requests(&w, cam, 0.0, &mut b);
+            assert_eq!(request_hash(&a), request_hash(&b));
+            assert!(a.windows(2).all(|p| p[0] <= p[1]));
         }
     }
 
