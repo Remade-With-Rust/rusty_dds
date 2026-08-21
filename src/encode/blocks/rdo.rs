@@ -81,6 +81,9 @@ pub(crate) fn encode_image_bc1_rdo(
     // Computed once as a table enters the window, not once per block that tries it.
     let mut recent_ls: [Option<TableLs>; WINDOW] = [None; WINDOW];
     let mut recent_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
+    // The donor's 4-colour palette, built once on entry rather than by every
+    // block that tries it.
+    let mut recent_pal: [[[u8; 3]; 4]; WINDOW] = [[[0u8; 3]; 4]; WINDOW];
     let mut filled = 0usize;
     let mut prev_block = [0u8; 8];
 
@@ -104,6 +107,10 @@ pub(crate) fn encode_image_bc1_rdo(
                 recent_eps[slot] = (
                     u16::from_le_bytes([base[0], base[1]]),
                     u16::from_le_bytes([base[2], base[3]]),
+                );
+                recent_pal[slot] = super::bc1::bc1_palette_565(
+                    recent_eps[slot].0.max(recent_eps[slot].1),
+                    recent_eps[slot].0.min(recent_eps[slot].1),
                 );
                 filled += 1;
                 continue;
@@ -167,9 +174,9 @@ pub(crate) fn encode_image_bc1_rdo(
                     let (c0, c1) = recent_eps[k];
                     let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                     if c0 > c1 && lim > 0 {
-                        if let Some((blk, err)) =
-                            pack_bc1_scored_565(&pixels, c0, c1, lim)
-                        {
+                        if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
+                            &pixels, c0, c1, &recent_pal[k], lim,
+                        ) {
                             let j = err as f32 - lam * SAVE_PART;
                             if j < best_j {
                                 best_j = j;
@@ -225,6 +232,10 @@ pub(crate) fn encode_image_bc1_rdo(
             recent_eps[slot] = (
                 u16::from_le_bytes([best[0], best[1]]),
                 u16::from_le_bytes([best[2], best[3]]),
+            );
+            recent_pal[slot] = super::bc1::bc1_palette_565(
+                recent_eps[slot].0.max(recent_eps[slot].1),
+                recent_eps[slot].0.min(recent_eps[slot].1),
             );
             filled += 1;
         }

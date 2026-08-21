@@ -134,15 +134,34 @@ pub(super) fn pack_bc1_scored_565(
 ) -> Option<([u8; 8], i32)> {
     debug_assert_ne!(a, b);
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    pack_bc1_scored_with(pixels, hi, lo, &bc1_palette_565(hi, lo), err_limit)
+}
+
+/// The four-colour palette of a 565 endpoint pair.
+///
+/// Split out because the RDO endpoint-reuse path calls the packer ~16 times a
+/// block with endpoints drawn from a sixteen-entry sliding window: the palette
+/// is fixed while an entry is resident, but was rebuilt — two `from_565` and two
+/// `lerp_rgb` — by every block that tried it.
+pub(super) fn bc1_palette_565(hi: u16, lo: u16) -> [[u8; 3]; 4] {
     let ca = from_565(hi);
     let cb = from_565(lo);
-    let colors = [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)];
-    let (table, err) = bc1_fit_4color(pixels, &colors, err_limit)?;
-    let mut out = [0u8; 8];
-    out[0..2].copy_from_slice(&hi.to_le_bytes());
-    out[2..4].copy_from_slice(&lo.to_le_bytes());
-    out[4..8].copy_from_slice(&table.to_le_bytes());
-    Some((out, err))
+    [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)]
+}
+
+pub(super) fn pack_bc1_scored_with(
+    pixels: &[[u8; 4]; 16],
+    hi: u16,
+    lo: u16,
+    colors: &[[u8; 3]; 4],
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
+    let (table, err) = bc1_fit_4color(pixels, colors, err_limit)?;
+    // A BC1 block is two 565 words then the 32-bit index table, all
+    // little-endian and contiguous — one `u64`, not three `copy_from_slice`
+    // calls into a stack array.
+    let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
+    Some((v.to_le_bytes(), err))
 }
 
 /// 565-lattice hill climb around the winner: LS optimizes continuous RGB and

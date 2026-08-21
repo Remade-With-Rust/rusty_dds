@@ -245,11 +245,36 @@ fn to_565(c: [u8; 3]) -> u16 {
     (r << 11) | (g << 5) | b
 }
 
+/// 5- and 6-bit channel expansions, precomputed.
+///
+/// `(v << 3) | (v >> 2)` and `(v << 2) | (v >> 4)` are pure functions over 32
+/// and 64 values — 96 bytes of table between them, L1-resident forever. The
+/// expression form cost twelve operations per call in a function measured at 26
+/// instructions and ~71 calls a block.
+const fn build_exp(bits: u32) -> [u8; 64] {
+    let mut t = [0u8; 64];
+    let n = 1usize << bits;
+    let mut v = 0usize;
+    while v < n {
+        t[v] = if bits == 5 {
+            ((v << 3) | (v >> 2)) as u8
+        } else {
+            ((v << 2) | (v >> 4)) as u8
+        };
+        v += 1;
+    }
+    t
+}
+
+static EXP5: [u8; 64] = build_exp(5);
+static EXP6: [u8; 64] = build_exp(6);
+
 fn from_565(c: u16) -> [u8; 3] {
-    let r = ((c >> 11) & 31) as u8;
-    let g = ((c >> 5) & 63) as u8;
-    let b = (c & 31) as u8;
-    [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]
+    [
+        EXP5[((c >> 11) & 31) as usize],
+        EXP6[((c >> 5) & 63) as usize],
+        EXP5[(c & 31) as usize],
+    ]
 }
 
 /// The weights are **const generic** because every call site passes literals —

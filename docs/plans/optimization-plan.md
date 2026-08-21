@@ -3877,3 +3877,56 @@ four 16-byte row copies) should be a fraction of that.
 `mode6_chan_sse` at 88.8% would never have surfaced from a calls-per-block
 ranking — at 259 calls it looked comparable to `unquantize_7p` at 72. It is 46x
 more expensive. **Multiply the two; never rank on either alone.**
+
+## §67 — Round two executed: eight wins, two refutations
+
+Cumulative across both RDO rounds, 512^2 λ=25, pinned, paired CPU,
+byte-identical on the RDO ladder and the encode corpus throughout:
+
+| | start | now | verdict |
+|---|---|---|---|
+| **BC7 RDO** | 272.3214 ms | **90.4018 ms** | 14/14, z = +3.74, **+66.8%** (3.01x) |
+| **BC1 RDO** | 56.3616 ms | **40.1786 ms** | 14/14, z = +3.74, **+28.7%** (1.40x) |
+
+| # | function | outcome |
+|---|---|---|
+| 1 | `mode6_chan_sse` | **+28.2%** BC7 — one AVX2 register, invariants hoisted |
+| 2 | `ls_endpoints_mode6` | **refuted** — 2,511 -> 2,716 instr/block |
+| 3 | `pack_bc7_mode6` | **118 -> 99** instr, and **18.97 -> 2.81** calls/block (8x total) |
+| 4 | `unquantize_7p` | **24 -> 6** instr (-75%), 71.82 -> 63.57 calls/block |
+| 5 | palette/fit loop | lazy packing + hoisted donor unquantize (drives #3, #4) |
+| 6 | `lerp_rgb` | const-generic weights; part of BC1 **+3.1%** |
+| 7 | `bc1_colors_packed` | **refuted** — 103 -> 120 instr |
+| 8 | `from_565` | **26 -> 17** instr (-34.6%), 70.92 calls/block |
+| 9 | `pack_bc1_scored_565` | donor palette cached per window entry — BC1 **+3.3%**, z = +2.89 |
+| 10 | `gather_block` | **294 -> 249** instr (-15.3%); BC1 +3.1% with #6 |
+
+### Three things this round taught that the first did not
+
+**The cost model works, and it found a self-inflicted wound.** `mode6_chan_sse`
+was *created by round one* and became 88.8% of BC7 RDO. Cutting `mode6_sse` from
+201 calls to 8.27 replaced it with a scalar loop run 259 times a block. A
+frequency ranking could not see that; calls x instructions did.
+
+**A comment is not evidence.** `gather_block`'s interior path claimed "four
+contiguous 16-byte row copies" and performed sixty-four individually
+bounds-checked byte loads. It had presumably read as optimised for as long as
+the comment existed.
+
+**Do the cheap structural check before the clever one.** The two largest wins
+this round were not kernels: `pack_bc7_mode6` dropped 8x because the packing
+happened *before* the comparison that discards most candidates, and #9 dropped a
+palette rebuild because the endpoints were already fixed in a window. Both are
+"move this line" changes.
+
+### Two refutations, both measured rather than assumed
+
+`ls_endpoints_mode6` (#2) looked like a direct analogue of round one's #8, which
+won +13.4%. It is not: the index-only terms are three mult-adds of eleven here
+and both halves still pay the table lookup, so caching them cost 362 instructions
+once to save 17 a call. BC1's version wins because its pixel loop is three
+channels, not four.
+
+`bc1_colors_packed` (#7) returning only the packed form measured **worse**
+(103 -> 120). Both representations fall out of the same two 565 words cheaply;
+splitting them costs more in the return than the body saves.
