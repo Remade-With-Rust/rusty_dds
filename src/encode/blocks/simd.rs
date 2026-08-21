@@ -825,6 +825,62 @@ unsafe fn ls_accum_mode6_impl(
     (a, o0, o1)
 }
 
+
+/// Two mode-6 candidates for ONE channel in a single call, sharing the pixel
+/// and weight loads.
+///
+/// The endpoint polish always evaluates a `-1` and a `+1` move of the same
+/// channel, and both read the identical sixteen pixels and sixteen weights.
+/// Split across two calls those loads happen twice and cross a
+/// `#[target_feature]` boundary twice; fused they happen once.
+///
+/// Range analysis, lane exactness and the `madd` bound are exactly as in
+/// [`mode6_chan_sse_avx2`] — this is that kernel twice over shared inputs, with
+/// no arithmetic changed.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn mode6_chan_sse_pair_avx2(
+    px: &[u8; 16],
+    w: &[i16; 16],
+    a0: u8,
+    b0: u8,
+    a1: u8,
+    b1: u8,
+) -> (i64, i64) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
+    // are fixed-size and read with unaligned loads.
+    unsafe { mode6_chan_sse_pair_avx2_impl(px, w, a0, b0, a1, b1) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mode6_chan_sse_pair_avx2_impl(
+    px: &[u8; 16],
+    w: &[i16; 16],
+    a0: u8,
+    b0: u8,
+    a1: u8,
+    b1: u8,
+) -> (i64, i64) {
+    use std::arch::x86_64::*;
+    let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
+    let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
+    let one = |a: u8, b: u8| -> i64 {
+        let base = _mm256_set1_epi16(a as i16 * 64 + 32);
+        let delta = _mm256_set1_epi16(b as i16 - a as i16);
+        let v = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
+        let d = _mm256_sub_epi16(v, pv);
+        let sq = _mm256_madd_epi16(d, d);
+        let h = _mm256_hadd_epi32(sq, sq);
+        let h = _mm256_hadd_epi32(h, h);
+        _mm_cvtsi128_si32(_mm_add_epi32(
+            _mm256_castsi256_si128(h),
+            _mm256_extracti128_si256(h, 1),
+        )) as i64
+    };
+    (one(a0, b0), one(a1, b1))
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

@@ -1099,6 +1099,27 @@ fn mode6_chan_sse(fixed: &Mode6Fixed, c: usize, v0: u8, v1: u8) -> i64 {
     err
 }
 
+/// Two candidates for one channel in one call — see
+/// [`simd::mode6_chan_sse_pair_avx2`]. Falls back to two scalar evaluations.
+#[inline]
+fn mode6_chan_sse_pair(
+    fixed: &Mode6Fixed,
+    c: usize,
+    a0: u8,
+    b0: u8,
+    a1: u8,
+    b1: u8,
+) -> (i64, i64) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::mode6_chan_sse_pair_avx2(&fixed.planar.planar[c], &fixed.w, a0, b0, a1, b1);
+    }
+    (
+        mode6_chan_sse(fixed, c, a0, b0),
+        mode6_chan_sse(fixed, c, a1, b1),
+    )
+}
+
 /// The four channel errors, which sum to the block's mode-6 SSE.
 #[inline]
 fn mode6_chan_errs(fixed: &Mode6Fixed, q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8) -> [i64; 4] {
@@ -1307,25 +1328,67 @@ fn polish_mode6_endpoints(
                 if ce[c] == 0 {
                     continue;
                 }
-                // Both endpoints' unquantized values for this channel; only the
-                // perturbed one moves.
+                // The endpoint we are NOT moving is fixed for both directions,
+                // so its unquantized value is loop-invariant — it was being
+                // re-derived on every candidate. `cur` is NOT invariant and
+                // stays inside: if `d = -1` is accepted, `d = +1` must see the
+                // moved value.
+                let other = if which == 0 {
+                    unquantize_7p_chan((*q1)[c], p1)
+                } else {
+                    unquantize_7p_chan((*q0)[c], p0)
+                };
+                let pbit = if which == 0 { p0 } else { p1 };
+                let start = if which == 0 { (*q0)[c] } else { (*q1)[c] };
+                // Both directions read the same sixteen pixels and weights, so
+                // they are scored in ONE call that loads them once. The two are
+                // sequentially dependent in principle — if `-1` is accepted,
+                // `+1` must see the moved value — but `-1` is accepted on 0.5%
+                // of pairs, so the speculative pair is right 99.5% of the time
+                // and the rare case simply rescores `+1`.
+                let lo_ok = start >= 1;
+                let hi_ok = start <= 126;
+                let mk = |nv: u8| {
+                    let mv = unquantize_7p_chan(nv, pbit);
+                    if which == 0 { (mv, other) } else { (other, mv) }
+                };
+                let (mut cand_lo, mut cand_hi) = match (lo_ok, hi_ok) {
+                    (true, true) => {
+                        let (a0, b0) = mk(start - 1);
+                        let (a1, b1) = mk(start + 1);
+                        let (l, h) = mode6_chan_sse_pair(fixed, c, a0, b0, a1, b1);
+                        (Some(l), Some(h))
+                    }
+                    (true, false) => {
+                        let (a, b) = mk(start - 1);
+                        (Some(mode6_chan_sse(fixed, c, a, b)), None)
+                    }
+                    (false, true) => {
+                        let (a, b) = mk(start + 1);
+                        (None, Some(mode6_chan_sse(fixed, c, a, b)))
+                    }
+                    (false, false) => (None, None),
+                };
                 for d in [-1i32, 1] {
                     let cur = if which == 0 { (*q0)[c] } else { (*q1)[c] };
                     let nv = cur as i32 + d;
                     if nv < 0 || nv > 127 {
                         continue;
                     }
-                    let (qa, qb) = if which == 0 {
-                        (nv as u8, (*q1)[c])
-                    } else {
-                        ((*q0)[c], nv as u8)
+                    let cand = match (d, if d < 0 { cand_lo } else { cand_hi }) {
+                        // The speculative value is valid only while `cur` still
+                        // equals the value it was computed from.
+                        (_, Some(v)) if cur == start => v,
+                        _ => {
+                            let (a, b) = mk(nv as u8);
+                            mode6_chan_sse(fixed, c, a, b)
+                        }
                     };
-                    let cand = mode6_chan_sse(
-                        fixed,
-                        c,
-                        unquantize_7p_chan(qa, p0),
-                        unquantize_7p_chan(qb, p1),
-                    );
+                    if d < 0 {
+                        cand_lo = None;
+                    } else {
+                        cand_hi = None;
+                    }
                     let total = *err - ce[c] + cand;
                     if total < *err {
                         *err = total;
