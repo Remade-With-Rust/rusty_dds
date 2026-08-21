@@ -37,16 +37,16 @@ is already written in the tree:
 
 Measured on the corpus, serial, signed sweep forced off:
 
-| case | ratio with | ratio without | dB given up |
-|---|---|---|---|
-| Rock064 Roughness bc4s | 7.870 | **1.464** | -0.17 |
-| Metal063 Roughness bc4s | 7.028 | **1.457** | -0.17 |
-| Wood095 NormalGL bc5s | 5.885 | **1.178** | -0.42 |
-| Bricks097 Roughness bc4s | 5.490 | **1.858** | -0.05 |
-| Bricks097 NormalGL bc5s | 5.286 | **1.796** | -0.05 |
-| Rock064 NormalGL bc5s | 5.137 | **1.515** | -0.17 |
-| Wood095 Roughness bc4s | 3.620 | **0.822** | -0.61 |
-| Metal063 NormalGL bc5s | 0.663 | **0.309** | 0.00 |
+| case                     | ratio with | ratio without | dB given up |
+|--------------------------|------------|---------------|-------------|
+| Rock064 Roughness bc4s   | 7.870      | **1.464**     | -0.17       |
+| Metal063 Roughness bc4s  | 7.028      | **1.457**     | -0.17       |
+| Wood095 NormalGL bc5s    | 5.885      | **1.178**     | -0.42       |
+| Bricks097 Roughness bc4s | 5.490      | **1.858**     | -0.05       |
+| Bricks097 NormalGL bc5s  | 5.286      | **1.796**     | -0.05       |
+| Rock064 NormalGL bc5s    | 5.137      | **1.515**     | -0.17       |
+| Wood095 Roughness bc4s   | 3.620      | **0.822**     | -0.61       |
+| Metal063 NormalGL bc5s   | 0.663      | **0.309**     | 0.00        |
 
 **3-5x the CPU for 0.05-0.61 dB.** And without it we STILL hold higher PSNR than
 DirectXTex on 6 of 8 — only Wood095 NormalGL flips (-0.51 dB). We are spending
