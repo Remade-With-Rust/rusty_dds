@@ -602,6 +602,34 @@ unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
     )
 }
 
+/// The BC1 palette for two 565 words, in the `[i16; 16]` form the index fit
+/// broadcasts from.
+///
+/// The driver used to build the byte palette scalar (77 instructions) and then
+/// widen it. Both come straight from the 565 words here — it is
+/// [`bc1_palette_565_avx2`] without the final narrowing to bytes, since the
+/// intermediate `packus_epi32` result already IS the i16 layout wanted.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_palette_565_i16_avx2(c0: u16, c1: u16) -> [i16; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_palette_565_i16_avx2_impl(c0, c1) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_palette_565_i16_avx2_impl(c0: u16, c1: u16) -> [i16; 16] {
+    use std::arch::x86_64::*;
+    let p = bc1_palette_565_avx2(c0, c1);
+    // Widen the sixteen palette bytes back to i16 lanes.
+    let mut out = [0i16; 16];
+    _mm256_storeu_si256(
+        out.as_mut_ptr() as *mut __m256i,
+        _mm256_cvtepu8_epi16(p),
+    );
+    out
+}
+
 /// [`bc1_fixed_sse_avx2`] that builds its own palette from the 565 words.
 ///
 /// The caller used to run `bc1_colors_packed` — 91 scalar instructions — and

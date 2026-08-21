@@ -172,6 +172,18 @@ pub(super) fn widen_pal(colors: &[[u8; 3]; 4]) -> Pal16 {
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 pub(super) fn widen_pal(_colors: &[[u8; 3]; 4]) -> Pal16 {}
 
+/// The widened palette straight from the two 565 words, skipping the byte form.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(super) fn pal16_from_565(hi: u16, lo: u16) -> Pal16 {
+    if simd::has_avx2() {
+        simd::bc1_palette_565_i16_avx2(hi, lo)
+    } else {
+        widen_pal(&bc1_palette_565(hi, lo))
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+pub(super) fn pal16_from_565(_hi: u16, _lo: u16) -> Pal16 {}
+
 /// [`pack_bc1_scored_with`] using a palette widened once by the caller.
 ///
 /// The RDO window reuses each cached palette about fourteen times a block, and

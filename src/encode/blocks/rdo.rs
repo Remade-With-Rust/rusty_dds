@@ -166,7 +166,10 @@ pub(crate) fn encode_image_bc1_rdo(
                                 recent_eps[slot].0.max(recent_eps[slot].1),
                                 recent_eps[slot].0.min(recent_eps[slot].1),
                             );
-                            recent_pal16[slot] = super::bc1::widen_pal(&recent_pal[slot]);
+                            recent_pal16[slot] = super::bc1::pal16_from_565(
+                                recent_eps[slot].0.max(recent_eps[slot].1),
+                                recent_eps[slot].0.min(recent_eps[slot].1),
+                            );
                             filled += 1;
                             continue;
                         }
@@ -329,7 +332,10 @@ pub(crate) fn encode_image_bc1_rdo(
                             recent_eps[slot].0.max(recent_eps[slot].1),
                             recent_eps[slot].0.min(recent_eps[slot].1),
                         );
-                        recent_pal16[slot] = super::bc1::widen_pal(&recent_pal[slot]);
+                        recent_pal16[slot] = super::bc1::pal16_from_565(
+                                recent_eps[slot].0.max(recent_eps[slot].1),
+                                recent_eps[slot].0.min(recent_eps[slot].1),
+                            );
                         filled += 1;
                     }
                     std::mem::swap(&mut prev_row, &mut cur_row);
