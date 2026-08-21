@@ -952,6 +952,81 @@ unsafe fn mode6_chan_sse_pair_avx2_impl(
     (one(a0, b0), one(a1, b1))
 }
 
+
+/// The mode-6 weight table, each entry repeated four times (once per channel),
+/// in groups of four palette entries — the shape [`palette_mode6_avx2`] wants.
+#[cfg(target_arch = "x86_64")]
+static W6M_REP: [[i16; 16]; 4] = [
+    [0, 0, 0, 0, 4, 4, 4, 4, 9, 9, 9, 9, 13, 13, 13, 13],
+    [17, 17, 17, 17, 21, 21, 21, 21, 26, 26, 26, 26, 30, 30, 30, 30],
+    [34, 34, 34, 34, 38, 38, 38, 38, 43, 43, 43, 43, 47, 47, 47, 47],
+    [51, 51, 51, 51, 55, 55, 55, 55, 60, 60, 60, 60, 64, 64, 64, 64]
+];
+
+/// Build a full mode-6 palette: sixteen entries, four channels.
+///
+/// # Why this was worth vectorising
+///
+/// The scalar form is a sixteen-iteration loop with a four-channel inner body —
+/// **24 instructions a pass, about 423 a call**, and the RDO donor loop calls it
+/// 16.4 times a block. That is the largest single item in BC7 RDO.
+///
+/// # Layout
+///
+/// One `__m256i` holds sixteen `i16` = **four palette entries by four
+/// channels**, which is exactly the output's byte order, so no transpose is
+/// needed — four groups cover all sixteen entries.
+///
+/// # Why i16 is exact, and why `packus` never clamps
+///
+/// `base[c] = c0[c] * 64 + 32` spans `32 ..= 16_352` and `w * delta` spans
+/// `+/-16_320`, and their sum is the original `(64 - w) * v0 + w * v1 + 32`,
+/// which cannot leave `32 ..= 16_352`. So the sum fits `i16` with room, the
+/// product `delta * w` fits too (`+/-16_320`), and `mullo`'s low half is the
+/// exact product. After `>> 6` every value is in `0 ..= 255`, so the saturating
+/// pack never actually saturates and matches the scalar's `as u8` exactly. The
+/// sum being non-negative also makes the arithmetic shift agree with the
+/// scalar's `i32` shift.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn palette_mode6_avx2(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); all arrays are
+    // fixed-size and accessed with unaligned loads and stores.
+    unsafe { palette_mode6_avx2_impl(base, c0, c1) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn palette_mode6_avx2_impl(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    use std::arch::x86_64::*;
+    let bq = u64::from_le_bytes([
+        base[0] as u16 as u8, (base[0] as u16 >> 8) as u8,
+        base[1] as u16 as u8, (base[1] as u16 >> 8) as u8,
+        base[2] as u16 as u8, (base[2] as u16 >> 8) as u8,
+        base[3] as u16 as u8, (base[3] as u16 >> 8) as u8,
+    ]);
+    let dq = u64::from_le_bytes([
+        (c1[0] as i16 - c0[0] as i16) as u16 as u8, ((c1[0] as i16 - c0[0] as i16) as u16 >> 8) as u8,
+        (c1[1] as i16 - c0[1] as i16) as u16 as u8, ((c1[1] as i16 - c0[1] as i16) as u16 >> 8) as u8,
+        (c1[2] as i16 - c0[2] as i16) as u16 as u8, ((c1[2] as i16 - c0[2] as i16) as u16 >> 8) as u8,
+        (c1[3] as i16 - c0[3] as i16) as u16 as u8, ((c1[3] as i16 - c0[3] as i16) as u16 >> 8) as u8,
+    ]);
+    let b = _mm256_set1_epi64x(bq as i64);
+    let d = _mm256_set1_epi64x(dq as i64);
+    let zero = _mm256_setzero_si256();
+    let mut out = [[0u8; 4]; 16];
+    let op = out.as_mut_ptr() as *mut u8;
+    for g in 0..4usize {
+        let wv = _mm256_loadu_si256(W6M_REP.as_ptr().add(g) as *const __m256i);
+        let v = _mm256_srai_epi16(_mm256_add_epi16(b, _mm256_mullo_epi16(d, wv)), 6);
+        // `packus` works per 128-bit lane, so the useful bytes land in the low
+        // half of each lane; one `permute4x64` gathers them into sixteen.
+        let p = _mm256_permute4x64_epi64(_mm256_packus_epi16(v, zero), 0b00_00_10_00);
+        _mm_storeu_si128(op.add(g * 16) as *mut __m128i, _mm256_castsi256_si128(p));
+    }
+    out
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

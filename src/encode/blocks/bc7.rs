@@ -834,6 +834,10 @@ pub(super) fn palette_mode6_base(c0: [u8; 4]) -> [i32; 4] {
 
 /// [`palette_mode6`] with the base already in hand.
 pub(super) fn palette_mode6_from_base(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::palette_mode6_avx2(base, c0, c1);
+    }
     let delta = [
         c1[0] as i32 - c0[0] as i32,
         c1[1] as i32 - c0[1] as i32,
@@ -851,41 +855,7 @@ pub(super) fn palette_mode6_from_base(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) 
 }
 
 pub(super) fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
-    // `(64 - w) * c0 + w * c1 + 32` is exactly `c0 * 64 + 32 + w * (c1 - c0)`,
-    // and only the right operand varies with the weight. Base and delta are
-    // constant for the whole palette, so this is one multiply per component
-    // instead of two — 64 rather than 128 per call, and this is called once per
-    // seed candidate plus each refine, up to seven times a block.
-    //
-    // The same identity the decoder uses in `bc7_bd3`; the value is always
-    // >= 32 so the shift is exact either way. Byte-identical by construction,
-    // and the encode determinism tests gate it.
-    let base = [
-        c0[0] as i32 * 64 + 32,
-        c0[1] as i32 * 64 + 32,
-        c0[2] as i32 * 64 + 32,
-        c0[3] as i32 * 64 + 32,
-    ];
-    let delta = [
-        c1[0] as i32 - c0[0] as i32,
-        c1[1] as i32 - c0[1] as i32,
-        c1[2] as i32 - c0[2] as i32,
-        c1[3] as i32 - c0[3] as i32,
-    ];
-    // A hand-written AVX2 palette builder was tried here and measured NEUTRAL
-    // (7/12 paired wins, z = +0.58, 0.00% median, 8 ties). LLVM already
-    // auto-vectorises this loop — it is sixteen independent iterations over four
-    // channels with no carried dependency — and a ceiling probe had already put
-    // the whole function inside the noise. Do not re-add intrinsics here without
-    // a number.
-    let mut pal = [[0u8; 4]; 16];
-    for (k, &w) in W6M.iter().enumerate() {
-        let w = w as i32;
-        for c in 0..4 {
-            pal[k][c] = ((base[c] + w * delta[c]) >> 6) as u8;
-        }
-    }
-    pal
+    palette_mode6_from_base(palette_mode6_base(c0), c0, c1)
 }
 
 /// Nearest palette entry (strict `<`: lowest index wins ties) + its SSE.
@@ -1260,6 +1230,52 @@ pub(super) fn quantize_7p(c: [u8; 4]) -> ([u8; 4], u8) {
 
 #[cfg(test)]
 mod qtab_tests {
+
+    /// The vectorised palette must equal the scalar build for **every** entry.
+    ///
+    /// The i16 range argument says the sum stays in 32..=16_352 and every result
+    /// in 0..=255, so the saturating pack never clamps. This checks it at the
+    /// extremes that would break it — endpoints at 0 and 255 in both orders,
+    /// which drive `delta` to both bounds.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn palette_mode6_vector_matches_scalar() {
+        if !super::simd::has_avx2() {
+            return;
+        }
+        let mut state = 0x2b7e_1516_28ae_d2a6u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let (c0, c1) = match case {
+                0 => ([0u8; 4], [0u8; 4]),
+                1 => ([255u8; 4], [255u8; 4]),
+                2 => ([0u8; 4], [255u8; 4]),
+                3 => ([255u8; 4], [0u8; 4]),
+                _ => {
+                    let (a, b) = (next(), next());
+                    (
+                        [a as u8, (a >> 8) as u8, (a >> 16) as u8, (a >> 24) as u8],
+                        [b as u8, (b >> 8) as u8, (b >> 16) as u8, (b >> 24) as u8],
+                    )
+                }
+            };
+            let base = super::palette_mode6_base(c0);
+            let got = super::simd::palette_mode6_avx2(base, c0, c1);
+            let mut want = [[0u8; 4]; 16];
+            for (k, &w) in super::W6M.iter().enumerate() {
+                for c in 0..4 {
+                    want[k][c] = ((base[c] + w as i32 * (c1[c] as i32 - c0[c] as i32)) >> 6) as u8;
+                }
+            }
+            assert_eq!(got, want, "case {case} c0={c0:?} c1={c1:?}");
+        }
+    }
+
 
     /// The vectorised mode-6 least-squares must reproduce the scalar loop
     /// **bitwise**, including the table-driven normal-equation terms.
