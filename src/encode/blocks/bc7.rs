@@ -1048,7 +1048,7 @@ pub(super) fn ls_endpoints_mode6(
 ) -> Option<([u8; 4], [u8; 4])> {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        return ls_endpoints_mode6_pxv(&simd::ls_pixels(pixels), indices);
+        return ls_endpoints_mode6_pxv(&simd::ls_pixels_mode6(pixels), indices);
     }
     ls_endpoints_mode6_scalar(pixels, indices)
 }
@@ -1316,7 +1316,9 @@ mod qtab_tests {
                     }
                 }
             }
-            let pxv = super::simd::ls_pixels(&px);
+            // Must be the channel-interleaved layout — this is the one
+            // `ls_endpoints_mode6_pxv` consumes.
+            let pxv = super::simd::ls_pixels_mode6(&px);
             let got = super::ls_endpoints_mode6_pxv(&pxv, &idx);
             let want = super::ls_endpoints_mode6_scalar(&px, &idx);
             assert_eq!(got, want, "case {case}");

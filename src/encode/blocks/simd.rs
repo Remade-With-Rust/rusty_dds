@@ -552,19 +552,15 @@ unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
         // division, so a plain shift) and the fourth is black.
         (_mm_srli_epi32(sum, 1), _mm_setzero_si128())
     };
-    // Each of the four is [R, G, B, 0] in 32-bit lanes; gather byte 0 of each
-    // lane into the packed 0x00BBGGRR word at its own offset, then OR together.
-    let m = |o: i32| {
-        _mm_setr_epi8(
-            if o == 0 { 0 } else { -1 }, if o == 0 { 4 } else { -1 }, if o == 0 { 8 } else { -1 }, -1,
-            if o == 1 { 0 } else { -1 }, if o == 1 { 4 } else { -1 }, if o == 1 { 8 } else { -1 }, -1,
-            if o == 2 { 0 } else { -1 }, if o == 2 { 4 } else { -1 }, if o == 2 { 8 } else { -1 }, -1,
-            if o == 3 { 0 } else { -1 }, if o == 3 { 4 } else { -1 }, if o == 3 { 8 } else { -1 }, -1,
-        )
-    };
-    _mm_or_si128(
-        _mm_or_si128(_mm_shuffle_epi8(e, m(0)), _mm_shuffle_epi8(f, m(1))),
-        _mm_or_si128(_mm_shuffle_epi8(p2, m(2)), _mm_shuffle_epi8(p3, m(3))),
+    // Each of the four is [R, G, B, 0] in 32-bit lanes, all values in 0..=255,
+    // so two narrowing packs put them in palette order directly: `packus_epi32`
+    // pairs them into `[R,G,B,0, R,G,B,0]` words and `packus_epi16` brings the
+    // two halves down to the sixteen bytes wanted. Three instructions where
+    // four `pshufb` and three `or` were used, and nothing saturates because
+    // every value already fits a byte.
+    _mm_packus_epi16(
+        _mm_packus_epi32(e, f),
+        _mm_packus_epi32(p2, p3),
     )
 }
 
@@ -620,7 +616,9 @@ unsafe fn bc1_sse_from_pal(
                 as *const __m128i,
         );
         // Four reconstructed pixels, and the four source pixels beside them.
-        let rec = _mm256_and_si256(_mm256_cvtepu8_epi16(_mm_shuffle_epi8(p, sel)), keep);
+        // `rec` needs no alpha mask: the palette's fourth byte is already zero
+        // by construction, so the AND that used to be here was a no-op.
+        let rec = _mm256_cvtepu8_epi16(_mm_shuffle_epi8(p, sel));
         let want = _mm256_and_si256(
             _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(g * 16) as *const __m128i)),
             keep,
@@ -765,6 +763,36 @@ unsafe fn ls_accum_sse_impl(
     _mm_storeu_ps(o0.as_mut_ptr(), _mm256_castps256_ps128(acc));
     _mm_storeu_ps(o1.as_mut_ptr(), _mm256_extractf128_ps(acc, 1));
     (o0, o1)
+}
+
+/// Convert a block's sixteen pixels to `[r,r,g,g,b,b,a,a]` float octets — the
+/// layout [`ls_accum_mode6`] wants.
+///
+/// Interleaving the channels here is what lets that kernel multiply by the raw
+/// `[u,w,u,w,...]` broadcast, with no per-pixel permute: lane `2c` accumulates
+/// `b0[c]` and lane `2c+1` accumulates `b1[c]`. One permute at the end
+/// deinterleaves the result.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_pixels_mode6(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { ls_pixels_mode6_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ls_pixels_mode6_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
+    use std::arch::x86_64::*;
+    let dup = _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+    let mut out = [[0f32; 8]; 16];
+    for i in 0..16usize {
+        let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
+            u32::from_le_bytes(pixels[i]) as i32,
+        )));
+        let v = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(px), dup);
+        _mm256_storeu_ps(out[i].as_mut_ptr(), v);
+    }
+    out
 }
 
 /// Convert a block's sixteen pixels to the `[rgba, rgba]` float pairs
@@ -1104,18 +1132,25 @@ unsafe fn ls_accum_mode6_impl(
     indices: &[u8; 16],
 ) -> ([f32; 4], [f32; 4], [f32; 4]) {
     use std::arch::x86_64::*;
-    let sel = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
     let mut acc = _mm256_setzero_ps();
     let mut aacc = _mm_setzero_ps();
     for i in 0..16usize {
         let k = indices[i] as usize;
         debug_assert!(k < 16);
-        let pair = _mm256_castpd_ps(_mm256_broadcast_sd(&*(UW6.as_ptr().add(k) as *const f64)));
-        let wv = _mm256_permutevar8x32_ps(pair, sel);
+        // The raw `[u,w,u,w,u,w,u,w]` broadcast is used as-is — the per-pixel
+        // `vpermps` that used to reshape it into `[u,u,u,u,w,w,w,w]` is gone,
+        // because `pxv` arrives channel-interleaved instead (see
+        // `ls_pixels_mode6`). Lane `2c` accumulates `b0[c]`, lane `2c+1`
+        // accumulates `b1[c]`; each lane still performs the same
+        // `acc += weight * x` in pixel order, so nothing about the arithmetic
+        // moves.
+        let wv = _mm256_castpd_ps(_mm256_broadcast_sd(&*(UW6.as_ptr().add(k) as *const f64)));
         let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
         acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
         aacc = _mm_add_ps(aacc, _mm_loadu_ps(AW6.as_ptr().add(k) as *const f32));
     }
+    // Deinterleave once: [b0.r,b1.r,b0.g,b1.g,...] -> [b0.rgba, b1.rgba].
+    let acc = _mm256_permutevar8x32_ps(acc, _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7));
     let mut a = [0f32; 4];
     let mut o0 = [0f32; 4];
     let mut o1 = [0f32; 4];

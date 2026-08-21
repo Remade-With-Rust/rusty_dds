@@ -464,6 +464,19 @@ fn ls_pixels(pixels: &[[u8; 4]; 16]) -> LsPixels {
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 fn ls_pixels(_pixels: &[[u8; 4]; 16]) -> LsPixels {}
 
+/// As [`ls_pixels`], in the channel-interleaved layout the mode-6 accumulator
+/// wants. BC1 and BC7 use different layouts because their weight vectors differ.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn ls_pixels_mode6(pixels: &[[u8; 4]; 16]) -> LsPixels {
+    if simd::has_avx2() {
+        simd::ls_pixels_mode6(pixels)
+    } else {
+        [[0f32; 8]; 16]
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn ls_pixels_mode6(_pixels: &[[u8; 4]; 16]) -> LsPixels {}
+
 /// Mode-6 LS on pre-converted pixels where the target supports it, falling back
 /// to the byte-taking scalar path otherwise.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -884,7 +897,7 @@ pub(crate) fn encode_image_bc7_rdo(
                             let planar = Mode6Planar::new(&pixels);
                             // Likewise block-invariant: the mode-6 LS accumulator
                             // runs 9.14 times a block on these.
-                            let pxv = ls_pixels(&pixels);
+                            let pxv = ls_pixels_mode6(&pixels);
 
                         let mut base = [0u8; 16];
                         encode_bc7_mode6(pixels, &mut base);
