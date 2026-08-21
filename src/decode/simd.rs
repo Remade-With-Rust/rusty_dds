@@ -152,13 +152,38 @@ pub(super) fn write2_split(
 
 /// Can this CPU run the BC5 gather profitably?
 ///
+/// Cached feature probe.
+///
+/// A relaxed load is sufficient: the value is a property of the CPU, so it
+/// never changes and every racing thread computes the SAME answer. The worst a
+/// race can do is probe twice and store the same byte twice, and there is
+/// nothing to publish besides the byte, so no ordering is needed to read it.
+///
+/// This replaced `OnceLock<bool>`, which is acquire-ordered and carries a slow
+/// path LLVM cannot prove unreachable — so every probe kept a call site for
+/// `OnceLock::initialize`. The decode block loop pays a probe on EVERY 4x4
+/// block, which is what makes the difference worth the byte.
+#[inline(always)]
+fn probe(cache: &std::sync::atomic::AtomicU8, detect: impl FnOnce() -> bool) -> bool {
+    use std::sync::atomic::Ordering;
+    // 0 = not yet probed, 1 = absent, 2 = present.
+    match cache.load(Ordering::Relaxed) {
+        0 => {
+            let v = if detect() { 2 } else { 1 };
+            cache.store(v, Ordering::Relaxed);
+            v == 2
+        }
+        v => v == 2,
+    }
+}
+
 /// Needs SSSE3 (`pshufb`) and BMI2 (`pdep`) — neither is baseline — and needs
 /// `pdep` to be fast rather than microcoded. See [`has_fast_pdep`]. Cached, and
 /// the scalar twin covers every CPU that fails this.
 #[inline]
 pub(super) fn has_ssse3() -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
+    static OK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    probe(&OK, || {
         std::arch::is_x86_feature_detected!("ssse3")
             && std::arch::is_x86_feature_detected!("bmi2")
             && has_fast_pdep()
@@ -288,8 +313,8 @@ unsafe fn bc5_gather_ssse3(
 /// piece of that format. F16C implies AVX in practice, but both are asserted.
 #[inline]
 pub(super) fn has_f16c() -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
+    static OK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    probe(&OK, || {
         std::arch::is_x86_feature_detected!("f16c") && std::arch::is_x86_feature_detected!("avx")
     })
 }
@@ -324,8 +349,8 @@ unsafe fn half48_to_f32_f16c(src: &[u16; 48], dst: &mut [f32; 48]) {
 /// because the BC5 gather uses one. The BC1 gather needs only `pshufb`.
 #[inline]
 pub(super) fn has_pshufb() -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| std::arch::is_x86_feature_detected!("ssse3"))
+    static OK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    probe(&OK, || std::arch::is_x86_feature_detected!("ssse3"))
 }
 
 /// `pshufb` selectors for four BC1 pixels, indexed by the byte holding their
@@ -367,8 +392,10 @@ pub(crate) static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
 /// The obvious shape is a per-block gather called from the shared block loop.
 /// That shape measured **0/16 wins, z = -4.00, 47.8% slower than scalar**. It
 /// loses on two counts, both from the ABI boundary a `#[target_feature]`
-/// function cannot be inlined across: the call plus its `OnceLock` check cost
-/// 27% of BC1 decode on their own, and passing the palette by value made the
+/// function cannot be inlined across: the call plus its feature check cost
+/// 27% of BC1 decode on their own (that check was a `OnceLock` when this was
+/// measured; it is a relaxed byte now, which shrinks the second term but not
+/// the call), and passing the palette by value made the
 /// caller spill it to stack for the callee to reload — a store-forwarding
 /// stall worth a further 14%. Hoisting the boundary above the loop removes
 /// both: one feature check per surface, and [`bc1_palette`] inlines in, so the
@@ -591,8 +618,8 @@ pub(super) unsafe fn bc3_blocks_ssse3(
 /// decoder stands alone when `encode` is compiled out.
 #[inline]
 pub(super) fn has_avx2() -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| std::arch::is_x86_feature_detected!("avx2"))
+    static OK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    probe(&OK, || std::arch::is_x86_feature_detected!("avx2"))
 }
 
 /// Interpolate one BC6H mode-11 block: sixteen weights against three channels,
@@ -676,8 +703,10 @@ unsafe fn bc6h_interp_avx2_impl(
 ///
 /// Same reason the BC1/BC2/BC3 loops live here: a `#[target_feature]` function
 /// cannot be inlined into a caller that lacks the feature, so dispatching inside
-/// the block loop pays a real call plus a `OnceLock` check on **every 4x4
-/// block**. 0.3.28 measured that boundary at 26.7% of BC1 decode. BC4 and BC5
+/// the block loop pays a real call plus a feature check on **every 4x4
+/// block**. 0.3.28 measured that boundary at 26.7% of BC1 decode, when the
+/// check was a `OnceLock`; it is a relaxed byte now, so the check is nearly
+/// free and the CALL is what remains. BC4 and BC5
 /// won their gathers in 0.3.28 *despite* paying it every block, because those
 /// gathers are heavy enough to carry it — which is exactly why it went
 /// unnoticed until the dispatch sites were listed side by side.
