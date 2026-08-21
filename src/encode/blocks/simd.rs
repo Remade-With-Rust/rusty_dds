@@ -1805,6 +1805,63 @@ unsafe fn planar_avx2_impl(pixels: &[[u8; 4]; 16]) -> [[u8; 16]; 4] {
     out
 }
 
+
+/// Nearest-palette index for sixteen alpha samples against an 8-entry palette,
+/// plus the resulting SSE.
+///
+/// # The shape
+///
+/// The scalar form is 16 samples x 8 entries of `|pu - s|` with a running
+/// argmin — and the `AlphaSelect` fast path is not better, just differently
+/// arranged: seven threshold compares per sample, 112 for the block. Either way
+/// it measured **738 instructions** inside `pack_alpha_indices_s`.
+///
+/// # Why the tie-break survives
+///
+/// The scalar keeps the FIRST minimum (`if d < best_d`, strict). Packing the
+/// key as `d * 8 + j` makes a single `min_epi16` reproduce that exactly: equal
+/// distances are separated by the index, and the smaller index wins. `d` is at
+/// most 255 so the key is at most 2047 — no i16 concern.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_select_avx2(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
+    // are fixed-size and read with unaligned loads.
+    unsafe { alpha_select_avx2_impl(pal_u, samples) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_select_avx2_impl(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
+    use std::arch::x86_64::*;
+    let sv = _mm256_cvtepu8_epi16(_mm_loadu_si128(samples.as_ptr() as *const __m128i));
+    let mut best = _mm256_set1_epi16(0x7FFF);
+    for j in 0..8i16 {
+        let pv = _mm256_set1_epi16(pal_u[j as usize] as i16);
+        let d = _mm256_abs_epi16(_mm256_sub_epi16(pv, sv));
+        // key = d * 8 + j
+        let key = _mm256_add_epi16(_mm256_slli_epi16(d, 3), _mm256_set1_epi16(j));
+        best = _mm256_min_epi16(best, key);
+    }
+    let idx16 = _mm256_and_si256(best, _mm256_set1_epi16(7));
+    let d16 = _mm256_srli_epi16(best, 3);
+    // Each squared distance is at most 255^2, and `madd` folds pairs, so the
+    // eight lanes sum well inside i32.
+    let sq = _mm256_madd_epi16(d16, d16);
+    let h = _mm256_hadd_epi32(sq, sq);
+    let h = _mm256_hadd_epi32(h, h);
+    let err = _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    ));
+    // Indices are 0..=7, so `packus` cannot saturate; one permute undoes its
+    // 128-bit lane interleave.
+    let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(idx16, idx16), 0b00_00_10_00);
+    let mut out = [0u8; 16];
+    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, _mm256_castsi256_si128(packed));
+    (out, err)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

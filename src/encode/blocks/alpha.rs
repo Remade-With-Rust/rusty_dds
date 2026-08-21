@@ -871,39 +871,21 @@ pub(super) fn pack_alpha_indices_s_err(
     for (i, &p) in palette.iter().enumerate() {
         pal_u[i] = snorm_i32_to_unorm_u8(p);
     }
-    // snorm→unorm is monotone, so the static ascending orders carry over.
-    let mut indices = [0u8; 16];
-    let mut err = 0i32;
-    if alpha_sel_enabled() {
-        let order = if a0 > a1 { &ALPHA_ORDER6 } else { &ALPHA_ORDER4 };
-        let sel = AlphaSelect::build(&pal_u, order);
-        for (i, &s) in samples.iter().enumerate() {
-            let best = sel.select(s);
-            indices[i] = best;
-            let diff = pal_u[best as usize] as i32 - s as i32;
-            err += diff * diff;
-            if err >= err_limit {
-                return None;
-            }
-        }
+    // One vector pass for all sixteen samples. The scalar form aborted on the
+    // running prefix; every term is a squared difference and so non-negative,
+    // which makes the running sum monotone — "some prefix reaches the limit"
+    // and "the total reaches the limit" are the same statement, so one
+    // comparison decides it.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let (indices, err) = if simd::has_avx2() {
+        simd::alpha_select_avx2(&pal_u, samples)
     } else {
-        for (i, &s) in samples.iter().enumerate() {
-            let mut best = 0u8;
-            let mut best_d = i32::MAX;
-            for (j, &pu) in pal_u.iter().enumerate() {
-                let d = (pu as i32 - s as i32).abs();
-                if d < best_d {
-                    best_d = d;
-                    best = j as u8;
-                }
-            }
-            indices[i] = best;
-            let diff = pal_u[best as usize] as i32 - s as i32;
-            err += diff * diff;
-            if err >= err_limit {
-                return None;
-            }
-        }
+        alpha_select_scalar(&pal_u, samples)
+    };
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let (indices, err) = alpha_select_scalar(&pal_u, samples);
+    if err >= err_limit {
+        return None;
     }
     let mut out = [0u8; 8];
     out[0] = a0 as i8 as u8;
@@ -1025,12 +1007,13 @@ pub(super) fn pack_alpha_indices(a0: u8, a1: u8, palette: &[u8; 8], samples: &[u
     out
 }
 
-pub(super) fn pack_alpha_indices_s(a0: i32, a1: i32, palette: &[i32; 8], samples: &[u8; 16]) -> [u8; 8] {
-    let mut pal_u = [0u8; 8];
-    for (i, &p) in palette.iter().enumerate() {
-        pal_u[i] = snorm_i32_to_unorm_u8(p);
-    }
+/// Nearest-palette index per sample, and the resulting SSE.
+///
+/// Scalar twin of [`simd::alpha_select_avx2`]; the vector form must match it
+/// exactly, including the FIRST-minimum tie-break of the strict `<`.
+pub(super) fn alpha_select_scalar(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16], i32) {
     let mut indices = [0u8; 16];
+    let mut err = 0i32;
     for (i, &s) in samples.iter().enumerate() {
         let mut best = 0u8;
         let mut best_d = i32::MAX;
@@ -1042,7 +1025,27 @@ pub(super) fn pack_alpha_indices_s(a0: i32, a1: i32, palette: &[i32; 8], samples
             }
         }
         indices[i] = best;
+        let diff = pal_u[best as usize] as i32 - s as i32;
+        err += diff * diff;
     }
+    (indices, err)
+}
+
+pub(super) fn pack_alpha_indices_s(a0: i32, a1: i32, palette: &[i32; 8], samples: &[u8; 16]) -> [u8; 8] {
+    let mut pal_u = [0u8; 8];
+    for (i, &p) in palette.iter().enumerate() {
+        pal_u[i] = snorm_i32_to_unorm_u8(p);
+    }
+    // 16 samples x 8 entries of |pu - s| with a running argmin — one vector
+    // pass, same first-minimum tie-break. See `simd::alpha_select_avx2`.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let indices = if simd::has_avx2() {
+        simd::alpha_select_avx2(&pal_u, samples).0
+    } else {
+        alpha_select_scalar(&pal_u, samples).0
+    };
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let indices = alpha_select_scalar(&pal_u, samples).0;
     let mut out = [0u8; 8];
     out[0] = a0 as i8 as u8;
     out[1] = a1 as i8 as u8;
