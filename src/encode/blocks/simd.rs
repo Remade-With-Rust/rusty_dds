@@ -14,6 +14,102 @@
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
+/// SSE of sixteen samples against an eight-entry palette addressed by sixteen
+/// packed 3-bit indices.
+///
+/// The scalar form walks sixteen iterations, each extracting a 3-bit field,
+/// indexing the palette through memory and squaring — 312 instructions in
+/// `alpha_sse_u` and again in `alpha_sse_s`, with a loop-carried dependency on
+/// the running sum.
+///
+/// Vectorised, the index extraction is two `srlv` (indices 0..7 all live in the
+/// low 24 bits of the 48-bit word, and 8..15 in the same window shifted down by
+/// 24), the palette lookup is one `pshufb` — `pshufb` addresses sixteen bytes
+/// with the low four bits of each index, and a 3-bit index is always in range —
+/// and the error is the usual widen/subtract/`madd` chain. Exact: every step is
+/// integer and the total is a sum, so lane order does not matter.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_fixed_sse_avx2(samples: &[u8; 16], palette: &[u8; 8], bits: u64) -> i32 {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_fixed_sse_avx2_impl(samples, palette, bits) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_fixed_sse_avx2_impl(samples: &[u8; 16], palette: &[u8; 8], bits: u64) -> i32 {
+    use std::arch::x86_64::*;
+    let sh = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+    let seven = _mm256_set1_epi32(7);
+    // Indices 0..7 from the low 24 bits, 8..15 from the next 24.
+    let lo = _mm256_and_si256(
+        _mm256_srlv_epi32(_mm256_set1_epi32(bits as u32 as i32), sh),
+        seven,
+    );
+    let hi = _mm256_and_si256(
+        _mm256_srlv_epi32(_mm256_set1_epi32((bits >> 24) as u32 as i32), sh),
+        seven,
+    );
+    // Down to sixteen index bytes in sample order.
+    let i0 = _mm_packs_epi32(
+        _mm256_castsi256_si128(lo),
+        _mm256_extracti128_si256(lo, 1),
+    );
+    let i1 = _mm_packs_epi32(
+        _mm256_castsi256_si128(hi),
+        _mm256_extracti128_si256(hi, 1),
+    );
+    let idx = _mm_packs_epi16(i0, i1);
+    // One shuffle reconstructs all sixteen samples from the palette.
+    let pal = _mm_loadl_epi64(palette.as_ptr() as *const __m128i);
+    let rec = _mm_shuffle_epi8(pal, idx);
+    let src = _mm_loadu_si128(samples.as_ptr() as *const __m128i);
+    let d = _mm256_sub_epi16(_mm256_cvtepu8_epi16(rec), _mm256_cvtepu8_epi16(src));
+    let sq = _mm256_madd_epi16(d, d);
+    let h = _mm256_hadd_epi32(sq, sq);
+    let h = _mm256_hadd_epi32(h, h);
+    _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    ))
+}
+
+/// Min and max of sixteen bytes, in registers.
+///
+/// The scalar form is a sixteen-iteration `min`/`max` chain — about fifty
+/// instructions with a serial dependency on both accumulators — and it appears
+/// four times across the alpha encoders. One load and a halving reduction do it
+/// in eight, and `min`/`max` on unsigned bytes is exact, so the result is
+/// identical by construction rather than by approximation.
+///
+/// SSE2 only: this needs no AVX2, but it is dispatched with everything else so
+/// a single feature probe covers the whole encoder.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_minmax_avx2(samples: &[u8; 16]) -> (u8, u8) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_minmax_avx2_impl(samples) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_minmax_avx2_impl(samples: &[u8; 16]) -> (u8, u8) {
+    use std::arch::x86_64::*;
+    let v = _mm_loadu_si128(samples.as_ptr() as *const __m128i);
+    let mn = _mm_min_epu8(v, _mm_srli_si128(v, 8));
+    let mn = _mm_min_epu8(mn, _mm_srli_si128(mn, 4));
+    let mn = _mm_min_epu8(mn, _mm_srli_si128(mn, 2));
+    let mn = _mm_min_epu8(mn, _mm_srli_si128(mn, 1));
+    let mx = _mm_max_epu8(v, _mm_srli_si128(v, 8));
+    let mx = _mm_max_epu8(mx, _mm_srli_si128(mx, 4));
+    let mx = _mm_max_epu8(mx, _mm_srli_si128(mx, 2));
+    let mx = _mm_max_epu8(mx, _mm_srli_si128(mx, 1));
+    (
+        (_mm_cvtsi128_si32(mn) & 0xFF) as u8,
+        (_mm_cvtsi128_si32(mx) & 0xFF) as u8,
+    )
+}
+
 /// Cached AVX2 detection.
 ///
 /// This sits in front of EVERY vector dispatch in the encoder, so its cost is
@@ -27,7 +123,6 @@
 /// race can do is detect twice and store the same byte twice. There is nothing
 /// to publish besides the byte itself, so no ordering is needed to make it
 /// safe to read.
-#[inline(always)]
 pub(super) fn has_avx2() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     // 0 = not yet probed, 1 = absent, 2 = present.
@@ -2190,7 +2285,47 @@ mod oracle {
     /// The vector LS accumulation must be **bit-identical** to the scalar loop,
     /// which means the same order and no fused multiply-add.
     #[cfg(target_arch = "x86_64")]
-    #[test]
+        #[test]
+    fn alpha_fixed_sse_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x5ee0_a1fa_3311_9977u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut samples = [0u8; 16];
+            for q in samples.iter_mut() {
+                *q = (next() >> 11) as u8;
+            }
+            let mut palette = [0u8; 8];
+            for q in palette.iter_mut() {
+                *q = (next() >> 11) as u8;
+            }
+            // All-zero and all-ones index words are the interesting extremes:
+            // they drive every sample to palette entry 0 and entry 7.
+            let bits = match case {
+                0 => 0u64,
+                1 => (1u64 << 48) - 1,
+                _ => next() & ((1u64 << 48) - 1),
+            };
+            let got = alpha_fixed_sse_avx2(&samples, &palette, bits);
+            let mut want = 0i32;
+            for i in 0..16 {
+                let idx = ((bits >> (3 * i)) & 7) as usize;
+                let d = palette[idx] as i32 - samples[i] as i32;
+                want += d * d;
+            }
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
+#[test]
     fn bc1_chan_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {

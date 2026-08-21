@@ -6,14 +6,34 @@
 
 use super::*;
 
-/// Min/max endpoints only (BC3 alpha / surface-flat BC4).
-pub(super) fn encode_alpha_block_fast_u(samples: [u8; 16]) -> [u8; 8] {
+/// Min and max of the sixteen samples.
+///
+/// Four call sites ran this as a scalar sixteen-iteration `min`/`max` chain;
+/// see `simd::alpha_minmax_avx2`, which is exact rather than approximate.
+fn sample_minmax(samples: &[u8; 16]) -> (u8, u8) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_minmax_avx2(samples);
+    }
+    sample_minmax_scalar(samples)
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch.
+#[cold]
+#[inline(never)]
+fn sample_minmax_scalar(samples: &[u8; 16]) -> (u8, u8) {
     let mut lo = 255u8;
     let mut hi = 0u8;
-    for &s in &samples {
+    for &s in samples {
         lo = lo.min(s);
         hi = hi.max(s);
     }
+    (lo, hi)
+}
+
+/// Min/max endpoints only (BC3 alpha / surface-flat BC4).
+pub(super) fn encode_alpha_block_fast_u(samples: [u8; 16]) -> [u8; 8] {
+    let (lo, hi) = sample_minmax(&samples);
     if lo == hi {
         return pack_alpha_indices(hi, lo, &alpha_palette4_u(hi, lo), &samples);
     }
@@ -75,12 +95,7 @@ pub(super) fn encode_alpha_block_flat(samples: [u8; 16], signed: bool) -> [u8; 8
 }
 
 pub(super) fn encode_alpha_block_unsigned(samples: [u8; 16]) -> [u8; 8] {
-    let mut lo = 255u8;
-    let mut hi = 0u8;
-    for &s in &samples {
-        lo = lo.min(s);
-        hi = hi.max(s);
-    }
+    let (lo, hi) = sample_minmax(&samples);
     if lo == hi {
         return pack_alpha_indices(hi, lo, &alpha_palette4_u(hi, lo), &samples);
     }
@@ -129,12 +144,7 @@ pub(super) fn encode_alpha_block_unsigned(samples: [u8; 16]) -> [u8; 8] {
 pub(super) fn unsigned_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
     let b0 = best[0] as i32;
     let b1 = best[1] as i32;
-    let mut smin = 255u8;
-    let mut smax = 0u8;
-    for &s in samples {
-        smin = smin.min(s);
-        smax = smax.max(s);
-    }
+    let (smin, smax) = sample_minmax(samples);
     for d0 in -4i32..=4 {
         for d1 in -4i32..=4 {
             if d0 == 0 && d1 == 0 {
@@ -434,21 +444,41 @@ pub(super) fn pack_alpha_indices_err(
     samples: &[u8; 16],
     err_limit: i32,
 ) -> Option<([u8; 8], i32)> {
-    let mut indices = [0u8; 16];
-    let mut err = 0i32;
     // Vectorised nearest-palette scan: sixteen samples against eight entries in
     // registers, no per-candidate selector to build. Byte-identical to the
-    // scalar scan below, which is its oracle.
+    // scalar scan, which is its oracle.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if super::simd::has_avx2() {
-        let (ix, e) = super::simd::alpha_fit_avx2(palette, samples);
-        if e >= err_limit {
+        let (indices, err) = super::simd::alpha_fit_avx2(palette, samples);
+        if err >= err_limit {
             return None;
         }
-        indices = ix;
-        err = e;
         return Some(pack_alpha_out(a0, a1, &indices, err));
     }
+    let (indices, err) = pack_alpha_indices_err_scalar(a0, a1, palette, samples, err_limit)?;
+    Some(pack_alpha_out(a0, a1, &indices, err))
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed on a
+/// machine with AVX2.
+///
+/// It carries BOTH scalar selectors — the `AlphaSelect` table build and the
+/// plain eight-entry scan — and inlined at the dispatch the pair landed whole
+/// inside every caller: `consider_alpha_u` measured 1191 instructions and
+/// `encode_alpha_block_unsigned` 1217, with sixteen vector instructions between
+/// them.
+#[cold]
+#[inline(never)]
+fn pack_alpha_indices_err_scalar(
+    a0: u8,
+    a1: u8,
+    palette: &[u8; 8],
+    samples: &[u8; 16],
+    err_limit: i32,
+) -> Option<([u8; 16], i32)> {
+    let _ = (a0, a1);
+    let mut indices = [0u8; 16];
+    let mut err = 0i32;
     if alpha_sel_enabled() {
         let order = if a0 > a1 { &ALPHA_ORDER6 } else { &ALPHA_ORDER4 };
         let sel = AlphaSelect::build(palette, order);
@@ -480,7 +510,7 @@ pub(super) fn pack_alpha_indices_err(
             }
         }
     }
-    Some(pack_alpha_out(a0, a1, &indices, err))
+    Some((indices, err))
 }
 
 /// Least-squares endpoints from current indices (6-lerp weights). Falls back to None on 4-lerp.
@@ -576,12 +606,7 @@ pub(super) fn signed_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_e
     // endpoints, so a pair whose bound reaches best_err provably cannot win
     // and skipping it is byte-identical. (4-lerp pairs carry 0/255 sentinels
     // and are never pruned.)
-    let mut smin = 255u8;
-    let mut smax = 0u8;
-    for &s in samples {
-        smin = smin.min(s);
-        smax = smax.max(s);
-    }
+    let (smin, smax) = sample_minmax(samples);
     for d0 in -4i32..=4 {
         for d1 in -4i32..=4 {
             if d0 == 0 && d1 == 0 {
@@ -946,10 +971,28 @@ pub(super) fn alpha_sse_u(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
     } else {
         alpha_palette4_u(a0, a1)
     };
+    let bits = alpha_index_bits(block);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_fixed_sse_avx2(samples, &palette, bits);
+    }
+    alpha_fixed_sse_scalar(samples, &palette, bits)
+}
+
+/// The sixteen packed 3-bit indices of an alpha block as one word.
+#[inline]
+fn alpha_index_bits(block: &[u8; 8]) -> u64 {
     let mut bits = 0u64;
     for b in 0..6 {
         bits |= (block[2 + b] as u64) << (8 * b);
     }
+    bits
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch.
+#[cold]
+#[inline(never)]
+fn alpha_fixed_sse_scalar(samples: &[u8; 16], palette: &[u8; 8], bits: u64) -> i32 {
     let mut err = 0i32;
     for i in 0..16 {
         let idx = ((bits >> (3 * i)) & 7) as usize;
@@ -967,17 +1010,19 @@ pub(super) fn alpha_sse_s(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
     } else {
         alpha_palette4_s(a0, a1)
     };
-    let mut bits = 0u64;
-    for b in 0..6 {
-        bits |= (block[2 + b] as u64) << (8 * b);
+    // The signed palette is converted to the unorm bytes the comparison
+    // actually uses ONCE, ahead of the scan, instead of inside all sixteen
+    // iterations — after which this is the same kernel the unsigned twin runs.
+    let mut pal_u = [0u8; 8];
+    for (i, &p) in palette.iter().enumerate() {
+        pal_u[i] = snorm_i32_to_unorm_u8(p);
     }
-    let mut err = 0i32;
-    for i in 0..16 {
-        let idx = ((bits >> (3 * i)) & 7) as usize;
-        let d = snorm_i32_to_unorm_u8(palette[idx]) as i32 - samples[i] as i32;
-        err += d * d;
+    let bits = alpha_index_bits(block);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_fixed_sse_avx2(samples, &pal_u, bits);
     }
-    err
+    alpha_fixed_sse_scalar(samples, &pal_u, bits)
 }
 
 pub(super) fn pack_alpha_indices(a0: u8, a1: u8, palette: &[u8; 8], samples: &[u8; 16]) -> [u8; 8] {
