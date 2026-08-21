@@ -4264,3 +4264,51 @@ rounding mode implements, so it lowers to `callq roundf` — 49 sites in this
 binary. It can be removed exactly, but ONLY in f64: `0.49999997f32 + 0.5` ties
 and rounds to `1.0`, giving 1 where `round` gives 0. That tie is why the SIMD
 form was refuted earlier and why the replacement widens first.
+
+## §73 — RDO round 7
+
+| # | change | measurement |
+|---|---|---|
+| 1 | lane permute hoisted out of the index-fit loop | dynamic **433 -> 377** (-12.9%), **-1,075/blk** |
+| 2 | endpoint rounding folded into the LS kernel | refit **167 -> 88**, mode-6 **175 -> 56**, kernel 17 -> 48; **-2,023/blk** |
+| 3 | index-fit loop unrolled four wide | dynamic **377 -> 353** (-6.4%), **-461/blk** |
+| 4 | all four mode-6 channel errors in one call | executed **195 -> 147**, **-393/blk** |
+| 5 | BC1 palette built inside the SSE kernel | net **-53/call**, **-709/blk** |
+
+Round total: about **-4,661 instructions/block**.
+
+### The boundary rule, now cutting both ways
+
+§72 established that a `#[target_feature]` kernel cannot inline into a caller
+lacking the feature, so every call pays a real boundary — which is why a
+16-instruction kernel (`bc1_colors_packed`) lost. This round used the same fact
+in reverse, three times: #2, #4 and #5 all move scalar work INTO a kernel that
+already exists. That work becomes free of boundary cost, and the caller sheds it
+entirely.
+
+The reliable question to ask: *is there scalar work sitting immediately before or
+after a vector kernel call?* If so it can usually move inside for nothing.
+
+### Fusion pays only when nothing is wasted
+
+#4 fuses four calls into one and wins; the superficially identical
+four-candidate fusion in §72 lost. The difference is not the fusion, it is
+whether every fused item is needed. In `mode6_chan_errs` all four channels are
+always required. In the polish candidate set, the ±1 range guards discard some,
+and scoring them anyway gave back exactly what the saved boundaries earned.
+
+### Bit replication, not a table
+
+`EXP5[v] = (v<<3)|(v>>2)` and `EXP6[v] = (v<<2)|(v>>4)`. The 565 expansion has no
+real table in it, so it vectorises with shifts alone — which is what made #5
+possible at all. Worth checking before assuming a lookup table blocks
+vectorisation.
+
+### Instrument notes
+
+- A gate failing in a format the change cannot reach means the change went
+  somewhere unintended. A BC7-only edit moved the BC1 ladder hashes, because an
+  anchor comment appeared in two kernels and the patch landed in the wrong one.
+- An empty `test result` line means the test build is broken, not that tests
+  passed. Second occurrence; both times the oracle had gone stale against a
+  changed signature.
