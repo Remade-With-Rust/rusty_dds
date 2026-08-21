@@ -1906,16 +1906,21 @@ unsafe fn bc1_ls_endpoints_avx2_impl(
     // [b0.rgba, b1.rgba] in one register, as `ls_accum_sse`.
     let mut acc = _mm256_setzero_ps();
     let (mut a00, mut a01, mut a11) = (0f32, 0f32, 0f32);
-    let sel = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
     for i in 0..16usize {
         let wgt = W[((table >> (2 * i)) & 3) as usize];
         let u = 1.0 - wgt;
         a00 += u * u;
         a01 += u * wgt;
         a11 += wgt * wgt;
-        let pair = [u, wgt];
-        let bc = _mm256_castpd_ps(_mm256_broadcast_sd(&*(pair.as_ptr() as *const f64)));
-        let wv = _mm256_permutevar8x32_ps(bc, sel);
+        // Built in registers. Writing `[u, wgt]` to the stack and broadcasting
+        // it back is a store-to-load round trip PER PIXEL — the exact
+        // store-forwarding shape this codebase has removed six times, and it
+        // measured 8-26% SLOWER end to end than the scalar loop it replaced.
+        let wv = _mm256_blend_ps(
+            _mm256_set1_ps(u),
+            _mm256_set1_ps(wgt),
+            0b1111_0000,
+        );
         let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
             *(src.add(i * 4) as *const i32),
         )));
