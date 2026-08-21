@@ -140,9 +140,9 @@ a zip-based game archive uses.
 | BC1 | 25 | **−7.1%** | **+0.17 dB** |
 | BC1 | 50 | **−10.4%** | **+0.11 dB** |
 | BC1 | 100 | −15.6% | −0.07 dB |
-| BC7 | 4 | −2.3% | **+0.03 dB** (all 30 maps smaller) |
-| BC7 | 10 | **−3.9%** | **+0.02 dB** |
-| BC7 | 50 | −15.1% | −0.31 dB |
+| BC7 | 4 | −2.2% | **+0.03 dB** (all 30 maps smaller) |
+| BC7 | 10 | **−3.8%** | **+0.02 dB** |
+| BC7 | 50 | −14.9% | −0.31 dB |
 
 Candidates are always legal BCn blocks, so conformance is free — RDO changes only the
 rate/quality point, never decodability. Cost is ~3.5× encode on affected formats, cook-time

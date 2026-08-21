@@ -50,7 +50,7 @@ fn main() {
     assert!(!maps.is_empty(), "no corpus content");
 
     println!(
-        "{} maps; lambda ladder over BC1; rate = deflate(level 8) of the DDS payload",
+        "{} maps; lambda ladder; rate = deflate(level 8) of the DDS payload",
         maps.len()
     );
     println!(
@@ -161,9 +161,18 @@ fn per_map(maps: &[(String, u32, u32, Vec<u8>)]) {
     } else {
         [0.0, 50.0, 100.0]
     };
+    // Label the columns with the lambdas actually being run — BC7's ladder is
+    // [0, 4, 10], not [0, 50, 100], and the hardcoded header sent one reader
+    // hunting for a lambda=4 run that was already on screen.
     println!(
         "{:<34} {:>9} {:>9} {:>8} | {:>9} {:>9} {:>8}",
-        "map", "l50_size%", "l50_dDB", "", "l100_size%", "l100_dDB", ""
+        "map",
+        format!("l{}_size%", lams[1]),
+        format!("l{}_dDB", lams[1]),
+        "",
+        format!("l{}_size%", lams[2]),
+        format!("l{}_dDB", lams[2]),
+        ""
     );
     for (name, w, h, rgba) in maps {
         let mut res = Vec::new();
