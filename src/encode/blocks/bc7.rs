@@ -17,13 +17,19 @@ use super::*;
 /// blocks whose alpha gradient disagrees with the color gradient (UI/decal
 /// content); mode 5 carries separate 2-bit index sets per channel group.
 pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
-    let (bits6, err6) = encode_bc7_mode6_inner(&pixels);
-    let mut a_lo = 255u8;
-    let mut a_hi = 0u8;
-    for p in &pixels {
-        a_lo = a_lo.min(p[3]);
-        a_hi = a_hi.max(p[3]);
-    }
+    encode_bc7_mode6_scored(pixels, out);
+}
+
+/// [`encode_bc7_mode6`] returning the block's SSE, which it computes anyway.
+///
+/// The RDO driver needs that error and used to recompute it with
+/// `bc7_block_sse` — 52 instructions a block to re-derive a value this function
+/// already had in hand.
+pub(crate) fn encode_bc7_mode6_scored(pixels: [[u8; 4]; 16], out: &mut [u8]) -> i64 {
+    // `a_lo`/`a_hi` come back from the inner encoder, which computes the whole
+    // per-channel min/max for its seeds. Walking the block again here for the
+    // alpha pair alone was the same sixteen pixels a second time.
+    let (bits6, err6, a_lo, a_hi) = encode_bc7_mode6_inner(&pixels);
     // Alpha-flat blocks: mode 6's 4-bit shared index dominates; skip mode 5/4.
     let mut best_bits = bits6;
     let mut best_err = err6;
@@ -95,6 +101,7 @@ pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
         }
     }
     out[..16].copy_from_slice(&best_bits);
+    best_err
 }
 
 /// 2-bit BC7 interpolation weights (symmetric: W2[3-i] == 64 - W2[i]).
@@ -626,7 +633,7 @@ pub(super) fn pack_bc7_mode5(
 
 /// BC7 mode 6: single subset, RGBA 7-bit endpoints + P-bits, 4-bit indices.
 
-pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
+pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, u8, u8) {
     let mut best_bits = [0u8; 16];
     let mut best_err = i64::MAX;
     // Walk the block ONCE per statistic. `extrema_rgba` was computed here and
@@ -689,7 +696,7 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64) 
             best_err = err;
         }
     }
-    (best_bits, best_err)
+    (best_bits, best_err, cm.1[3], cm.0[3])
 }
 
 

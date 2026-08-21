@@ -973,15 +973,10 @@ pub(crate) fn encode_image_bc7_rdo(
                 for by in by0..by1 {
                     for bx in 0..blocks_x {
                         let pixels = gather_block(rgba, w, h, bx, by);
-                            // Transposed once per block; every candidate borrows it.
-                            let planar = Mode6Planar::new(&pixels);
-                            // Likewise block-invariant: the mode-6 LS accumulator
-                            // runs 9.14 times a block on these.
-                            let pxv = ls_pixels_mode6(&pixels);
-
                         let mut base = [0u8; 16];
-                        encode_bc7_mode6(pixels, &mut base);
-                        let base_err = bc7_block_sse(&pixels, &base);
+                        // The encoder returns the SSE it computed internally;
+                        // `bc7_block_sse` used to re-derive it here.
+                        let base_err = super::bc7::encode_bc7_mode6_scored(pixels, &mut base);
 
                         // Exact blocks are untouchable: preservation is structural,
                         // not an emergent property of the acceptance math.
@@ -996,6 +991,14 @@ pub(crate) fn encode_image_bc7_rdo(
                             filled += 1;
                             continue;
                         }
+                        // Built only past the exact-block early-out above, which
+                        // returns before either is read.
+                        // Transposed once per block; every candidate borrows it.
+                        let planar = Mode6Planar::new(&pixels);
+                        // Likewise block-invariant: the mode-6 LS accumulator
+                        // runs 9.14 times a block on these.
+                        let pxv = ls_pixels_mode6(&pixels);
+
                         let mut best = base;
                         let n0 = filled.min(BC7_WINDOW);
                         let above: Option<&[u8; 16]> = if by > by0 { Some(&prev_row[bx]) } else { None };
