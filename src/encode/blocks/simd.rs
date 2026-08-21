@@ -1160,20 +1160,20 @@ pub(super) fn palette_mode6_avx2(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[
 #[target_feature(enable = "avx2")]
 unsafe fn palette_mode6_avx2_impl(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
     use std::arch::x86_64::*;
-    let bq = u64::from_le_bytes([
-        base[0] as u16 as u8, (base[0] as u16 >> 8) as u8,
-        base[1] as u16 as u8, (base[1] as u16 >> 8) as u8,
-        base[2] as u16 as u8, (base[2] as u16 >> 8) as u8,
-        base[3] as u16 as u8, (base[3] as u16 >> 8) as u8,
-    ]);
-    let dq = u64::from_le_bytes([
-        (c1[0] as i16 - c0[0] as i16) as u16 as u8, ((c1[0] as i16 - c0[0] as i16) as u16 >> 8) as u8,
-        (c1[1] as i16 - c0[1] as i16) as u16 as u8, ((c1[1] as i16 - c0[1] as i16) as u16 >> 8) as u8,
-        (c1[2] as i16 - c0[2] as i16) as u16 as u8, ((c1[2] as i16 - c0[2] as i16) as u16 >> 8) as u8,
-        (c1[3] as i16 - c0[3] as i16) as u16 as u8, ((c1[3] as i16 - c0[3] as i16) as u16 >> 8) as u8,
-    ]);
-    let b = _mm256_set1_epi64x(bq as i64);
-    let d = _mm256_set1_epi64x(dq as i64);
+    // Both of these used to be assembled byte by byte through
+    // `u64::from_le_bytes`, which is about thirty scalar instructions to rebuild
+    // values the vector unit produces in nine. Same pattern removed twice in
+    // round 6; it had crept back into this kernel.
+    //
+    // `base` spans 32..=16_352, so packing i32 -> i16 cannot saturate.
+    let b = _mm256_broadcastq_epi64(_mm_packs_epi32(
+        _mm_loadu_si128(base.as_ptr() as *const __m128i),
+        _mm_setzero_si128(),
+    ));
+    let d = _mm256_broadcastq_epi64(_mm_sub_epi16(
+        _mm_cvtepu8_epi16(_mm_cvtsi32_si128(u32::from_le_bytes(c1) as i32)),
+        _mm_cvtepu8_epi16(_mm_cvtsi32_si128(u32::from_le_bytes(c0) as i32)),
+    ));
     let zero = _mm256_setzero_si256();
     let mut out = [[0u8; 4]; 16];
     let op = out.as_mut_ptr() as *mut u8;
