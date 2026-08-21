@@ -332,6 +332,18 @@ pub(super) fn pack_bc1_scored(
             true,
         )
     };
+    // The 4-colour branches just built `[ca, cb, lerp<2,1>, lerp<1,2>]` — which
+    // is `bc1_palette_565(c0, c1)` — and the fit kernel would immediately widen
+    // it to i16. Both come straight from the 565 words on the vector path, so
+    // the scalar palette above is only consumed by the punch branch and the
+    // scalar fallback.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if !punch && simd::has_avx2() {
+        let pal16 = simd::bc1_palette_565_i16_avx2(c0, c1);
+        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, &pal16, err_limit)?;
+        let v = (c0 as u64) | ((c1 as u64) << 16) | ((table as u64) << 32);
+        return Some((v.to_le_bytes(), err));
+    }
     let (table, err) = if punch {
         let mut table = 0u32;
         let mut err = 0i32;
