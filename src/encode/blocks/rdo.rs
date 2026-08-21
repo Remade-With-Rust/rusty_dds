@@ -561,6 +561,8 @@ fn refit_with_ls(
     let (a00, a01, a11, det) = (ls.a00, ls.a01, ls.a11, ls.det);
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
+    // Set by the vector path, which packs to 565 inside the kernel.
+    let mut qq: Option<(u16, u16)> = None;
     // The solve is six float divisions scalar; vectorised it is two `divps`,
     // and bit-identical for free because IEEE defines these lane-wise. Rounding
     // stays scalar — Rust's `round` is half-away-from-zero and no SSE rounding
@@ -568,9 +570,10 @@ fn refit_with_ls(
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let done = if simd::has_avx2() {
         let (v0, v1) = simd::ls_accum_sse(pxv, &ls.uw);
-        let (s0, s1) = simd::bc1_ls_solve(v0, v1, a00, a01, a11, det);
-        e0.copy_from_slice(&s0[..3]);
-        e1.copy_from_slice(&s1[..3]);
+        // The solve returns the endpoints already packed to 565 — `to_565` used
+        // to run twice here, 11 scalar instructions each against a body of 88.
+        let (q0, q1) = simd::bc1_ls_solve_565(v0, v1, a00, a01, a11, det);
+        qq = Some((q0, q1));
         true
     } else {
         false
@@ -584,8 +587,10 @@ fn refit_with_ls(
             e1[c] = round_clamp_u8((a00 * b1[c] - a01 * b0[c]) / det);
         }
     }
-    let q0 = to_565(e0);
-    let q1 = to_565(e1);
+    let (q0, q1) = match qq {
+        Some(v) => v,
+        None => (to_565(e0), to_565(e1)),
+    };
     if q0 <= q1 {
         return None; // would flip to punch mode and reinterpret the table
     }

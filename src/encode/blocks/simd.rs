@@ -884,14 +884,17 @@ pub(super) fn bc1_ls_solve(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn bc1_ls_solve_impl(
+/// The divide itself, shared by both entry points.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn solve_pair(
     b0: [f32; 4],
     b1: [f32; 4],
     a00: f32,
     a01: f32,
     a11: f32,
     det: f32,
-) -> ([u8; 4], [u8; 4]) {
+) -> (std::arch::x86_64::__m128, std::arch::x86_64::__m128) {
     use std::arch::x86_64::*;
     let v0 = _mm_loadu_ps(b0.as_ptr());
     let v1 = _mm_loadu_ps(b1.as_ptr());
@@ -904,12 +907,71 @@ unsafe fn bc1_ls_solve_impl(
         _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
         dv,
     );
-    // The rounding rides along INSIDE this kernel. The callers used to take the
-    // floats out and run `round_clamp_u8` per channel — six times in
-    // `refit_with_ls`, eight in the mode-6 solve — and every one of those is
-    // scalar work sitting immediately after a vector result. Folding it in adds
-    // no call boundary, because this kernel already is one.
+    (e0, e1)
+}
+
+unsafe fn bc1_ls_solve_impl(
+    b0: [f32; 4],
+    b1: [f32; 4],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> ([u8; 4], [u8; 4]) {
+    let (e0, e1) = solve_pair(b0, b1, a00, a01, a11, det);
     (round_pack(e0), round_pack(e1))
+}
+
+/// [`bc1_ls_solve`] that returns the endpoints already packed to 565.
+///
+/// BC1's caller immediately runs `to_565` on both results — 11 scalar
+/// instructions each, against a `refit_with_ls` body of only 88. Doing it on the
+/// rounded lanes costs about five vector instructions per endpoint and crosses
+/// no new boundary: this replaces the existing `bc1_ls_solve` call rather than
+/// adding one. BC7 keeps the byte-returning form, so it pays nothing.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_ls_solve_565(
+    b0: [f32; 4],
+    b1: [f32; 4],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> (u16, u16) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_ls_solve_565_impl(b0, b1, a00, a01, a11, det) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_ls_solve_565_impl(
+    b0: [f32; 4],
+    b1: [f32; 4],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> (u16, u16) {
+    let (e0, e1) = solve_pair(b0, b1, a00, a01, a11, det);
+    (pack565(round_lanes(e0)), pack565(round_lanes(e1)))
+}
+
+/// `to_565` on four rounded lanes: shift each channel down, then weight and sum.
+///
+/// The three fields do not overlap, so the weighted sum IS the bitwise or the
+/// scalar builds. Inputs are already clamped to `0..=255`, so the shifted values
+/// need no masking — `r >> 3` and `b >> 3` are at most 31 and `g >> 2` at most
+/// 63 by construction.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pack565(v: std::arch::x86_64::__m128i) -> u16 {
+    use std::arch::x86_64::*;
+    let sh = _mm_srlv_epi32(v, _mm_setr_epi32(3, 2, 3, 0));
+    let w = _mm_mullo_epi32(sh, _mm_setr_epi32(2048, 32, 1, 0));
+    let h = _mm_hadd_epi32(w, w);
+    let h = _mm_hadd_epi32(h, h);
+    _mm_cvtsi128_si32(h) as u16
 }
 
 /// `round_clamp_u8` for four lanes at once: clamp to `[0, 255]` in f32, widen to
@@ -924,12 +986,20 @@ unsafe fn bc1_ls_solve_impl(
 #[target_feature(enable = "avx2")]
 unsafe fn round_pack(v: std::arch::x86_64::__m128) -> [u8; 4] {
     use std::arch::x86_64::*;
-    let c = _mm_min_ps(_mm_max_ps(v, _mm_setzero_ps()), _mm_set1_ps(255.0));
-    let d = _mm256_add_pd(_mm256_cvtps_pd(c), _mm256_set1_pd(0.5));
-    let i = _mm256_cvttpd_epi32(d);
+    let i = round_lanes(v);
     let mut out = [0i32; 4];
     _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, i);
     [out[0] as u8, out[1] as u8, out[2] as u8, out[3] as u8]
+}
+
+/// The rounding itself, left in 32-bit lanes so callers can pack it either way.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn round_lanes(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let c = _mm_min_ps(_mm_max_ps(v, _mm_setzero_ps()), _mm_set1_ps(255.0));
+    let d = _mm256_add_pd(_mm256_cvtps_pd(c), _mm256_set1_pd(0.5));
+    _mm256_cvttpd_epi32(d)
 }
 
 
