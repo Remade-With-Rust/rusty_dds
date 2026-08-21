@@ -208,6 +208,8 @@ pub(crate) fn encode_image_bc1_rdo(
                             // refit is 40.9% of BC1 RDO.
                             let mut tried: [u32; WINDOW] = [0; WINDOW];
                             let mut ntried = 0usize;
+                            let mut tried_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
+                            let mut neps = 0usize;
                             for k in 0..n {
                                 // 2. Reuse index table, LS-refit endpoints.
                                 let table = recent_tables[k];
@@ -232,10 +234,18 @@ pub(crate) fn encode_image_bc1_rdo(
                                         }
                                     }
                                 }
-                                // 3. Reuse endpoints, re-fit indices.
+                                // 3. Reuse endpoints, re-fit indices. Same
+                                // duplicate story as the tables above: an
+                                // endpoint pair repeated in the window refits to
+                                // the same block and the same error.
                                 let (c0, c1) = recent_eps[k];
+                                let edup = tried_eps[..neps].contains(&(c0, c1));
+                                if !edup {
+                                    tried_eps[neps] = (c0, c1);
+                                    neps += 1;
+                                }
                                 let lim = (best_j + lam * SAVE_PART).ceil() as i32;
-                                if c0 > c1 && lim > 0 {
+                                if c0 > c1 && lim > 0 && !edup {
                                     if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
                                         &pixels, c0, c1, &recent_pal[k], lim,
                                     ) {
@@ -826,6 +836,13 @@ pub(crate) fn encode_image_bc7_rdo(
                             }
 
                             let n = filled.min(BC7_WINDOW);
+                            // Deduplicating donors was tried and REVERTED: a
+                            // counter found **0.000 duplicate donors per block**
+                            // on representative content, so the check is pure
+                            // cost. BC1's window does repeat (6.8 tables and 1.7
+                            // endpoint pairs a block) because many blocks encode
+                            // to the same 4-byte table; a whole 16-byte BC7 block
+                            // repeating is far rarer.
                             for k in 0..n {
                                 let (donor, is_m6) = recent[k];
                                 if !is_m6 {
