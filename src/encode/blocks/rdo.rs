@@ -508,6 +508,10 @@ fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8
     if q0 <= q1 {
         return None; // would flip to punch mode and reinterpret the table
     }
+    // NOTE: the caller re-derives this block's palette from the packed 565 words
+    // immediately afterwards. It cannot simply reuse `e0`/`e1` — `to_565`
+    // quantises, so the palette must come from the ROUND-TRIPPED values — but
+    // see `bc1_colors_packed`, which is where that cost lives.
     let mut out = [0u8; 8];
     out[0..2].copy_from_slice(&q0.to_le_bytes());
     out[2..4].copy_from_slice(&q1.to_le_bytes());
@@ -874,9 +878,14 @@ pub(crate) fn encode_image_bc7_rdo(
                                     // Endpoint polish with indices FIXED: the tail bytes
                                     // are the LZ match, head endpoint bytes are literals
                                     // either way — ±1 moves recover quality for free.
-                                    let mut err = mode6_sse(&planar, q0a, p0a, q1a, dp1, &didx);
+                                    let mut ce = {
+                                        let f = Mode6Fixed::new(&planar, &didx);
+                                        mode6_chan_errs(&f, q0a, p0a, q1a, dp1)
+                                    };
+                                    let mut err: i64 = ce.iter().sum();
                                     polish_mode6_endpoints(
-                                        &planar, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
+                                        &planar,
+                                        &mut ce, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
                                     );
                                     // Packed only if it wins, as above.
                                     let j = err as f32 - lam * SAVE_HALF8;
@@ -890,8 +899,15 @@ pub(crate) fn encode_image_bc7_rdo(
                                 // The donor endpoint does not vary with p1, so it is
                                 // unquantized once rather than twice.
                                 let du0 = unquantize_7p(dq0, dp0);
+                                // `base` depends only on the donor endpoint, so
+                                // it is shared by both p-bits.
+                                let dbase = super::bc7::palette_mode6_base(du0);
                                 for p1 in 0..2u8 {
-                                    let pal = palette_mode6(du0, unquantize_7p(dq1, p1));
+                                    let pal = super::bc7::palette_mode6_from_base(
+                                        dbase,
+                                        du0,
+                                        unquantize_7p(dq1, p1),
+                                    );
                                     let (idx, errv) = fit_indices_mode6(&pixels, &pal);
                                     if idx[0] > 7 {
                                         continue; // swap would rewrite the head bytes
@@ -1038,17 +1054,6 @@ fn mode6_chan_errs(fixed: &Mode6Fixed, q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8)
     e
 }
 
-fn mode6_sse(
-    planar: &Mode6Planar,
-    q0: [u8; 4],
-    p0: u8,
-    q1: [u8; 4],
-    p1: u8,
-    indices: &[u8; 16],
-) -> i64 {
-    let fixed = Mode6Fixed::new(planar, indices);
-    mode6_chan_errs(&fixed, q0, p0, q1, p1).iter().sum()
-}
 
 /// `(quantized value, squared reconstruction error)` for every channel value and
 /// both p-bits.
@@ -1194,6 +1199,7 @@ fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])>
 /// held fixed (the polish never touches the matched tail bytes).
 fn polish_mode6_endpoints(
     planar: &Mode6Planar,
+    ce: &mut [i64; 4],
     q0: &mut [u8; 4],
     p0: u8,
     q1: &mut [u8; 4],
@@ -1207,7 +1213,9 @@ fn polish_mode6_endpoints(
     // three-add fixup. Measured at 201 `mode6_sse` calls per block before this,
     // ~51% of BC7 RDO encode.
     let fixed = Mode6Fixed::new(planar, indices);
-    let mut ce = mode6_chan_errs(&fixed, *q0, p0, *q1, p1);
+    // `ce` arrives from the caller, which just computed exactly these four
+    // values to produce `err` — recomputing them here was one full
+    // `mode6_chan_errs` (four kernel calls) per donor, 8.18 times a block.
     debug_assert_eq!(ce.iter().sum::<i64>(), *err);
     for _round in 0..2 {
         let prev = *err;

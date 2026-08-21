@@ -818,6 +818,38 @@ pub(super) const W6M: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 
 /// Reconstructed 16-entry palette for one (c0, c1) pair — computed ONCE per
 /// trial instead of re-lerping per pixel per candidate index.
 #[inline]
+/// `c0 * 64 + 32` per channel — the half of the palette that depends only on the
+/// FIRST endpoint.
+///
+/// The RDO head-reuse path builds two palettes per donor that share `c0`, so it
+/// computes this once and calls [`palette_mode6_from_base`] twice.
+pub(super) fn palette_mode6_base(c0: [u8; 4]) -> [i32; 4] {
+    [
+        c0[0] as i32 * 64 + 32,
+        c0[1] as i32 * 64 + 32,
+        c0[2] as i32 * 64 + 32,
+        c0[3] as i32 * 64 + 32,
+    ]
+}
+
+/// [`palette_mode6`] with the base already in hand.
+pub(super) fn palette_mode6_from_base(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
+    let delta = [
+        c1[0] as i32 - c0[0] as i32,
+        c1[1] as i32 - c0[1] as i32,
+        c1[2] as i32 - c0[2] as i32,
+        c1[3] as i32 - c0[3] as i32,
+    ];
+    let mut pal = [[0u8; 4]; 16];
+    for (k, &w) in W6M.iter().enumerate() {
+        let w = w as i32;
+        for c in 0..4 {
+            pal[k][c] = ((base[c] + w * delta[c]) >> 6) as u8;
+        }
+    }
+    pal
+}
+
 pub(super) fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
     // `(64 - w) * c0 + w * c1 + 32` is exactly `c0 * 64 + 32 + w * (c1 - c0)`,
     // and only the right operand varies with the weight. Base and delta are
