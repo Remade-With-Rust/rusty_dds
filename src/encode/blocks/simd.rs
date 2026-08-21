@@ -1094,20 +1094,23 @@ unsafe fn mode6_chan_sse_pair_avx2_impl(
     use std::arch::x86_64::*;
     let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
     let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
-    let one = |a: u8, b: u8| -> i64 {
+    let sq = |a: u8, b: u8| {
         let base = _mm256_set1_epi16(a as i16 * 64 + 32);
         let delta = _mm256_set1_epi16(b as i16 - a as i16);
         let v = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
         let d = _mm256_sub_epi16(v, pv);
-        let sq = _mm256_madd_epi16(d, d);
-        let h = _mm256_hadd_epi32(sq, sq);
-        let h = _mm256_hadd_epi32(h, h);
-        _mm_cvtsi128_si32(_mm_add_epi32(
-            _mm256_castsi256_si128(h),
-            _mm256_extracti128_si256(h, 1),
-        )) as i64
+        _mm256_madd_epi16(d, d)
     };
-    (one(a0, b0), one(a1, b1))
+    // ONE reduction for both candidates. `hadd(x, y)` folds two registers at
+    // once, so the second `hadd` leaves lane 0 holding candidate 0's per-half
+    // sum and lane 1 candidate 1's; adding the two 128-bit halves finishes both.
+    // Two separate six-instruction chains become one of seven.
+    let h = _mm256_hadd_epi32(_mm256_hadd_epi32(sq(a0, b0), sq(a1, b1)), _mm256_setzero_si256());
+    let t = _mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    );
+    (_mm_cvtsi128_si32(t) as i64, _mm_extract_epi32(t, 1) as i64)
 }
 
 
@@ -1214,23 +1217,30 @@ unsafe fn mode6_chan_errs_avx2_impl(
 ) -> [i64; 4] {
     use std::arch::x86_64::*;
     let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
-    let mut out = [0i64; 4];
-    for c in 0..4usize {
+    let sq = |c: usize| {
         let (a, b) = v[c];
         let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(planar[c].as_ptr() as *const __m128i));
         let base = _mm256_set1_epi16(a as i16 * 64 + 32);
         let delta = _mm256_set1_epi16(b as i16 - a as i16);
         let val = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
         let d = _mm256_sub_epi16(val, pv);
-        let sq = _mm256_madd_epi16(d, d);
-        let h = _mm256_hadd_epi32(sq, sq);
-        let h = _mm256_hadd_epi32(h, h);
-        out[c] = _mm_cvtsi128_si32(_mm_add_epi32(
-            _mm256_castsi256_si128(h),
-            _mm256_extracti128_si256(h, 1),
-        )) as i64;
-    }
-    out
+        _mm256_madd_epi16(d, d)
+    };
+    // ONE reduction for all four channels. `hadd` folds two registers at a time,
+    // so two of them collapse the four squared-difference vectors into a single
+    // register holding one lane per channel, per 128-bit half; adding the halves
+    // finishes all four. Four six-instruction chains become one of six.
+    let h = _mm256_hadd_epi32(
+        _mm256_hadd_epi32(sq(0), sq(1)),
+        _mm256_hadd_epi32(sq(2), sq(3)),
+    );
+    let t = _mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    );
+    let mut o = [0i32; 4];
+    _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, t);
+    [o[0] as i64, o[1] as i64, o[2] as i64, o[3] as i64]
 }
 
 #[cfg(test)]
