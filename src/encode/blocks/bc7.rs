@@ -1224,28 +1224,33 @@ const fn build_qtab() -> ([[u8; 256]; 2], [[u16; 256]; 2]) {
 static QTAB: ([[u8; 256]; 2], [[u16; 256]; 2]) = build_qtab();
 
 pub(super) fn quantize_7p(c: [u8; 4]) -> ([u8; 4], u8) {
+    // Decide the p-bit from the errors FIRST, then read the four quantized
+    // values once. The previous form built `best_q` inside the loop, so a p=1
+    // win meant reading all four values twice — sixteen table reads where twelve
+    // suffice. `quantize_7p_best` in the RDO path already worked this way.
+    //
+    // Same tie-break: p=0 was evaluated first and p=1 needed a strict `<`.
     let (qt, et) = (&QTAB.0, &QTAB.1);
-    let mut best_p = 0u8;
-    let mut best_q = [0u8; 4];
-    let mut best_err = i32::MAX;
-    for p in 0..2usize {
-        let (q, e) = (&qt[p], &et[p]);
-        let err = e[c[0] as usize] as i32
-            + e[c[1] as usize] as i32
-            + e[c[2] as usize] as i32
-            + e[c[3] as usize] as i32;
-        if err < best_err {
-            best_err = err;
-            best_p = p as u8;
-            best_q = [
-                q[c[0] as usize],
-                q[c[1] as usize],
-                q[c[2] as usize],
-                q[c[3] as usize],
-            ];
-        }
-    }
-    (best_q, best_p)
+    let (e0, e1) = (&et[0], &et[1]);
+    let s0 = e0[c[0] as usize] as i32
+        + e0[c[1] as usize] as i32
+        + e0[c[2] as usize] as i32
+        + e0[c[3] as usize] as i32;
+    let s1 = e1[c[0] as usize] as i32
+        + e1[c[1] as usize] as i32
+        + e1[c[2] as usize] as i32
+        + e1[c[3] as usize] as i32;
+    let p = usize::from(s1 < s0);
+    let q = &qt[p];
+    (
+        [
+            q[c[0] as usize],
+            q[c[1] as usize],
+            q[c[2] as usize],
+            q[c[3] as usize],
+        ],
+        p as u8,
+    )
 }
 
 #[cfg(test)]
