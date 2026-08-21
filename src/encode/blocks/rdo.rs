@@ -1248,10 +1248,24 @@ fn polish_mode6_endpoints(
     // values to produce `err` — recomputing them here was one full
     // `mode6_chan_errs` (four kernel calls) per donor, 8.18 times a block.
     debug_assert_eq!(ce.iter().sum::<i64>(), *err);
+    // A channel that did not move in a round CANNOT move in the next one, and
+    // the proof is short. `mode6_chan_sse` reads only channel `c`'s endpoints,
+    // so the four channels are fully independent given the fixed indices. If
+    // neither `q0[c]` nor `q1[c]` moved, the next round builds bit-identical
+    // candidates and gets bit-identical `cand` values. The accept test is
+    // `total < *err` with `total = *err - ce[c] + cand`, so the `*err` terms
+    // cancel and it reduces to `cand < ce[c]` — and `ce[c]` did not move
+    // either. Every candidate that was rejected is rejected again, for the same
+    // reason, at the same cost. Round 2 was rescoring them anyway.
+    let mut active = [true; 4];
     for _round in 0..2 {
         let prev = *err;
+        let mut moved = [false; 4];
         for which in 0..2 {
             for c in 0..4 {
+                if !active[c] {
+                    continue;
+                }
                 // A channel already at zero error cannot be improved: every
                 // candidate's error is a sum of squares, so `total < err`
                 // requires `cand < ce[c] = 0`, which is impossible. Skipping is
@@ -1284,6 +1298,7 @@ fn polish_mode6_endpoints(
                     if total < *err {
                         *err = total;
                         ce[c] = cand;
+                        moved[c] = true;
                         if which == 0 {
                             (*q0)[c] = nv as u8;
                         } else {
@@ -1293,6 +1308,7 @@ fn polish_mode6_endpoints(
                 }
             }
         }
+        active = moved;
         if *err >= prev {
             break;
         }
