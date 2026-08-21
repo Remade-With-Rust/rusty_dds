@@ -384,17 +384,21 @@ fn bc1_colors_packed(block: &[u8; 8]) -> [u32; 4] {
 }
 
 fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) -> Option<i32> {
-    let packed = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
     // The abort moves from the running prefix to the completed total, which is
     // the same decision: squared errors are non-negative, so a prefix reaches
     // `limit` if and only if the total does.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        let err = simd::bc1_fixed_sse_avx2(pixels, &packed, table);
+        // The palette is built INSIDE the kernel from the 565 words. Only the
+        // scalar fallback below still needs `bc1_colors_packed`, so its 91
+        // instructions no longer run on this machine at all.
+        let c0 = u16::from_le_bytes([block[0], block[1]]);
+        let c1 = u16::from_le_bytes([block[2], block[3]]);
+        let err = simd::bc1_fixed_sse_565_avx2(pixels, c0, c1, table);
         return (err < limit).then_some(err);
     }
-    let _ = packed;
+    let packed = bc1_colors_packed(block);
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
@@ -409,13 +413,14 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
 /// Decode-true SSE of an arbitrary BC1 block against source pixels
 /// (both 4-color and punch modes, matching the decoder's mode rule).
 fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
-    let packed = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        return simd::bc1_fixed_sse_avx2(pixels, &packed, table);
+        let c0 = u16::from_le_bytes([block[0], block[1]]);
+        let c1 = u16::from_le_bytes([block[2], block[3]]);
+        return simd::bc1_fixed_sse_565_avx2(pixels, c0, c1, table);
     }
-    let _ = packed;
+    let packed = bc1_colors_packed(block);
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;

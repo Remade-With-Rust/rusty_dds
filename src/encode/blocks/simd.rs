@@ -502,18 +502,103 @@ unsafe fn alpha_nbhd_avx2_impl<const N: usize>(
 /// Alpha is masked on both sides: BC1 SSE is RGB-only, and the palette's alpha
 /// byte is whatever the caller packed.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn bc1_fixed_sse_avx2(pixels: &[[u8; 4]; 16], pal: &[u32; 4], table: u32) -> i32 {
+
+/// Build a BC1 palette from the two packed 565 words, entirely in registers.
+///
+/// # Why this can be vector code at all
+///
+/// The 5- and 6-bit expansions are pure bit replication — `EXP5[v]` is
+/// `(v << 3) | (v >> 2)` and `EXP6[v]` is `(v << 2) | (v >> 4)` — so there is no
+/// table lookup to vectorise around, only shifts.
+///
+/// # Why `mulhi`-style division by 3 is exact here
+///
+/// Both dividends are at most `2 * 255 + 255 = 765`. `(x * 21846) >> 16` errs
+/// from `x / 3` by `2x / 196_608`, at most `0.0078` over that range, against a
+/// largest possible fractional part of `2/3`. Since `0.667 + 0.008 < 1` the
+/// floor never moves. In 32-bit lanes `x * 21846 <= 16.7M`, well inside `i32`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+    let sh = _mm_setr_epi32(11, 5, 0, 0);
+    let msk = _mm_setr_epi32(31, 63, 31, 0);
+    let up = _mm_setr_epi32(3, 2, 3, 0);
+    let dn = _mm_setr_epi32(2, 4, 2, 0);
+    let expand = |c: u16| {
+        let t = _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32(c as i32), sh), msk);
+        _mm_or_si128(_mm_sllv_epi32(t, up), _mm_srlv_epi32(t, dn))
+    };
+    let e = expand(c0);
+    let f = expand(c1);
+    let sum = _mm_add_epi32(e, f);
+    let third = _mm_set1_epi32(21846);
+    let (p2, p3) = if c0 > c1 {
+        (
+            _mm_srli_epi32(_mm_mullo_epi32(_mm_add_epi32(sum, e), third), 16),
+            _mm_srli_epi32(_mm_mullo_epi32(_mm_add_epi32(sum, f), third), 16),
+        )
+    } else {
+        // 3-colour + punch-through: the third entry is the midpoint (integer
+        // division, so a plain shift) and the fourth is black.
+        (_mm_srli_epi32(sum, 1), _mm_setzero_si128())
+    };
+    // Each of the four is [R, G, B, 0] in 32-bit lanes; gather byte 0 of each
+    // lane into the packed 0x00BBGGRR word at its own offset, then OR together.
+    let m = |o: i32| {
+        _mm_setr_epi8(
+            if o == 0 { 0 } else { -1 }, if o == 0 { 4 } else { -1 }, if o == 0 { 8 } else { -1 }, -1,
+            if o == 1 { 0 } else { -1 }, if o == 1 { 4 } else { -1 }, if o == 1 { 8 } else { -1 }, -1,
+            if o == 2 { 0 } else { -1 }, if o == 2 { 4 } else { -1 }, if o == 2 { 8 } else { -1 }, -1,
+            if o == 3 { 0 } else { -1 }, if o == 3 { 4 } else { -1 }, if o == 3 { 8 } else { -1 }, -1,
+        )
+    };
+    _mm_or_si128(
+        _mm_or_si128(_mm_shuffle_epi8(e, m(0)), _mm_shuffle_epi8(f, m(1))),
+        _mm_or_si128(_mm_shuffle_epi8(p2, m(2)), _mm_shuffle_epi8(p3, m(3))),
+    )
+}
+
+/// [`bc1_fixed_sse_avx2`] that builds its own palette from the 565 words.
+///
+/// The caller used to run `bc1_colors_packed` — 91 scalar instructions — and
+/// hand the result in. Building it here costs about 25 vector instructions and
+/// crosses no new `#[target_feature]` boundary, because this kernel already is
+/// one.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_fixed_sse_565_avx2(
+    pixels: &[[u8; 4]; 16],
+    c0: u16,
+    c1: u16,
+    table: u32,
+) -> i32 {
     debug_assert!(has_avx2());
-    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); SSSE3 is
-    // implied by it, and every load is a fixed offset inside a fixed-size array.
-    unsafe { bc1_fixed_sse_avx2_impl(pixels, pal, table) }
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_fixed_sse_565_avx2_impl(pixels, c0, c1, table) }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn bc1_fixed_sse_avx2_impl(pixels: &[[u8; 4]; 16], pal: &[u32; 4], table: u32) -> i32 {
+unsafe fn bc1_fixed_sse_565_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    c0: u16,
+    c1: u16,
+    table: u32,
+) -> i32 {
+    bc1_sse_from_pal(pixels, bc1_palette_565_avx2(c0, c1), table)
+}
+
+
+
+/// The fixed-table scoring loop, shared by both entry points.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_sse_from_pal(
+    pixels: &[[u8; 4]; 16],
+    p: std::arch::x86_64::__m128i,
+    table: u32,
+) -> i32 {
     use std::arch::x86_64::*;
-    let p = _mm_loadu_si128(pal.as_ptr() as *const __m128i);
     let src = pixels.as_ptr() as *const u8;
     // Keep R, G, B; drop A. Four 16-bit lanes per pixel.
     let keep = _mm256_set1_epi64x(
@@ -1372,20 +1457,43 @@ mod oracle {
                 let r = next();
                 *q = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
             }
-            let mut rgb = [[0u8; 3]; 4];
-            for c in rgb.iter_mut() {
-                let r = next();
-                *c = [r as u8, (r >> 8) as u8, (r >> 16) as u8];
-            }
+            // Endpoints are 565 words now, because the kernel builds its own
+            // palette — so this oracle covers the palette build as well as the
+            // scoring loop. Both mode branches are exercised: `c0 > c1` is the
+            // 4-colour palette, `c0 <= c1` the 3-colour punch-through one.
+            let (c0, c1) = match case {
+                0 => (0u16, 0u16),
+                1 => (u16::MAX, 0),
+                2 => (0, u16::MAX),
+                3 => (u16::MAX, u16::MAX),
+                _ => (next() as u16, (next() >> 16) as u16),
+            };
             let table = match case {
                 0 => 0,
                 1 => u32::MAX,
                 _ => next() as u32,
             };
-            let pal: [u32; 4] = core::array::from_fn(|i| {
-                u32::from_le_bytes([rgb[i][0], rgb[i][1], rgb[i][2], 0])
-            });
-            let got = bc1_fixed_sse_avx2(&px, &pal, table);
+            // Scalar reference palette, exactly as `bc1_colors_packed` builds it.
+            let ex5 = |v: u32| ((v << 3) | (v >> 2)) as u8;
+            let ex6 = |v: u32| ((v << 2) | (v >> 4)) as u8;
+            let unp = |c: u16| {
+                let c = c as u32;
+                [ex5((c >> 11) & 31), ex6((c >> 5) & 63), ex5(c & 31)]
+            };
+            let (a, b) = (unp(c0), unp(c1));
+            let mut rgb = [[0u8; 3]; 4];
+            rgb[0] = a;
+            rgb[1] = b;
+            for k in 0..3 {
+                if c0 > c1 {
+                    rgb[2][k] = ((2 * a[k] as u32 + b[k] as u32) / 3) as u8;
+                    rgb[3][k] = ((a[k] as u32 + 2 * b[k] as u32) / 3) as u8;
+                } else {
+                    rgb[2][k] = ((a[k] as u32 + b[k] as u32) / 2) as u8;
+                    rgb[3][k] = 0;
+                }
+            }
+            let got = bc1_fixed_sse_565_avx2(&px, c0, c1, table);
             let mut want = 0i32;
             for (i, q) in px.iter().enumerate() {
                 let c = rgb[((table >> (2 * i)) & 3) as usize];
