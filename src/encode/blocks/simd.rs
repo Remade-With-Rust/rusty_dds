@@ -854,7 +854,17 @@ mod oracle {
                 let w = W[((table >> (2 * i)) & 3) as usize];
                 *slot = (1.0 - w, w);
             }
-            let (g0, g1) = ls_accum_sse(&px, &uw);
+            // The oracle now covers BOTH halves of the change: `ls_pixels`
+            // must reproduce the bytes exactly as floats, and the accumulator
+            // must reproduce the scalar loop bitwise from them.
+            let pxv = ls_pixels(&px);
+            for (i, q) in px.iter().enumerate() {
+                for c in 0..4 {
+                    assert_eq!(pxv[i][c], q[c] as f32, "ls_pixels lo [{i}][{c}]");
+                    assert_eq!(pxv[i][c + 4], q[c] as f32, "ls_pixels hi [{i}][{c}]");
+                }
+            }
+            let (g0, g1) = ls_accum_sse(&pxv, &uw);
             let mut b0 = [0f32; 3];
             let mut b1 = [0f32; 3];
             for (i, p) in px.iter().enumerate() {
