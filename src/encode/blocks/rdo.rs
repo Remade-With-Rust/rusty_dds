@@ -348,7 +348,22 @@ fn bc1_colors_packed(block: &[u8; 8]) -> [u32; 4] {
     let c1 = u16::from_le_bytes([block[2], block[3]]);
     let a = from_565_packed(c0);
     let b = from_565_packed(c1);
-    // Vectorising this palette build was REFUTED and the kernel removed. Doing
+    // Vectorising this palette build has now been REFUTED TWICE, and the second
+    // time the first reason had expired.
+    //
+    // The second attempt (2026-08-20): the executed path measured **91 -> 106**
+    // instructions — 90 in the body plus a 16-instruction out-of-line kernel.
+    // The six divisions by 3 were never the cost: LLVM strength-reduces `/3` to
+    // a multiply-shift, so the scalar arithmetic was already about eighteen
+    // instructions. What sank it is that a `#[target_feature]` kernel can never
+    // inline into a caller without the feature, so every call pays a real call
+    // boundary — and a 16-instruction kernel is far too small to amortise one.
+    // **A kernel has to be big enough to pay for the boundary it sits behind.**
+    //
+    // The FIRST refutation, recorded below, is kept because it is still true of
+    // the code it describes — but note that its premise expired when the palette
+    // moved to packed `u32` words in §70 #9. It was re-tested for exactly that
+    // reason. Doing
     // all six divisions by 3 in one `mulhi_epu16` -- exact, since the dividends
     // are at most 765 and `21846/65536` errs by 0.0082 there against a largest
     // fractional part of 2/3 -- measured **135 -> 178 instructions**. Building the
