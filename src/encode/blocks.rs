@@ -272,6 +272,34 @@ const fn build_exp(bits: u32) -> [u8; 64] {
 static EXP5: [u8; 64] = build_exp(5);
 static EXP6: [u8; 64] = build_exp(6);
 
+/// `from_565` assembled straight into the packed `0x00BBGGRR` word.
+///
+/// The RDO scorers hand this shape to the AVX2 kernel and never look at the
+/// `[u8; 3]`, so going through one costs three byte-stores and three reloads
+/// per endpoint for nothing.
+#[inline]
+pub(super) fn from_565_packed(c: u16) -> u32 {
+    EXP5[((c >> 11) & 31) as usize] as u32
+        | (EXP6[((c >> 5) & 63) as usize] as u32) << 8
+        | (EXP5[(c & 31) as usize] as u32) << 16
+}
+
+/// `lerp_rgb` on the packed word, channels extracted by shift rather than by
+/// array index. Same const-generic divisor, same rounding, no array touched.
+#[inline]
+pub(super) fn lerp_packed<const AW: u32, const BW: u32>(a: u32, b: u32) -> u32 {
+    let f = |sh: u32| {
+        (AW * ((a >> sh) & 0xFF) + BW * ((b >> sh) & 0xFF)) / (AW + BW)
+    };
+    f(0) | f(8) << 8 | f(16) << 16
+}
+
+/// Split a packed word back into the `[u8; 3]` the scalar fallbacks want.
+#[inline]
+pub(super) fn unpack_rgb(p: u32) -> [u8; 3] {
+    [p as u8, (p >> 8) as u8, (p >> 16) as u8]
+}
+
 fn from_565(c: u16) -> [u8; 3] {
     [
         EXP5[((c >> 11) & 31) as usize],

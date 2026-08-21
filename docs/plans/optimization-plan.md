@@ -4097,3 +4097,56 @@ looks like a regression and is not: `#[inline(never)]` on a function with a
 runtime feature branch counts **both** arms, and only one executes. Counting the
 kernel alone gives the real figure — **27 instructions, 6.7x fewer**. When a
 dispatching function is measured this way, count the impl, not the dispatcher.
+
+## §70 — RDO round 4, items 7-10
+
+Continuing the deterministic cost model (`instructions/block = calls/block x
+instructions/call`).
+
+| # | change | measurement |
+|---|---|---|
+| 7 | `palette_mode6_base` shared across the two p-bits | 67 -> **63** instr, base built once per donor not twice |
+| 8 | channel errors passed into polish instead of recomputed | **-4 of 8** `mode6_chan_sse` calls per donor: 238 -> ~205/blk (**-13.7%**) |
+| 9 | `bc1_colors_packed` assembles the words directly | 97 -> **91** instr x 18.68 calls/blk |
+| 10 | dict scan reads the deduplicated table set | 15.883 -> **9.073** entries scanned (**-42.9%**), x DICT_N=24 per block |
+
+### #8 is the one worth reading
+
+Each BC7 donor ran `mode6_sse`, which builds a `Mode6Fixed` and calls
+`mode6_chan_errs` -- four kernel calls -- and then immediately called
+`polish_mode6_endpoints`, which built *another* `Mode6Fixed` and called
+`mode6_chan_errs` again for exactly the same four values. Neither function was
+wrong; the redundancy only existed at the seam between them. `mode6_sse` is now
+deleted, subsumed by the call site.
+
+### #9 is a sibling read of a REFUTED hypothesis
+
+`bc1_colors_packed` already carried a recorded refutation: vectorising the
+palette build measured 135 -> 178 instructions, because assembling vectors from
+`[u8; 3]` costs more inserts than the six divisions it removes. The refutation
+was correct. What it walked past was one level up -- the function returned
+**both** `[[u8; 3]; 4]` and `[u32; 4]`, and on AVX2, the path that actually runs,
+only the words are ever read. The byte arrays existed for the scalar fallback
+alone. Assembling the words directly and having the fallback unpack them is
+97 -> 91.
+
+Note the honest size: **-6.2%, not the -40% the structure suggested.** LLVM was
+already sinking most of the dead array into the scalar branch. The sibling read
+found a real redundancy; the compiler had found most of it first.
+
+### #10 uses work item #2 already did
+
+The window dedup (§69 #2) builds `tried[..ntried]`, the distinct table set. The
+dictionary loop directly below it was still scanning the raw
+`recent_tables[..n]` for the same membership question. Identical answer, 42.9%
+shorter scan, zero new work -- the deduplicated set was already sitting in a
+local.
+
+### Round 4 final: 9 wins, 1 refutation
+
+Refuted: BC7 donor deduplication, **0.000 duplicates per block** -- the donors
+are distinct by construction, and the check would have been pure overhead.
+Recorded in `rdo.rs` so it is not retried.
+
+Every item byte-identical on the RDO ladder and the encode corpus, 108 tests,
+zero warnings.

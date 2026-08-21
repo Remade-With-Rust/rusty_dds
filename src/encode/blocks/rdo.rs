@@ -261,7 +261,13 @@ pub(crate) fn encode_image_bc1_rdo(
                             // 4. Global popular tables (two-pass dictionary): the whole
                             // image converges on the same few 4-byte index strings.
                             for (di, &table) in dict.iter().enumerate() {
-                                if recent_tables[..n].contains(&table) {
+                                // `tried[..ntried]` is exactly the DISTINCT set
+                                // of `recent_tables[..n]` -- the window loop
+                                // above built it -- so membership is identical
+                                // while the scan is shorter by however many
+                                // repeats the window held (about 6.7 of 16 on
+                                // this corpus). DICT_N of these run per block.
+                                if tried[..ntried].contains(&table) {
                                     continue; // already tried via the window
                                 }
                                 let lim = (best_j + lam * SAVE_PART).ceil() as i32;
@@ -335,33 +341,33 @@ pub(crate) fn encode_image_bc1_rdo(
 /// i.e. nothing. Both representations are cheap to derive together from the two
 /// 565 words, and splitting them costs more in the return than it saves in the
 /// body.
-fn bc1_colors_packed(block: &[u8; 8]) -> ([[u8; 3]; 4], [u32; 4]) {
+fn bc1_colors_packed(block: &[u8; 8]) -> [u32; 4] {
     let c0 = u16::from_le_bytes([block[0], block[1]]);
     let c1 = u16::from_le_bytes([block[2], block[3]]);
-    let a = from_565(c0);
-    let b = from_565(c1);
+    let a = from_565_packed(c0);
+    let b = from_565_packed(c1);
     // Vectorising this palette build was REFUTED and the kernel removed. Doing
-    // all six divisions by 3 in one `mulhi_epu16` — exact, since the dividends
+    // all six divisions by 3 in one `mulhi_epu16` -- exact, since the dividends
     // are at most 765 and `21846/65536` errs by 0.0082 there against a largest
-    // fractional part of 2/3 — measured **135 -> 178 instructions**. Building the
+    // fractional part of 2/3 -- measured **135 -> 178 instructions**. Building the
     // vectors from `[u8; 3]` costs six inserts and two stores back, more than the
     // six divisions it removes.
-    let colors = if c0 > c1 {
-        [a, b, lerp_rgb::<2, 1>(a, b), lerp_rgb::<1, 2>(a, b)]
+    //
+    // The win the refutation walked past was one level up: this used to return
+    // BOTH `[[u8; 3]; 4]` and `[u32; 4]`, building the byte arrays and then
+    // re-reading twelve bytes out of them to assemble the words. On AVX2 -- the
+    // path that actually runs -- only the words are ever read; the byte arrays
+    // were consumed solely by the scalar fallback. Now the words are assembled
+    // directly and the fallback unpacks them, which costs it three shifts.
+    if c0 > c1 {
+        [a, b, lerp_packed::<2, 1>(a, b), lerp_packed::<1, 2>(a, b)]
     } else {
-        [a, b, lerp_rgb::<1, 1>(a, b), [0, 0, 0]]
-    };
-    let packed = [
-        u32::from_le_bytes([colors[0][0], colors[0][1], colors[0][2], 0]),
-        u32::from_le_bytes([colors[1][0], colors[1][1], colors[1][2], 0]),
-        u32::from_le_bytes([colors[2][0], colors[2][1], colors[2][2], 0]),
-        u32::from_le_bytes([colors[3][0], colors[3][1], colors[3][2], 0]),
-    ];
-    (colors, packed)
+        [a, b, lerp_packed::<1, 1>(a, b), 0]
+    }
 }
 
 fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) -> Option<i32> {
-    let (colors, packed) = bc1_colors_packed(block);
+    let packed = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
     // The abort moves from the running prefix to the completed total, which is
     // the same decision: squared errors are non-negative, so a prefix reaches
@@ -375,7 +381,7 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
-        err += sqr_rgb([p[0], p[1], p[2]], colors[idx]);
+        err += sqr_rgb([p[0], p[1], p[2]], unpack_rgb(packed[idx]));
         if err >= limit {
             return None;
         }
@@ -386,7 +392,7 @@ fn bc1_block_sse_limited(pixels: &[[u8; 4]; 16], block: &[u8; 8], limit: i32) ->
 /// Decode-true SSE of an arbitrary BC1 block against source pixels
 /// (both 4-color and punch modes, matching the decoder's mode rule).
 fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
-    let (colors, packed) = bc1_colors_packed(block);
+    let packed = bc1_colors_packed(block);
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
@@ -396,7 +402,7 @@ fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
-        err += sqr_rgb([p[0], p[1], p[2]], colors[idx]);
+        err += sqr_rgb([p[0], p[1], p[2]], unpack_rgb(packed[idx]));
     }
     err
 }
