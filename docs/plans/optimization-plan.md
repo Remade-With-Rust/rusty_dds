@@ -4028,3 +4028,72 @@ The dominant function is the one round two *created* and then vectorised, and it
 is **still** 80.5%. Per-call cost fell from 305 to 130 instructions and the share
 barely moved, because the call count did not. **When a function stays dominant
 after being made cheaper, stop optimising the body and attack the caller.**
+
+## §69 — Round three executed: seven wins, two refutations, one closed by analysis
+
+Whole RDO campaign, 512^2 λ=25, pinned, **wall** (the metric once the path is
+parallel):
+
+| | start | now | |
+|---|---|---|---|
+| **BC1 RDO** | 61.87 ms | **19.35 ms** | **3.20x** |
+| **BC7 RDO** | 273.50 ms | **47.68 ms** | **5.74x** |
+
+| # | target | outcome |
+|---|---|---|
+| 1 | parallelise pass 1 | **byte-identical**; small alone, but proves the merge |
+| 2 | **parallelise pass 2** | **BC1 2.4x, BC7 2.0x wall**, ladder-gated |
+| 3 | `mode6_chan_sse` call count | 259.3 -> 240.8 per block, exact zero-error skip |
+| 4 | `refit_with_ls` | **476 -> 230** instr, BC1 **+11.2%** (z = +3.87) |
+| 5 | `ls_endpoints_mode6` | **refuted** — 272 -> 605 instr |
+| 6 | `bc1_colors_packed` | **refuted** — 135 -> 178 instr |
+| 7 | `bc1_fit_4color` | closed by analysis — a 5-line dispatcher |
+| 8 | `bc1_chan_sse` | **182 -> 27** executed instr (**6.7x**) |
+| 9 | baseline encoders | now run in parallel via #1 and #2 |
+| 10 | `dp0_choice` + `quantize_7p_fixed` | fused: 24.8 -> 16.5 calls/blk, one function deleted |
+
+### The parallelisation, and what it costs
+
+Pass 2 carries a sliding match window, so strips take their own and start cold.
+This is the one change in the whole RDO campaign that **moves output**, so the
+gate is the ladder:
+
+| | serial | strip-parallel |
+|---|---|---|
+| BC1 λ=25 | 92.88%, +0.172 dB | 92.88%, +0.172 dB |
+| BC1 λ=200 | 76.44%, -0.468 dB | 76.45%, -0.470 dB |
+| BC7 λ=25 | 91.50%, -0.072 dB | 91.62%, -0.074 dB |
+| BC7 λ=200 | 65.52%, -1.994 dB | 65.90%, -1.982 dB |
+
+BC1 is inside 0.01pp. BC7 gives up 0.06-0.38pp of deflated size at high λ for
+essentially unchanged PSNR — the cold rows at strip boundaries find fewer
+matches.
+
+**Warm-seeding those strips made it worse**, which is the surprise of the round.
+Seeding the window from pass 1's baseline blocks took λ=200 from 76.45% to
+76.63%: baseline blocks are candidates that never reach the output, so matching
+against them compresses nothing while displacing history that would. An empty
+window costs one row; a wrong window costs the strip.
+
+### Two refutations, and why they share a cause
+
+`ls_endpoints_mode6` (#5) and `bc1_colors_packed` (#6) both failed for the same
+reason, and it is worth naming: **vectorising a function whose inputs are not
+already in vector-friendly form pays for the marshalling twice.**
+
+- #5: BC1's `refit_with_ls` won -51.7% with the *same kernel*, because its caller
+  already hands it a `(1-w, w)` array. Mode 6 has no such array, so vectorising
+  forced one into existence: 272 -> 605.
+- #6: six divisions by 3 collapse into one `mulhi_epu16`, verified exhaustively
+  over all 65 536 pairs — but building the vectors from `[u8; 3]` costs six
+  inserts and two stores: 135 -> 178.
+
+The kernel is never the whole cost. Ask what the caller already holds.
+
+### The measurement trap this round exposed
+
+`bc1_chan_sse` read **182 -> 219** instructions after being vectorised, which
+looks like a regression and is not: `#[inline(never)]` on a function with a
+runtime feature branch counts **both** arms, and only one executes. Counting the
+kernel alone gives the real figure — **27 instructions, 6.7x fewer**. When a
+dispatching function is measured this way, count the impl, not the dispatcher.

@@ -822,7 +822,7 @@ pub(crate) fn encode_image_bc7_rdo(
                                 };
                                 // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
                                 if let Some((e0, e1)) = ls_endpoints_mode6(&pixels, &didx) {
-                                    let q0 = quantize_7p_fixed(e0, dp0_choice(&pixels, e0));
+                                    let q0 = quantize_7p_best(e0);
                                     let q1 = quantize_7p_fixed(e1, dp1);
                                     // p0 is ours (head byte); try both cheaply via helper.
                                     let (mut q0a, p0a) = q0;
@@ -1032,6 +1032,38 @@ const fn build_q7_table() -> [[(u8, u16); 256]; 2] {
 
 static Q7: [[(u8, u16); 256]; 2] = build_q7_table();
 
+/// Quantize to 7 bits **and** pick the p-bit, in one pass over the table.
+///
+/// `dp0_choice` read `Q7` eight times to compare the two p-bits' reconstruction
+/// error, then `quantize_7p_fixed` read it four more times on the same value to
+/// get the quantized channels the winning row already held. Twelve lookups for
+/// eight lookups' worth of information.
+///
+/// Same tie-break as the pair it replaces: `sum(1) < sum(0)`.
+#[inline]
+fn quantize_7p_best(c: [u8; 4]) -> ([u8; 4], u8) {
+    let r0 = &Q7[0];
+    let r1 = &Q7[1];
+    let e0 = r0[c[0] as usize].1 as i32
+        + r0[c[1] as usize].1 as i32
+        + r0[c[2] as usize].1 as i32
+        + r0[c[3] as usize].1 as i32;
+    let e1 = r1[c[0] as usize].1 as i32
+        + r1[c[1] as usize].1 as i32
+        + r1[c[2] as usize].1 as i32
+        + r1[c[3] as usize].1 as i32;
+    let (row, p) = if e1 < e0 { (r1, 1u8) } else { (r0, 0u8) };
+    (
+        [
+            row[c[0] as usize].0,
+            row[c[1] as usize].0,
+            row[c[2] as usize].0,
+            row[c[3] as usize].0,
+        ],
+        p,
+    )
+}
+
 /// Per-channel best 7-bit quantization under a FIXED p-bit.
 fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
     let row = &Q7[p as usize];
@@ -1046,21 +1078,6 @@ fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
     )
 }
 
-/// Pick our own p0 for the tail-reuse candidate (endpoint 0 is free).
-fn dp0_choice(pixels: &[[u8; 4]; 16], e0: [u8; 4]) -> u8 {
-    let _ = pixels;
-    // The reconstruction error this compares is already in the table, so the
-    // two quantize passes and two unquantize passes it used to run are just
-    // eight lookups and six adds. Same `errs[1] < errs[0]` tie-break.
-    let sum = |p: usize| -> i32 {
-        let row = &Q7[p];
-        row[e0[0] as usize].1 as i32
-            + row[e0[1] as usize].1 as i32
-            + row[e0[2] as usize].1 as i32
-            + row[e0[3] as usize].1 as i32
-    };
-    (sum(1) < sum(0)) as u8
-}
 
 /// Parse a mode-6 block back to (q0, p0, q1, p1, indices).
 fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])> {
