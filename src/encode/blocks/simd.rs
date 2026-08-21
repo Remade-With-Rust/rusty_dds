@@ -1374,6 +1374,22 @@ unsafe fn mode6_chan_errs_avx2_impl(
 ///
 /// Correctness of the i16 range and of the fit itself are unchanged — see
 /// [`palette_mode6_avx2`] and [`fit_indices_mode6_avx2`], whose bodies this is.
+///
+/// # Do not factor this into helpers
+///
+/// A two-palette variant was tried — the donor loop needs both p-bits and they
+/// share the block, the base and the first endpoint — by splitting the fit into
+/// a reusable `fit_one`. It measured WORSE: **750 against 720**.
+///
+/// The reason is a hard language limit. `#[inline(always)]` is rejected on a
+/// `#[target_feature]` function, and a plain `#[inline]` hint is ignored, so
+/// `fit_one` stayed out of line and the "fused" entry point paid two internal
+/// call boundaries to save one outer one. The split also regressed the
+/// single-palette path from 350 to 375.
+///
+/// **A `#[target_feature]` kernel cannot be refactored into helpers without
+/// measuring** — every helper is a real call, and there is no way to force
+/// otherwise on stable. Share code between kernels with a macro, or not at all.
 #[cfg(target_arch = "x86_64")]
 pub(super) fn palette_fit_mode6_avx2(
     pixels: &[[u8; 4]; 16],
