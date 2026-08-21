@@ -286,11 +286,10 @@ fn to_565(c: [u8; 3]) -> u16 {
 /// and 64 values — 96 bytes of table between them, L1-resident forever. The
 /// expression form cost twelve operations per call in a function measured at 26
 /// instructions and ~71 calls a block.
-const fn build_exp(bits: u32) -> [u8; 64] {
-    let mut t = [0u8; 64];
-    let n = 1usize << bits;
+const fn build_exp<const N: usize>(bits: u32) -> [u8; N] {
+    let mut t = [0u8; N];
     let mut v = 0usize;
-    while v < n {
+    while v < N {
         t[v] = if bits == 5 {
             ((v << 3) | (v >> 2)) as u8
         } else {
@@ -301,7 +300,10 @@ const fn build_exp(bits: u32) -> [u8; 64] {
     t
 }
 
-static EXP5: [u8; 64] = build_exp(5);
+/// Five bits index 32 entries, not 64. Both tables were sized 64, so a third of
+/// the 128 bytes was never read — dead L1 footprint in a pair of tables whose
+/// whole justification is staying L1-resident.
+static EXP5: [u8; 32] = build_exp(5);
 static EXP6: [u8; 64] = build_exp(6);
 
 /// `from_565` assembled straight into the packed `0x00BBGGRR` word.
@@ -311,7 +313,7 @@ static EXP6: [u8; 64] = build_exp(6);
 /// per endpoint for nothing.
 #[inline]
 pub(super) fn from_565_packed(c: u16) -> u32 {
-    EXP5[((c >> 11) & 31) as usize] as u32
+    EXP5[(c >> 11) as usize] as u32
         | (EXP6[((c >> 5) & 63) as usize] as u32) << 8
         | (EXP5[(c & 31) as usize] as u32) << 16
 }
@@ -332,9 +334,24 @@ pub(super) fn unpack_rgb(p: u32) -> [u8; 3] {
     [p as u8, (p >> 8) as u8, (p >> 16) as u8]
 }
 
+/// The 5-bit and 6-bit expansions, for callers outside this module.
+#[inline]
+pub(super) fn exp5(v: u16) -> u8 {
+    EXP5[(v & 31) as usize]
+}
+
+/// See [`exp5`].
+#[inline]
+pub(super) fn exp6(v: u16) -> u8 {
+    EXP6[(v & 63) as usize]
+}
+
 fn from_565(c: u16) -> [u8; 3] {
+    // `c` is sixteen bits, so `c >> 11` is already at most 31 and the mask that
+    // used to follow it could not clear a bit. The other two are real: `c >> 5`
+    // reaches 2047 and `c` reaches 65535.
     [
-        EXP5[((c >> 11) & 31) as usize],
+        EXP5[(c >> 11) as usize],
         EXP6[((c >> 5) & 63) as usize],
         EXP5[(c & 31) as usize],
     ]

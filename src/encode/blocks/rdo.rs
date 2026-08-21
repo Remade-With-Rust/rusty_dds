@@ -808,20 +808,18 @@ fn build_table_dict(
 
 /// One 565 field expanded to 8 bits — [`from_565`], one channel of it.
 #[inline]
+/// One channel of a 565 word, expanded.
+///
+/// This computed the expansion arithmetically while its whole-pixel sibling
+/// `from_565` reads it out of `EXP5`/`EXP6` — and the tables are there because
+/// the expression form was MEASURED to lose: twelve operations a call against a
+/// pair of L1-resident lookups. Same expansion either way, so the two now agree
+/// on the cheaper one.
 fn from_565_chan(c: u16, ch: usize) -> u8 {
     match ch {
-        0 => {
-            let r = ((c >> 11) & 31) as u8;
-            (r << 3) | (r >> 2)
-        }
-        1 => {
-            let g = ((c >> 5) & 63) as u8;
-            (g << 2) | (g >> 4)
-        }
-        _ => {
-            let b = (c & 31) as u8;
-            (b << 3) | (b >> 2)
-        }
+        0 => super::exp5(c >> 11),
+        1 => super::exp6((c >> 5) & 63),
+        _ => super::exp5(c & 31),
     }
 }
 
