@@ -4312,3 +4312,53 @@ vectorisation.
 - An empty `test result` line means the test build is broken, not that tests
   passed. Second occurrence; both times the oracle had gone stale against a
   changed signature.
+
+## §74 — RDO round 8
+
+| # | change | measurement |
+|---|---|---|
+| 1 | duplicate 16-pixel walk removed from `encode_bc1_bytes` | **1161 -> 924**, **-237/blk** |
+| 2 | lane permute hoisted out of `bc1_fit_4color` | **163 -> 155**, **-120/blk** |
+| 3 | one horizontal reduction per kernel, not per lane-group | errs **85 -> 70**, **-184/blk** |
+| 4 | BC1 weight table pre-spread | **81 -> 52** (-35.8%), **-737/blk** |
+| 5 | palette kernel inputs built by vector, not byte-by-byte | **87 -> 35** (-59.8%), **-998/blk** |
+| 6 | index vector carried instead of rebuilt | **353 -> 333**, **-384/blk** |
+| 7 | 565 packing folded into the BC1 solve kernel | refit **88 -> 67**, **-508/blk** |
+| 8 | index table packed by multiply-accumulate | **155 -> 125** (-19.4%), **-449/blk** |
+| 9 | palette pack in two packs; redundant alpha mask dropped | **89 -> 82**, **-94/blk** |
+| 10 | mode-6 accumulator uses interleaved pixels | accum **160 -> 133**, builder **87 -> 34**, **-300/blk** |
+
+Round total: about **-4,011 instructions/block**. Three refutations alongside.
+
+### The same change won and lost in the same session
+
+#4 pre-spreads a weight table so the kernel can load it instead of rebuilding it
+with a broadcast and a permute: **81 -> 52**. The identical transform applied to
+`ls_accum_mode6` an hour earlier measured **160 -> 177** and was reverted.
+
+The difference is **what indexes the table**. In the mode-6 accumulator the row
+is `indices[i]` — data-dependent — so a 32-byte stride needs real address
+arithmetic. In the BC1 accumulator it is the unrolled loop counter, so every
+offset is a compile-time constant and there is nothing to compute.
+
+**A layout change is not good or bad on its own.** It depends on whether the
+index is known at compile time.
+
+### Refuted, with numbers
+
+- **`UW6` pre-spread to 32-byte rows**: 160 -> 177.
+- **`AW6` dropped to stride 8**, recovering `a00` as `16 - 2*a01 - a11` (exact,
+  since `u + w == 1` makes `sum (u+w)^2 == 16`): 160 -> **183**. The maths was
+  sound and it was byte-identical. It was just slower — LLVM was not paying the
+  shift-and-add the stride seemed to imply.
+- **`polish_mode6_endpoints` state copied into locals**, on the theory that
+  opaque kernel calls forced spills through the `&mut` pointers: 293 -> **296**.
+  Rust already emits `noalias` on `&mut`; the 69 `movq` and 41 `movl` in that
+  body are genuine register pressure from the number of live values.
+
+### Byte assembly keeps coming back
+
+`u64::from_le_bytes([...])` to build a vector input has now been removed **three
+times** (§72 #1, §72 #3, and #5 here) — and #5 was in a kernel written during
+§72 itself. It reads as free in source and costs about thirty scalar
+instructions. Worth grepping for after any new kernel lands.
