@@ -4202,3 +4202,65 @@ the data that only the author knows.
 - **`gather_block`'s 243 instructions are mostly its cold edge path**; the
   interior fast path already existed. The both-arms trap applies to every
   rarely-taken branch, not just feature dispatch.
+
+## §72 — RDO round 6
+
+All five candidates from the round-5 assessment were hunted. Four produced wins;
+one was refuted, and a sixth idea was refuted too.
+
+| # | change | measurement |
+|---|---|---|
+| 1 | pixel + palette widening hoisted out of the index-fit loop | dynamic **649 -> 433** per call (-33.3%), **-4,147 instr/blk** |
+| 2 | mode-6 palette build vectorised | dynamic **423 -> 87** (-79.4%), **-5,494 instr/blk** |
+| 3 | BC1 palette pre-widened inside the index-fit kernel | **187 -> 163** (-12.8%), **-359 instr/blk** |
+| 4 | libm `roundf` removed from the least-squares solves | **49 -> 16** call sites; static -9 and -43; dynamic strictly larger |
+| — | `bc1_colors_packed` vectorised | **REFUTED**, 91 -> 106 executed |
+| — | four-candidate fusion in polish | **REFUTED**, net ~-87/blk (~1%) |
+
+### The method error that mattered: static is not dynamic
+
+The campaign has been ranking by STATIC instruction count. That equals dynamic
+only for straight-line or fully-unrolled code. For a rolled loop it undercounts
+by the trip count, and two of this round's biggest wins were hiding behind it:
+
+- `fit_indices_mode6_avx2` read **124 static** and is **649 dynamic** — a rolled
+  16-iteration loop. It was 12,458 instructions a block, the largest item in BC7
+  RDO, while the model ranked it fourth.
+- `palette_mode6_from_base` read **63 static** and is **423 dynamic**. The model
+  had it at 1,030 a block; it was 6,918.
+
+The rule: **check for a loop back-edge before believing a static count.** A
+function with `loop_body = b` and static `t` costs `n*b + (t-b)`, not `t`.
+
+The mirror-image error is just as common and was also present: a static count
+INCLUDES cold arms that never run. `refit_with_ls` reads 308 but its hot path is
+**176** — 43% of the count is a scalar fallback that never executes on an AVX2
+machine. `gather_block`'s 243 is mostly its edge path.
+
+### Redundancy the compiler is not allowed to remove
+
+§71's rule held up again, and sharpened. Both #1 and #3 are loop-invariant
+hoists — normally LLVM's job — that LLVM *cannot* do here, because `pixels` and
+`pal` are both raw-pointer casts of `&[[u8; 4]; 16]` and it must assume the
+palette read may alias the pixel data. Aliasing the compiler cannot disprove is
+a reliable place to find work it has been forced to repeat.
+
+### A kernel must pay for the boundary it sits behind
+
+`bc1_colors_packed` carried a refutation whose premise had EXPIRED (§70 #9
+changed its representation), so it was correctly re-tested — and it lost again
+for a new reason. The six divisions by 3 were never expensive; LLVM
+strength-reduces `/3` to a multiply-shift. What sank it is that a
+`#[target_feature]` kernel can never inline into a caller lacking the feature,
+so **every call pays a real call boundary, and a 16-instruction kernel cannot
+amortise one.** The four-candidate fusion died of the same arithmetic from the
+other side: it saved 25 call boundaries a block and gave it all back scoring
+candidates the range guards discard.
+
+### `f32::round` is a libm call
+
+Worth knowing generally: `f32::round` is half-away-from-zero, which no SSE
+rounding mode implements, so it lowers to `callq roundf` — 49 sites in this
+binary. It can be removed exactly, but ONLY in f64: `0.49999997f32 + 0.5` ties
+and rounds to `1.0`, giving 1 where `round` gives 0. That tie is why the SIMD
+form was refuted earlier and why the replacement widens first.
