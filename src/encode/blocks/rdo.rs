@@ -162,7 +162,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 u16::from_le_bytes([base[0], base[1]]),
                                 u16::from_le_bytes([base[2], base[3]]),
                             );
-                            recent_pal[slot] = super::bc1::bc1_palette_565(
+                            recent_pal[slot] = super::bc1::byte_pal_if_needed(
                                 recent_eps[slot].0.max(recent_eps[slot].1),
                                 recent_eps[slot].0.min(recent_eps[slot].1),
                             );
@@ -338,7 +338,7 @@ pub(crate) fn encode_image_bc1_rdo(
                             u16::from_le_bytes([best[0], best[1]]),
                             u16::from_le_bytes([best[2], best[3]]),
                         );
-                        recent_pal[slot] = super::bc1::bc1_palette_565(
+                        recent_pal[slot] = super::bc1::byte_pal_if_needed(
                             recent_eps[slot].0.max(recent_eps[slot].1),
                             recent_eps[slot].0.min(recent_eps[slot].1),
                         );

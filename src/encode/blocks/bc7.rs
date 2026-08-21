@@ -1163,12 +1163,31 @@ pub(super) fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: 
     v |= (p0 as u128) << pos;
     v |= (p1 as u128) << (pos + 1);
     pos += 2;
-    v |= (indices[0] as u128) << pos;
-    pos += 3;
-    for i in 1..16 {
-        v |= (indices[i] as u128) << pos;
-        pos += 4;
+    // Sixteen 4-bit indices packed by SWAR rather than fifteen shift-or pairs.
+    //
+    // `nib8` folds eight nibble-valued bytes into 32 bits: `x | (x >> 4)` pairs
+    // adjacent bytes, then two more fold-and-mask steps halve the span twice.
+    // With all sixteen packed as `sum idx[i] << 4i`, the block's layout is two
+    // shifts of that one value: the anchor's four bits land at 65 and the rest
+    // at 68, which is exactly what the loop produced — including the overlap at
+    // bit 68, which both forms OR together.
+    fn nib8(x: u64) -> u64 {
+        let x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
+        let x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
+        (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF
     }
+    let lo = u64::from_le_bytes([
+        indices[0], indices[1], indices[2], indices[3],
+        indices[4], indices[5], indices[6], indices[7],
+    ]);
+    let hi = u64::from_le_bytes([
+        indices[8], indices[9], indices[10], indices[11],
+        indices[12], indices[13], indices[14], indices[15],
+    ]);
+    let packed = nib8(lo) | (nib8(hi) << 32);
+    let _ = pos;
+    v |= ((packed & 0xF) as u128) << 65;
+    v |= ((packed >> 4) as u128) << 68;
     v.to_le_bytes()
 }
 

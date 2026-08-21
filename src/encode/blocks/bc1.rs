@@ -172,6 +172,24 @@ pub(super) fn widen_pal(colors: &[[u8; 3]; 4]) -> Pal16 {
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 pub(super) fn widen_pal(_colors: &[[u8; 3]; 4]) -> Pal16 {}
 
+/// The byte palette, but only where something will read it.
+///
+/// Since the widened form comes straight from the 565 words, the byte palette is
+/// consumed by the scalar fallback alone — so on a machine that takes the vector
+/// path it is 77 instructions a block producing a value nothing reads.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(super) fn byte_pal_if_needed(hi: u16, lo: u16) -> [[u8; 3]; 4] {
+    if simd::has_avx2() {
+        [[0u8; 3]; 4]
+    } else {
+        bc1_palette_565(hi, lo)
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+pub(super) fn byte_pal_if_needed(hi: u16, lo: u16) -> [[u8; 3]; 4] {
+    bc1_palette_565(hi, lo)
+}
+
 /// The widened palette straight from the two 565 words, skipping the byte form.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 pub(super) fn pal16_from_565(hi: u16, lo: u16) -> Pal16 {
