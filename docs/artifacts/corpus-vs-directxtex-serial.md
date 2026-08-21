@@ -64,7 +64,35 @@ survives the correction.
 | Wood095_Roughness__bc4s | mask | 41050 | 11339 | 3.620 | 55.14 | 54.13 | +1.01 | directxtex_faster | rusty_higher_psnr |
 
 
-## Reproducing
+## Validation: three serial runs, 2026-08-21
+
+Re-run three times on an idle machine after the BC4/BC5 signed and BC1 PCA work.
+
+**Quality is fully deterministic — 22 win / 1 loss / 1 tie in all six runs**
+(three serial, three parallel). PSNR cannot vary; only the speed column moves.
+
+Speed, per-case median ratio and spread across the three serial runs:
+
+| case                      | run ratios              | median | spread |
+|---------------------------|-------------------------|--------|--------|
+| Rock064_Color bc1         | 1.069 / 1.005 / 1.106   | 1.069  | 9.4%   |
+| Metal063_Color bc1        | 1.005 / 1.022 / 1.039   | 1.022  | 3.3%   |
+| Bricks097_Color bc1       | 1.006 / 1.018 / 1.070   | 1.018  | 6.3%   |
+| Wood095_Color bc1         | 0.986 / 0.943 / 0.971   | 0.971  | 4.4%   |
+| *(20 others)*             | —                       | <0.90  | —      |
+
+**The four BC1 cases are now at parity, not behind.** They were 1.44-1.66 before
+the PCA seed was gated; they are 0.97-1.07 now. Given a per-case spread of
+3-9%, three of the four are statistically indistinguishable from 1.0, and only
+Rock064 has a median meaningfully above it.
+
+The aggregate speed verdict therefore FLICKERS between runs — 20/1/3, 21/0/3 and
+20/2/2 across the three — purely because those four sit on the tie boundary.
+**Do not quote a single run's slower-count.** Quote the medians.
+
+Every non-BC1 case is below 0.90 and never changes verdict.
+
+## Reproducing## Reproducing
 
 Raise `ENCODE_PARALLEL_MIN_BLOCKS` to `usize::MAX` in `src/encode/blocks.rs`,
 then `cargo run --release --example harvest_corpus_vs_dxtex`. Restore it
