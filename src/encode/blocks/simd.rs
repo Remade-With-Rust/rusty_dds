@@ -183,9 +183,75 @@ unsafe fn fit_indices_mode6_avx2_impl(
 /// [`bc1_widen_palette`] and call [`bc1_fit_4color_pre_avx2`] — the RDO window
 /// reuses each palette about fourteen times a block, and re-widening it every
 /// time is the same pack/unpack round trip the mode-6 path already shed.
+/// A BC1 palette prepared for the dot-product fit.
+///
+/// The fit does not compute `sum (p - q)^2` directly. Expanding it gives
+/// `sum p^2 - 2*dot(p,q) + sum q^2`, and the first term is a property of the
+/// PIXEL alone — identical for all four palette entries, so it cannot influence
+/// which entry is nearest. Dropping it from the inner loop removes every
+/// `vpsubw`, leaving a bare inner product, which is precisely what `vpmaddwd`
+/// computes natively. The dropped term is added back once at the end, so the
+/// error returned is the true SSE and the choice of index is unchanged: this is
+/// an exact rewrite, not an approximation.
+///
+/// Both fields are pre-scaled so the inner loop is a multiply and a subtract:
+/// `p8` holds `8*q`, and `cst` holds `4*sum(q^2) + k`, which folds the index
+/// tag, the `*4` the tag needs and the constant side of the expansion into one
+/// broadcast. A lane then reads `cst[k] - 8*dot`, which is exactly
+/// `4*(sum q^2 - 2*dot) + k`.
+///
+/// Ranges: `q <= 255` so `8*q <= 2040` fits i16, and `8*dot <= 8*3*255^2` is
+/// under 1.6M, so nothing approaches i32.
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy)]
+pub(super) struct Bc1Pal {
+    p8: [i16; 16],
+    cst: [i32; 4],
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Bc1Pal {
+    pub(super) const ZERO: Self = Self {
+        p8: [0; 16],
+        cst: [0; 4],
+    };
+}
+
+/// Widen sixteen palette bytes (`[R,G,B,0]` per entry) into the prepared form.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
+unsafe fn prep_palette_bytes(v: std::arch::x86_64::__m128i) -> Bc1Pal {
+    use std::arch::x86_64::*;
+    let w = _mm256_cvtepu8_epi16(v);
+    let mut p8 = [0i16; 16];
+    _mm256_storeu_si256(p8.as_mut_ptr() as *mut __m256i, _mm256_slli_epi16(w, 3));
+
+    // `sum q^2` per entry: `madd` folds adjacent words, so lane 2k holds
+    // R^2+G^2 and lane 2k+1 holds B^2 (the alpha byte is zero by construction),
+    // and one `hadd` folds each pair. `hadd` works within 128-bit halves, so
+    // entries 0,1 land in the low half's first two lanes and 2,3 in the high
+    // half's — `unpacklo_epi64` brings the two pairs together in order.
+    //
+    // This stays in registers on purpose: the obvious spelling stores the eight
+    // `madd` lanes to an array and adds them with a scalar loop, which is vector
+    // code writing memory that scalar code immediately reads back — the
+    // store-forwarding shape this file has removed six times.
+    let hp = _mm256_hadd_epi32(_mm256_madd_epi16(w, w), _mm256_madd_epi16(w, w));
+    let q4 = _mm_unpacklo_epi64(
+        _mm256_castsi256_si128(hp),
+        _mm256_extracti128_si256(hp, 1),
+    );
+    let mut cst = [0i32; 4];
+    _mm_storeu_si128(
+        cst.as_mut_ptr() as *mut __m128i,
+        _mm_add_epi32(_mm_slli_epi32(q4, 2), _mm_setr_epi32(0, 1, 2, 3)),
+    );
+    Bc1Pal { p8, cst }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn widen_palette(colors: &[[u8; 3]; 4]) -> Bc1Pal {
     use std::arch::x86_64::*;
     let mut cb = [0u8; 16];
     for k in 0..4usize {
@@ -193,17 +259,12 @@ unsafe fn widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
         cb[k * 4 + 1] = colors[k][1];
         cb[k * 4 + 2] = colors[k][2];
     }
-    let mut c16 = [0i16; 16];
-    _mm256_storeu_si256(
-        c16.as_mut_ptr() as *mut __m256i,
-        _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr() as *const __m128i)),
-    );
-    c16
+    prep_palette_bytes(_mm_loadu_si128(cb.as_ptr() as *const __m128i))
 }
 
 /// Widen a palette once, for reuse across fits.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn bc1_widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
+pub(super) fn bc1_widen_palette(colors: &[[u8; 3]; 4]) -> Bc1Pal {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
     unsafe { widen_palette(colors) }
@@ -213,12 +274,12 @@ pub(super) fn bc1_widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
 #[cfg(target_arch = "x86_64")]
 pub(super) fn bc1_fit_4color_pre_avx2(
     pixels: &[[u8; 4]; 16],
-    c16: &[i16; 16],
+    pal: &Bc1Pal,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
-    unsafe { bc1_fit_4color_pre_avx2_impl(pixels, c16, err_limit) }
+    unsafe { bc1_fit_4color_pre_avx2_impl(pixels, pal, err_limit) }
 }
 
 pub(super) fn bc1_fit_4color_avx2(
@@ -231,35 +292,6 @@ pub(super) fn bc1_fit_4color_avx2(
     unsafe { bc1_fit_4color_avx2_impl(pixels, colors, err_limit) }
 }
 
-/// RGB squared distance from eight consecutive pixels to one point, packed in
-/// pixel order. The alpha lane is masked to zero on both sides so it cannot
-/// contribute — see [`sse8_rgba`] for the `hadd` lane ordering.
-#[inline]
-#[target_feature(enable = "avx2")]
-unsafe fn sse8_rgb(
-    base: *const u8,
-    off: usize,
-    pv: std::arch::x86_64::__m256i,
-    keep: std::arch::x86_64::__m256i,
-    perm: std::arch::x86_64::__m256i,
-) -> std::arch::x86_64::__m256i {
-    use std::arch::x86_64::*;
-    let a = _mm256_and_si256(
-        _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
-        keep,
-    );
-    let b = _mm256_and_si256(
-        _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off + 16) as *const __m128i)),
-        keep,
-    );
-    let da = _mm256_sub_epi16(a, pv);
-    let db = _mm256_sub_epi16(b, pv);
-    // The permute back to pixel order is NOT done here — see the caller, which
-    // does it once at the end. Everything downstream is lane-wise, so a
-    // consistent permutation of all lanes commutes with the whole loop.
-    let _ = perm;
-    _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db))
-}
 
 /// BC1 four-colour fit, entirely in registers.
 ///
@@ -278,15 +310,15 @@ unsafe fn bc1_fit_4color_avx2_impl(
     colors: &[[u8; 3]; 4],
     err_limit: i32,
 ) -> Option<(u32, i32)> {
-    let c16 = widen_palette(colors);
-    bc1_fit_4color_pre_avx2_impl(pixels, &c16, err_limit)
+    let pal = widen_palette(colors);
+    bc1_fit_4color_pre_avx2_impl(pixels, &pal, err_limit)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn bc1_fit_4color_pre_avx2_impl(
     pixels: &[[u8; 4]; 16],
-    c16: &[i16; 16],
+    pal: &Bc1Pal,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
@@ -295,51 +327,78 @@ unsafe fn bc1_fit_4color_pre_avx2_impl(
     let keep = _mm256_set1_epi64x(
         u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
     );
+    // Sixteen pixels widened to i16 with alpha masked off, four at a time.
+    let ld = |off: usize| {
+        _mm256_and_si256(
+            _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
+            keep,
+        )
+    };
+    let (p0, p1, p2, p3) = (ld(0), ld(16), ld(32), ld(48));
+
+    // The `sum p^2` term dropped from the inner loop, summed back once here.
+    // It is the same for every palette entry, which is exactly why it can leave
+    // the loop; it is NOT the same across blocks, so it cannot leave the call.
+    let psq = _mm256_add_epi32(
+        _mm256_add_epi32(_mm256_madd_epi16(p0, p0), _mm256_madd_epi16(p1, p1)),
+        _mm256_add_epi32(_mm256_madd_epi16(p2, p2), _mm256_madd_epi16(p3, p3)),
+    );
+
+    // Nearest palette entry, with the index riding in the low two bits.
+    //
+    // Each lane holds `cst[k] - 8*dot`, which is `4*(sum q^2 - 2*dot) + k`, and
+    // that differs from `4*SSE + k` only by the constant `4*sum p^2`. A constant
+    // shift cannot reorder anything, so `vpminsd` picks the same entry the old
+    // `cmpgt`-and-blend pair did — including ties, which both resolve toward the
+    // smaller k. Two accumulators and four `vpblendvb` an iteration disappear
+    // with it; `blendv` is two uops on Intel where `min` and `sub` are one.
     let mut best_lo = _mm256_set1_epi32(i32::MAX);
     let mut best_hi = _mm256_set1_epi32(i32::MAX);
-    let mut idx_lo = _mm256_setzero_si256();
-    let mut idx_hi = _mm256_setzero_si256();
-
     for k in 0..4usize {
-        let pv = _mm256_set1_epi64x(*(c16.as_ptr().add(k * 4) as *const i64));
-        let kv = _mm256_set1_epi32(k as i32);
-        let cur_lo = sse8_rgb(base, 0, pv, keep, perm);
-        let cur_hi = sse8_rgb(base, 32, pv, keep, perm);
-        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
-        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
-        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
-        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
-        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
-        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
+        let pv = _mm256_set1_epi64x(*(pal.p8.as_ptr().add(k * 4) as *const i64));
+        let cv = _mm256_set1_epi32(pal.cst[k]);
+        // `hadd` leaves lanes in the permuted order the tail restores; every
+        // step from here to the index extraction is lane-wise, so it commutes.
+        let lo = _mm256_sub_epi32(
+            cv,
+            _mm256_hadd_epi32(_mm256_madd_epi16(p0, pv), _mm256_madd_epi16(p1, pv)),
+        );
+        let hi = _mm256_sub_epi32(
+            cv,
+            _mm256_hadd_epi32(_mm256_madd_epi16(p2, pv), _mm256_madd_epi16(p3, pv)),
+        );
+        best_lo = _mm256_min_epi32(best_lo, lo);
+        best_hi = _mm256_min_epi32(best_hi, hi);
     }
 
-    // The tail used to store 64 bytes of errors and 64 of indices and read them
-    // straight back in a scalar sixteen-iteration loop — vector code writing an
-    // array that scalar code immediately reloads, the store-forwarding shape
-    // this codebase has removed six times. Both halves fold in registers.
-
-    // Total error: eight lane-pairs, then the usual hadd chain. Each lane is at
-    // most 3*255^2 = 195_075, so the pairwise sum is under 390_150 and the total
-    // under 3.2M — nowhere near i32.
-    let s = _mm256_add_epi32(best_lo, best_hi);
+    // Total error: shift the two tag bits off (arithmetic — the relative term is
+    // signed, and `4*v + k` floors back to `v` for negative `v` too), add the
+    // per-pixel term back, then the usual hadd chain. The true SSE is at most
+    // 16*3*255^2 = 3.1M, nowhere near i32.
+    let s = _mm256_add_epi32(
+        psq,
+        _mm256_add_epi32(_mm256_srai_epi32(best_lo, 2), _mm256_srai_epi32(best_hi, 2)),
+    );
     let h = _mm256_hadd_epi32(s, s);
     let h = _mm256_hadd_epi32(h, h);
     let err = _mm_cvtsi128_si32(_mm_add_epi32(
         _mm256_castsi256_si128(h),
         _mm256_extracti128_si256(h, 1),
     ));
-    // The old loop bailed as soon as the RUNNING sum reached the limit. Every
-    // term is a sum of squares and so non-negative, which makes the running sum
-    // monotone — "some prefix reaches the limit" and "the total reaches the
-    // limit" are the same statement. One comparison decides it.
+    // Every term is a squared distance and so non-negative, which makes the
+    // running sum monotone — "some prefix reaches the limit" and "the total
+    // reaches the limit" are the same statement. One comparison decides it, and
+    // deciding it HERE means a losing candidate never pays for the index pack
+    // below, which is most of them on the lattice's contract-only moves.
     if err >= err_limit {
         return None;
     }
 
     // Pixel order is restored once, here, and only for the indices — the error
     // total above is a sum, so it is order-independent.
-    let idx_lo = _mm256_permutevar8x32_epi32(idx_lo, perm);
-    let idx_hi = _mm256_permutevar8x32_epi32(idx_hi, perm);
+    let tag = _mm256_set1_epi32(3);
+    let idx_lo = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_lo, tag), perm);
+    let idx_hi = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_hi, tag), perm);
 
     // Indices: 32-bit lanes in pixel order down to sixteen bytes of 0..=3.
     // `packs` saturates, which cannot bite on values that small.
@@ -610,7 +669,7 @@ unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
 /// [`bc1_palette_565_avx2`] without the final narrowing to bytes, since the
 /// intermediate `packus_epi32` result already IS the i16 layout wanted.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn bc1_palette_565_i16_avx2(c0: u16, c1: u16) -> [i16; 16] {
+pub(super) fn bc1_palette_565_i16_avx2(c0: u16, c1: u16) -> Bc1Pal {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
     unsafe { bc1_palette_565_i16_avx2_impl(c0, c1) }
@@ -618,16 +677,8 @@ pub(super) fn bc1_palette_565_i16_avx2(c0: u16, c1: u16) -> [i16; 16] {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn bc1_palette_565_i16_avx2_impl(c0: u16, c1: u16) -> [i16; 16] {
-    use std::arch::x86_64::*;
-    let p = bc1_palette_565_avx2(c0, c1);
-    // Widen the sixteen palette bytes back to i16 lanes.
-    let mut out = [0i16; 16];
-    _mm256_storeu_si256(
-        out.as_mut_ptr() as *mut __m256i,
-        _mm256_cvtepu8_epi16(p),
-    );
-    out
+unsafe fn bc1_palette_565_i16_avx2_impl(c0: u16, c1: u16) -> Bc1Pal {
+    prep_palette_bytes(bc1_palette_565_avx2(c0, c1))
 }
 
 /// [`bc1_fixed_sse_avx2`] that builds its own palette from the 565 words.

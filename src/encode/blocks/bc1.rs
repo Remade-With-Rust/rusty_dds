@@ -173,7 +173,7 @@ pub(super) fn bc1_palette_565(hi: u16, lo: u16) -> [[u8; 3]; 4] {
 
 /// Per-block widened palette for [`pack_bc1_scored_pre`]. Empty without SIMD.
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-pub(super) type Pal16 = [i16; 16];
+pub(super) type Pal16 = simd::Bc1Pal;
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 pub(super) type Pal16 = ();
 
@@ -183,7 +183,7 @@ pub(super) fn widen_pal(colors: &[[u8; 3]; 4]) -> Pal16 {
     if simd::has_avx2() {
         simd::bc1_widen_palette(colors)
     } else {
-        [0i16; 16]
+        simd::Bc1Pal::ZERO
     }
 }
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
