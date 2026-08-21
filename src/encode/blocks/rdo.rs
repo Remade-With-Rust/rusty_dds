@@ -431,19 +431,65 @@ fn build_table_dict(
     blocks_y: usize,
 ) -> (Vec<u32>, Vec<[u8; 8]>) {
     use std::collections::HashMap;
+    // Pass 1 is embarrassingly parallel and **byte-identical**, unlike pass 2.
+    // Its only shared state is the count histogram, and integer addition is
+    // order-independent, so per-strip histograms merge to the same map whatever
+    // order the strips finish in. The block vector is index-addressed by strip.
+    // The final ranking is a total order — count descending, then table value
+    // ascending — so the dictionary is identical too.
+    //
+    // This is `encode_bc1_bytes` (1,173 instructions) plus a `gather_block` for
+    // every block in the image, and it ran on one thread.
+    let nblocks = blocks_x * blocks_y;
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, blocks_y.max(1));
+    let mut strips: Vec<(usize, usize)> = Vec::with_capacity(workers);
+    let base = blocks_y / workers;
+    let extra = blocks_y % workers;
+    let mut start = 0;
+    for wi in 0..workers {
+        let len = base + usize::from(wi < extra);
+        strips.push((start, start + len));
+        start += len;
+    }
+    let q = super::QUALITY.with(|c| c.get());
+    let mut parts: Vec<(Vec<[u8; 8]>, HashMap<u32, u32>)> = Vec::with_capacity(workers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for &(by0, by1) in &strips {
+            handles.push(scope.spawn(move || {
+                super::with_quality(q, || {
+                    let mut local = Vec::with_capacity((by1 - by0) * blocks_x);
+                    let mut lc: HashMap<u32, u32> = HashMap::new();
+                    for by in by0..by1 {
+                        for bx in 0..blocks_x {
+                            let pixels = gather_block(rgba, w, h, bx, by);
+                            let blk = encode_bc1_bytes(pixels);
+                            let c0 = u16::from_le_bytes([blk[0], blk[1]]);
+                            let c1 = u16::from_le_bytes([blk[2], blk[3]]);
+                            if c0 > c1 {
+                                let t = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
+                                *lc.entry(t).or_insert(0) += 1;
+                            }
+                            local.push(blk);
+                        }
+                    }
+                    (local, lc)
+                })
+            }));
+        }
+        for hnd in handles {
+            parts.push(hnd.join().expect("rdo pass-1 worker panicked"));
+        }
+    });
     let mut counts: HashMap<u32, u32> = HashMap::new();
-    let mut blocks = Vec::with_capacity(blocks_x * blocks_y);
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let pixels = gather_block(rgba, w, h, bx, by);
-            let blk = encode_bc1_bytes(pixels);
-            let c0 = u16::from_le_bytes([blk[0], blk[1]]);
-            let c1 = u16::from_le_bytes([blk[2], blk[3]]);
-            if c0 > c1 {
-                let t = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
-                *counts.entry(t).or_insert(0) += 1;
-            }
-            blocks.push(blk);
+    let mut blocks = Vec::with_capacity(nblocks);
+    for (local, lc) in parts {
+        blocks.extend_from_slice(&local);
+        for (t, n) in lc {
+            *counts.entry(t).or_insert(0) += n;
         }
     }
     let mut v: Vec<(u32, u32)> = counts.into_iter().collect();
