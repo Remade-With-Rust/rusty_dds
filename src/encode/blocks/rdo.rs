@@ -317,6 +317,12 @@ fn bc1_colors_packed(block: &[u8; 8]) -> ([[u8; 3]; 4], [u32; 4]) {
     let c1 = u16::from_le_bytes([block[2], block[3]]);
     let a = from_565(c0);
     let b = from_565(c1);
+    // Vectorising this palette build was REFUTED and the kernel removed. Doing
+    // all six divisions by 3 in one `mulhi_epu16` — exact, since the dividends
+    // are at most 765 and `21846/65536` errs by 0.0082 there against a largest
+    // fractional part of 2/3 — measured **135 -> 178 instructions**. Building the
+    // vectors from `[u8; 3]` costs six inserts and two stores back, more than the
+    // six divisions it removes.
     let colors = if c0 > c1 {
         [a, b, lerp_rgb::<2, 1>(a, b), lerp_rgb::<1, 2>(a, b)]
     } else {
