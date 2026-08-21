@@ -730,7 +730,11 @@ pub(super) fn bc1_sse(pixels: &[[u8; 4]; 16], block: &[u8]) -> i32 {
 }
 
 pub fn encode_bc2(pixels: [[u8; 4]; 16], out: &mut [u8]) {
-    out[..16].fill(0);
+    // One range check for the whole block instead of one per store. Narrowing
+    // to the sixteen bytes a BC2 block occupies gives the compiler a length it
+    // can reason about, after which every index below is provably inside it.
+    let out = &mut out[..16];
+    out.fill(0);
     for i in 0..16 {
         let a = pixels[i][3] >> 4;
         let byte = i / 2;
@@ -748,6 +752,9 @@ pub fn encode_bc3(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     // min/max-only fast path: quality-monotone (same dual seed, candidates
     // only added under strict `<`), and CryTIF-style UI content is
     // alpha-gradient-heavy.
+    //
+    // Narrowed once, as in `encode_bc2`: both halves are then provably inside.
+    let out = &mut out[..16];
     out[..8].copy_from_slice(&encode_alpha_block_unsigned(super::alpha::alpha_channel(&pixels)));
     out[8..16].copy_from_slice(&encode_bc1_bytes(pixels));
 }
