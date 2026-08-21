@@ -177,15 +177,18 @@ fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 
         // sixty-four bounds checks — despite this comment already claiming row
         // copies. Measured at 294 instructions a call, more than `palette_mode6`
         // and `fit_indices_mode6` together.
-        let mut pixels = [[0u8; 4]; 16];
+        // Four 16-byte row copies into a flat buffer, then reinterpret. The
+        // previous form still rebuilt the array four pixels at a time, at 249
+        // instructions to move 64 contiguous bytes.
+        let mut flat = [0u8; 64];
         for row in 0..4 {
             let src = ((y0 + row) * w + x0) * 4;
-            let chunk = &rgba[src..src + 16];
-            for col in 0..4 {
-                pixels[row * 4 + col].copy_from_slice(&chunk[col * 4..col * 4 + 4]);
-            }
+            flat[row * 16..row * 16 + 16].copy_from_slice(&rgba[src..src + 16]);
         }
-        return pixels;
+        // SAFETY: `[[u8; 4]; 16]` and `[u8; 64]` have identical size, alignment
+        // (1) and layout — arrays are laid out contiguously with no padding — so
+        // this is a pure reinterpretation of initialised bytes.
+        return unsafe { std::mem::transmute::<[u8; 64], [[u8; 4]; 16]>(flat) };
     }
     let mut pixels = [[0u8, 0, 0, 255]; 16];
     for row in 0..4 {

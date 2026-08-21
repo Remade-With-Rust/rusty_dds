@@ -609,6 +609,61 @@ unsafe fn bc1_chan_sse_avx2_impl(px: &[u8; 16], cols: [u8; 4], table: u32) -> i3
     ))
 }
 
+
+/// The BC1 LS solve: six `(A*b0 - B*b1) / det` in four vector ops.
+///
+/// `refit_with_ls` is BC1 RDO's largest function, and its solve performs **six
+/// float divisions** per call — twelve multiplies, six subtracts and six
+/// divides across three channels and two endpoints.
+///
+/// Vectorised it is two `mul`, two `mul`, two `sub` and **two `div`**, and it is
+/// bit-identical for free: IEEE 754 defines these lane-wise, so `divps` gives
+/// each lane exactly what a scalar `div` would. Rounding and clamping stay
+/// scalar, because Rust's `f32::round` is half-away-from-zero and no SSE
+/// rounding mode matches it.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_ls_solve(
+    b0: [f32; 4],
+    b1: [f32; 4],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> ([f32; 4], [f32; 4]) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_ls_solve_impl(b0, b1, a00, a01, a11, det) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_ls_solve_impl(
+    b0: [f32; 4],
+    b1: [f32; 4],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> ([f32; 4], [f32; 4]) {
+    use std::arch::x86_64::*;
+    let v0 = _mm_loadu_ps(b0.as_ptr());
+    let v1 = _mm_loadu_ps(b1.as_ptr());
+    let dv = _mm_set1_ps(det);
+    let e0 = _mm_div_ps(
+        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a11), v0), _mm_mul_ps(_mm_set1_ps(a01), v1)),
+        dv,
+    );
+    let e1 = _mm_div_ps(
+        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
+        dv,
+    );
+    let mut o0 = [0f32; 4];
+    let mut o1 = [0f32; 4];
+    _mm_storeu_ps(o0.as_mut_ptr(), e0);
+    _mm_storeu_ps(o1.as_mut_ptr(), e1);
+    (o0, o1)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -684,6 +739,40 @@ mod oracle {
                 want += d * d;
             }
             assert_eq!(got, want, "case {case}");
+        }
+    }
+
+    /// Bit-identical to the scalar solve, lane by lane.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn bc1_ls_solve_matches_scalar_bitwise() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x501e_1234_abcd_5678u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut f = move || (next() as u32 as f32) / 1.0e5 - 20_000.0;
+        for case in 0..60_000u32 {
+            let b0 = [f(), f(), f(), f()];
+            let b1 = [f(), f(), f(), f()];
+            let (a00, a01, a11) = (f(), f(), f());
+            let det = if case == 0 { 1.0 } else { f() };
+            if det == 0.0 || !det.is_finite() {
+                continue;
+            }
+            let (g0, g1) = bc1_ls_solve(b0, b1, a00, a01, a11, det);
+            for c in 0..4 {
+                let w0 = (a11 * b0[c] - a01 * b1[c]) / det;
+                let w1 = (a00 * b1[c] - a01 * b0[c]) / det;
+                assert_eq!(g0[c].to_bits(), w0.to_bits(), "case {case} e0[{c}]");
+                assert_eq!(g1[c].to_bits(), w1.to_bits(), "case {case} e1[{c}]");
+            }
         }
     }
 

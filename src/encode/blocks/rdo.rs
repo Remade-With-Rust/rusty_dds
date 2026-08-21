@@ -475,21 +475,33 @@ fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8
     // 59% of BC1 RDO's instruction cost by the deterministic model. The kernel
     // keeps one pixel per iteration and separate mul/add, so every lane's
     // accumulation order and rounding match this loop exactly.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    let (b0, b1) = if simd::has_avx2() {
-        let (v0, v1) = simd::ls_accum_sse(pixels, &ls.uw);
-        ([v0[0], v0[1], v0[2]], [v1[0], v1[1], v1[2]])
-    } else {
-        ls_accum_scalar(pixels, &ls.uw)
-    };
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-    let (b0, b1) = ls_accum_scalar(pixels, &ls.uw);
     let (a00, a01, a11, det) = (ls.a00, ls.a01, ls.a11, ls.det);
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
-    for c in 0..3 {
-        e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 255.0) as u8;
-        e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 255.0) as u8;
+    // The solve is six float divisions scalar; vectorised it is two `divps`,
+    // and bit-identical for free because IEEE defines these lane-wise. Rounding
+    // stays scalar — Rust's `round` is half-away-from-zero and no SSE rounding
+    // mode matches it.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let done = if simd::has_avx2() {
+        let (v0, v1) = simd::ls_accum_sse(pixels, &ls.uw);
+        let (s0, s1) = simd::bc1_ls_solve(v0, v1, a00, a01, a11, det);
+        for c in 0..3 {
+            e0[c] = s0[c].round().clamp(0.0, 255.0) as u8;
+            e1[c] = s1[c].round().clamp(0.0, 255.0) as u8;
+        }
+        true
+    } else {
+        false
+    };
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let done = false;
+    if !done {
+        let (b0, b1) = ls_accum_scalar(pixels, &ls.uw);
+        for c in 0..3 {
+            e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 255.0) as u8;
+            e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 255.0) as u8;
+        }
     }
     let q0 = to_565(e0);
     let q1 = to_565(e1);
