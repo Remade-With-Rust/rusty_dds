@@ -13,6 +13,14 @@ pub fn encode_bc1(pixels: [[u8; 4]; 16], out: &mut [u8]) {
 }
 
 pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
+    // A single fused walk producing BOTH reductions was tried here and REFUTED:
+    // `extrema_opaque` and `channel_minmax_rgb` do issue the same four loads
+    // over the same sixty-four bytes, but that is all they share — the
+    // reductions are disjoint, so the fused kernel measured 75 instructions
+    // against 51 + 23 separate, and the wider return plus the extra symbol cost
+    // +120 across the tree. Both run ONCE A BLOCK, so the whole prize was four
+    // L1 loads a block, against a lattice that fits eleven times a block.
+    // Fusing two once-per-block walks cannot matter at this scale.
     let (max_c, min_c) = extrema_opaque(&pixels);
     // Fused pack+score: the index fit's per-pixel argmin distance IS the SSE
     // contribution, so the old pack-then-bc1_sse re-walk is pure recompute.
@@ -151,8 +159,7 @@ pub(super) fn pack_bc1_scored_565(
     // `pack_bc1_scored`. Both come from the 565 words directly here.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        let pal16 = simd::bc1_palette_565_i16_avx2(hi, lo);
-        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, &pal16, err_limit)?;
+        let (table, err) = simd::bc1_fit_565_avx2(pixels, hi, lo, err_limit)?;
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
@@ -331,51 +338,49 @@ pub(super) fn pack_bc1_scored(
     if max565 == min565 {
         max565 = max565.saturating_add(1);
     }
-    let (c0, c1, colors, punch) = if max565 > min565 {
-        let ca = from_565(max565);
-        let cb = from_565(min565);
-        (
-            max565,
-            min565,
-            [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)],
-            false,
-        )
+    // Endpoint ORDER first; the byte palette is built below, and only if
+    // something is going to read it.
+    //
+    // All three arms agreed on `from_565(c0)` and `from_565(c1)` once the pair
+    // was ordered — the three-way split was over the ORDERING, not the palette —
+    // so the build hoists out and the arms reduce to picking `(c0, c1)`.
+    let (c0, c1, punch) = if max565 > min565 {
+        (max565, min565, false)
     } else if max565 < min565 {
         // 565 quantization inverted the seed order: stored c0 > c1 still
         // decodes as 4-COLOR mode, so fit indices against the decode-true
         // 4-color palette. (The old code fitted a 3-color+black palette here
         // that no decoder would ever reconstruct.)
-        let ca = from_565(min565);
-        let cb = from_565(max565);
-        (
-            min565,
-            max565,
-            [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)],
-            false,
-        )
+        (min565, max565, false)
     } else {
-        // Equal even after the +1 nudge (0xFFFF): true 3-color mode.
-        let ca = from_565(min565);
-        let cb = from_565(max565);
-        (
-            min565,
-            max565,
-            [ca, cb, lerp_rgb::<1, 1>(ca, cb), [0, 0, 0]],
-            true,
-        )
+        // Equal even after the +1 nudge: true 3-color mode. The nudge has
+        // already separated the pair unless both are 0xFFFF, so this is the
+        // all-white-565 block and nothing else.
+        (min565, max565, true)
     };
     // The 4-colour branches just built `[ca, cb, lerp<2,1>, lerp<1,2>]` — which
     // is `bc1_palette_565(c0, c1)` — and the fit kernel would immediately widen
     // it to i16. Both come straight from the 565 words on the vector path, so
-    // the scalar palette above is only consumed by the punch branch and the
-    // scalar fallback.
+    // the scalar palette is only consumed by the punch branch and the scalar
+    // fallback — so it is now built AFTER this dispatch rather than before it.
+    // It was about 77 instructions producing a value nothing reads on every one
+    // of the roughly six calls a block that take the vector path.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if !punch && simd::has_avx2() {
-        let pal16 = simd::bc1_palette_565_i16_avx2(c0, c1);
-        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, &pal16, err_limit)?;
+        let (table, err) = simd::bc1_fit_565_avx2(pixels, c0, c1, err_limit)?;
         let v = (c0 as u64) | ((c1 as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
+    // Reached only by the punch branch and the scalar fallback.
+    let colors = {
+        let ca = from_565(c0);
+        let cb = from_565(c1);
+        if punch {
+            [ca, cb, lerp_rgb::<1, 1>(ca, cb), [0, 0, 0]]
+        } else {
+            [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)]
+        }
+    };
     let (table, err) = if punch {
         let mut table = 0u32;
         let mut err = 0i32;

@@ -222,9 +222,26 @@ impl Bc1Pal {
 #[target_feature(enable = "avx2")]
 unsafe fn prep_palette_bytes(v: std::arch::x86_64::__m128i) -> Bc1Pal {
     use std::arch::x86_64::*;
-    let w = _mm256_cvtepu8_epi16(v);
+    let (p8v, cst4) = prep_palette_regs(v);
     let mut p8 = [0i16; 16];
-    _mm256_storeu_si256(p8.as_mut_ptr() as *mut __m256i, _mm256_slli_epi16(w, 3));
+    _mm256_storeu_si256(p8.as_mut_ptr() as *mut __m256i, p8v);
+    let mut cst = [0i32; 4];
+    _mm_storeu_si128(cst.as_mut_ptr() as *mut __m128i, cst4);
+    Bc1Pal { p8, cst }
+}
+
+/// The prepared palette as REGISTERS: `(8*q broadcast-ready, 4*sum(q^2) + k)`.
+///
+/// Everything the fit needs, without touching memory. [`Bc1Pal`] is this same
+/// pair spilled to a struct, which only the RDO window — reusing one palette
+/// across many fits — has a reason to do.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn prep_palette_regs(
+    v: std::arch::x86_64::__m128i,
+) -> (std::arch::x86_64::__m256i, std::arch::x86_64::__m128i) {
+    use std::arch::x86_64::*;
+    let w = _mm256_cvtepu8_epi16(v);
 
     // `sum q^2` per entry: `madd` folds adjacent words, so lane 2k holds
     // R^2+G^2 and lane 2k+1 holds B^2 (the alpha byte is zero by construction),
@@ -241,12 +258,10 @@ unsafe fn prep_palette_bytes(v: std::arch::x86_64::__m128i) -> Bc1Pal {
         _mm256_castsi256_si128(hp),
         _mm256_extracti128_si256(hp, 1),
     );
-    let mut cst = [0i32; 4];
-    _mm_storeu_si128(
-        cst.as_mut_ptr() as *mut __m128i,
+    (
+        _mm256_slli_epi16(w, 3),
         _mm_add_epi32(_mm_slli_epi32(q4, 2), _mm_setr_epi32(0, 1, 2, 3)),
-    );
-    Bc1Pal { p8, cst }
+    )
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -314,11 +329,61 @@ unsafe fn bc1_fit_4color_avx2_impl(
     bc1_fit_4color_pre_avx2_impl(pixels, &pal, err_limit)
 }
 
+/// The 565 fit with the palette built in registers and never spilled.
+///
+/// `pack_bc1_scored` and the lattice both hold two 565 words, not a palette, so
+/// the prepared form has no reason to exist in memory for them: it is built,
+/// used and discarded inside one call. The RDO window is the opposite case — it
+/// reuses one palette about fourteen times a block — so it keeps
+/// [`bc1_fit_4color_pre_avx2`] and pays the round trip once instead of fourteen
+/// times.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_fit_565_avx2(
+    pixels: &[[u8; 4]; 16],
+    c0: u16,
+    c1: u16,
+    err_limit: i32,
+) -> Option<(u32, i32)> {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_fit_565_avx2_impl(pixels, c0, c1, err_limit) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_fit_565_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    c0: u16,
+    c1: u16,
+    err_limit: i32,
+) -> Option<(u32, i32)> {
+    let (p8, cst4) = prep_palette_regs(bc1_palette_565_avx2(c0, c1));
+    bc1_fit_core_avx2(pixels, p8, cst4, err_limit)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn bc1_fit_4color_pre_avx2_impl(
     pixels: &[[u8; 4]; 16],
     pal: &Bc1Pal,
+    err_limit: i32,
+) -> Option<(u32, i32)> {
+    use std::arch::x86_64::*;
+    bc1_fit_core_avx2(
+        pixels,
+        _mm256_loadu_si256(pal.p8.as_ptr() as *const __m256i),
+        _mm_loadu_si128(pal.cst.as_ptr() as *const __m128i),
+        err_limit,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_fit_core_avx2(
+    pixels: &[[u8; 4]; 16],
+    p8: std::arch::x86_64::__m256i,
+    cst4: std::arch::x86_64::__m128i,
     err_limit: i32,
 ) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
@@ -354,22 +419,40 @@ unsafe fn bc1_fit_4color_pre_avx2_impl(
     // with it; `blendv` is two uops on Intel where `min` and `sub` are one.
     let mut best_lo = _mm256_set1_epi32(i32::MAX);
     let mut best_hi = _mm256_set1_epi32(i32::MAX);
-    for k in 0..4usize {
-        let pv = _mm256_set1_epi64x(*(pal.p8.as_ptr().add(k * 4) as *const i64));
-        let cv = _mm256_set1_epi32(pal.cst[k]);
-        // `hadd` leaves lanes in the permuted order the tail restores; every
-        // step from here to the index extraction is lane-wise, so it commutes.
-        let lo = _mm256_sub_epi32(
-            cv,
-            _mm256_hadd_epi32(_mm256_madd_epi16(p0, pv), _mm256_madd_epi16(p1, pv)),
-        );
-        let hi = _mm256_sub_epi32(
-            cv,
-            _mm256_hadd_epi32(_mm256_madd_epi16(p2, pv), _mm256_madd_epi16(p3, pv)),
-        );
-        best_lo = _mm256_min_epi32(best_lo, lo);
-        best_hi = _mm256_min_epi32(best_hi, hi);
+    // Unrolled explicitly so both operands are lifted from REGISTERS by a
+    // permute with an IMMEDIATE.
+    //
+    // Written as `for k in 0..4`, the index vectors are functions of `k`, and
+    // LLVM built them at runtime rather than folding them — the core measured
+    // 469 instructions that way against 109 for the loop it replaced. With `k`
+    // a literal, `vpermq` broadcasts 64-bit lane k (which is exactly entry k,
+    // since an entry is i16 lanes 4k..4k+3) and `pshufd` does the same for the
+    // constant, both on an immediate, both one instruction, neither touching
+    // memory.
+    macro_rules! step {
+        ($k:literal) => {{
+            const IMM: i32 = $k | ($k << 2) | ($k << 4) | ($k << 6);
+            let pv = _mm256_permute4x64_epi64::<IMM>(p8);
+            let cv = _mm256_broadcastd_epi32(_mm_shuffle_epi32::<IMM>(cst4));
+            // `hadd` leaves lanes in the permuted order the tail restores;
+            // every step from here to the index extraction is lane-wise, so it
+            // commutes.
+            let lo = _mm256_sub_epi32(
+                cv,
+                _mm256_hadd_epi32(_mm256_madd_epi16(p0, pv), _mm256_madd_epi16(p1, pv)),
+            );
+            let hi = _mm256_sub_epi32(
+                cv,
+                _mm256_hadd_epi32(_mm256_madd_epi16(p2, pv), _mm256_madd_epi16(p3, pv)),
+            );
+            best_lo = _mm256_min_epi32(best_lo, lo);
+            best_hi = _mm256_min_epi32(best_hi, hi);
+        }};
     }
+    step!(0);
+    step!(1);
+    step!(2);
+    step!(3);
 
     // Total error: shift the two tag bits off (arithmetic — the relative term is
     // signed, and `4*v + k` floors back to `v` for negative `v` too), add the
@@ -1777,6 +1860,7 @@ unsafe fn extrema_opaque_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3])
     let (mx, mn) = (pixels[imax], pixels[imin]);
     ([mx[0], mx[1], mx[2]], [mn[0], mn[1], mn[2]])
 }
+
 
 
 /// Per-channel `(max, min)` over the block's sixteen pixels.

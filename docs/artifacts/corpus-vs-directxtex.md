@@ -20,35 +20,35 @@
   },
   "speed": {
     "directxtex_faster": 0,
-    "rusty_faster": 22,
-    "tie": 2
+    "rusty_faster": 19,
+    "tie": 5
   }
 }
 ```
 
 | Case | Role | rusty µs | DX µs | Ratio | rusty PSNR | DX PSNR | Δ | Speed | Quality |
 |------|------|----------|-------|-------|------------|---------|---|-------|----------|
-| Bricks097_Color__bc1 | albedo | 17366 | 17738 | 0.979 | 34.90 | 34.28 | +0.62 | speed_tie | rusty_higher_psnr |
-| Bricks097_Color__bc7 | albedo | 41477 | 5008640 | 0.008 | 40.68 | 39.85 | +0.84 | rusty_faster | rusty_higher_psnr |
-| Bricks097_NormalGL__bc5u | normal | 24338 | 30449 | 0.799 | 44.42 | 43.81 | +0.60 | rusty_faster | rusty_higher_psnr |
-| Bricks097_NormalGL__bc5s | normal | 22467 | 33648 | 0.668 | 44.32 | 43.92 | +0.40 | rusty_faster | rusty_higher_psnr |
-| Bricks097_Roughness__bc4u | mask | 12487 | 14247 | 0.876 | 43.01 | 42.42 | +0.59 | rusty_faster | rusty_higher_psnr |
-| Bricks097_Roughness__bc4s | mask | 11167 | 18013 | 0.620 | 43.00 | 42.54 | +0.45 | rusty_faster | rusty_higher_psnr |
-| Metal063_Color__bc1 | albedo | 37305 | 49092 | 0.760 | 40.23 | 38.93 | +1.30 | rusty_faster | rusty_higher_psnr |
-| Metal063_Color__bc7 | albedo | 83822 | 8380820 | 0.010 | 47.42 | 47.00 | +0.42 | rusty_faster | rusty_higher_psnr |
-| Metal063_NormalGL__bc5u | normal | 18043 | 31303 | 0.576 | ∞ | 99.04 | — | rusty_faster | rusty_higher_psnr |
-| Metal063_NormalGL__bc5s | normal | 5924 | 27072 | 0.219 | 51.14 | 51.14 | -0.00 | rusty_faster | tie |
-| Metal063_Roughness__bc4u | mask | 18267 | 21994 | 0.831 | 46.12 | 45.36 | +0.76 | rusty_faster | rusty_higher_psnr |
-| Metal063_Roughness__bc4s | mask | 13870 | 22778 | 0.609 | 46.12 | 45.59 | +0.53 | rusty_faster | rusty_higher_psnr |
-| Rock064_Color__bc1 | albedo | 30473 | 31520 | 0.967 | 34.09 | 32.81 | +1.28 | speed_tie | rusty_higher_psnr |
-| Rock064_Color__bc7 | albedo | 80195 | 10902000 | 0.007 | 39.48 | 38.28 | +1.20 | rusty_faster | rusty_higher_psnr |
-| Rock064_NormalGL__bc5u | normal | 32212 | 45276 | 0.711 | 46.76 | 46.02 | +0.74 | rusty_faster | rusty_higher_psnr |
-| Rock064_NormalGL__bc5s | normal | 27458 | 45390 | 0.605 | 46.72 | 46.19 | +0.53 | rusty_faster | rusty_higher_psnr |
-| Rock064_Roughness__bc4u | mask | 17814 | 25580 | 0.696 | 47.05 | 46.20 | +0.86 | rusty_faster | rusty_higher_psnr |
-| Rock064_Roughness__bc4s | mask | 15343 | 25474 | 0.602 | 46.99 | 46.44 | +0.56 | rusty_faster | rusty_higher_psnr |
-| Wood095_Color__bc1 | albedo | 12608 | 14183 | 0.889 | 41.70 | 40.41 | +1.29 | rusty_faster | rusty_higher_psnr |
-| Wood095_Color__bc7 | albedo | 31130 | 4656610 | 0.007 | 49.28 | 48.56 | +0.72 | rusty_faster | rusty_higher_psnr |
-| Wood095_NormalGL__bc5u | normal | 11918 | 21571 | 0.553 | 53.61 | 52.02 | +1.59 | rusty_faster | rusty_higher_psnr |
-| Wood095_NormalGL__bc5s | normal | 11274 | 22031 | 0.512 | 52.18 | 52.69 | -0.51 | rusty_faster | directxtex_higher_psnr |
-| Wood095_Roughness__bc4u | mask | 6274 | 12094 | 0.519 | 54.53 | 52.63 | +1.89 | rusty_faster | rusty_higher_psnr |
-| Wood095_Roughness__bc4s | mask | 5487 | 12566 | 0.437 | 54.53 | 54.13 | +0.40 | rusty_faster | rusty_higher_psnr |
+| Bricks097_Color__bc1 | albedo | 16980 | 17518 | 0.969 | 34.90 | 34.28 | +0.62 | speed_tie | rusty_higher_psnr |
+| Bricks097_Color__bc7 | albedo | 42846 | 5401320 | 0.008 | 40.68 | 39.85 | +0.84 | rusty_faster | rusty_higher_psnr |
+| Bricks097_NormalGL__bc5u | normal | 17261 | 21919 | 0.787 | 44.42 | 43.81 | +0.60 | rusty_faster | rusty_higher_psnr |
+| Bricks097_NormalGL__bc5s | normal | 18673 | 23954 | 0.780 | 44.32 | 43.92 | +0.40 | rusty_faster | rusty_higher_psnr |
+| Bricks097_Roughness__bc4u | mask | 14816 | 19688 | 0.753 | 43.01 | 42.42 | +0.59 | rusty_faster | rusty_higher_psnr |
+| Bricks097_Roughness__bc4s | mask | 12756 | 12720 | 1.003 | 43.00 | 42.54 | +0.45 | speed_tie | rusty_higher_psnr |
+| Metal063_Color__bc1 | albedo | 29270 | 30589 | 0.957 | 40.23 | 38.93 | +1.30 | speed_tie | rusty_higher_psnr |
+| Metal063_Color__bc7 | albedo | 70348 | 9325390 | 0.008 | 47.42 | 47.00 | +0.42 | rusty_faster | rusty_higher_psnr |
+| Metal063_NormalGL__bc5u | normal | 21225 | 36090 | 0.588 | ∞ | 99.04 | — | rusty_faster | rusty_higher_psnr |
+| Metal063_NormalGL__bc5s | normal | 6697 | 30870 | 0.217 | 51.14 | 51.14 | -0.00 | rusty_faster | tie |
+| Metal063_Roughness__bc4u | mask | 18628 | 25482 | 0.731 | 46.12 | 45.36 | +0.76 | rusty_faster | rusty_higher_psnr |
+| Metal063_Roughness__bc4s | mask | 17497 | 25664 | 0.682 | 46.12 | 45.59 | +0.53 | rusty_faster | rusty_higher_psnr |
+| Rock064_Color__bc1 | albedo | 37132 | 35725 | 1.039 | 34.09 | 32.81 | +1.28 | speed_tie | rusty_higher_psnr |
+| Rock064_Color__bc7 | albedo | 95338 | 11242000 | 0.008 | 39.48 | 38.28 | +1.20 | rusty_faster | rusty_higher_psnr |
+| Rock064_NormalGL__bc5u | normal | 47344 | 47319 | 1.001 | 46.76 | 46.02 | +0.74 | speed_tie | rusty_higher_psnr |
+| Rock064_NormalGL__bc5s | normal | 30374 | 49921 | 0.608 | 46.72 | 46.19 | +0.53 | rusty_faster | rusty_higher_psnr |
+| Rock064_Roughness__bc4u | mask | 19299 | 25170 | 0.767 | 47.05 | 46.20 | +0.86 | rusty_faster | rusty_higher_psnr |
+| Rock064_Roughness__bc4s | mask | 15279 | 26470 | 0.577 | 46.99 | 46.44 | +0.56 | rusty_faster | rusty_higher_psnr |
+| Wood095_Color__bc1 | albedo | 12557 | 13756 | 0.913 | 41.70 | 40.41 | +1.29 | rusty_faster | rusty_higher_psnr |
+| Wood095_Color__bc7 | albedo | 30762 | 4693850 | 0.007 | 49.28 | 48.56 | +0.72 | rusty_faster | rusty_higher_psnr |
+| Wood095_NormalGL__bc5u | normal | 12522 | 21788 | 0.575 | 53.61 | 52.02 | +1.59 | rusty_faster | rusty_higher_psnr |
+| Wood095_NormalGL__bc5s | normal | 11240 | 22267 | 0.505 | 52.18 | 52.69 | -0.51 | rusty_faster | directxtex_higher_psnr |
+| Wood095_Roughness__bc4u | mask | 6651 | 12021 | 0.553 | 54.53 | 52.63 | +1.89 | rusty_faster | rusty_higher_psnr |
+| Wood095_Roughness__bc4s | mask | 5348 | 12270 | 0.436 | 54.53 | 54.13 | +0.40 | rusty_faster | rusty_higher_psnr |
