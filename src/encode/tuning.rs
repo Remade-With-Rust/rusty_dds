@@ -16,8 +16,22 @@
 pub(crate) const BC7_M1_MIN_ERR: i64 = 0;
 
 /// BC4/BC5 **unsigned** windowed endpoint sweep. Off: the unsigned path did not
-/// pay for the window in the corpus sweep (the signed path did).
+/// pay for the window in the corpus sweep.
 pub(crate) const BC45_UNSIGNED_WINDOW: bool = false;
+
+/// BC4/BC5 **signed** windowed endpoint sweep. Off, for the same reason its
+/// unsigned twin is off — and the signed case is the more expensive of the two.
+///
+/// Measured serial against DirectXTex on the corpus, this sweep cost **3-5x the
+/// encode time for 0.05-0.61 dB**, on maps we already led. Turning it off takes
+/// the seven signed cases from ratios of 3.6-7.9 down to 0.8-1.9, and six of the
+/// eight still hold higher PSNR than DirectXTex without it.
+///
+/// The exception, recorded so it is not rediscovered: `Wood095_NormalGL` bc5s
+/// goes from a tie (-0.09 dB, inside the 0.25 dB deadband) to a loss (-0.51 dB).
+/// That is the whole price. Opt back in with `RUSTY_DDS_BC45S_WINDOW=1` under
+/// the `tuning` feature.
+pub(crate) const BC45_SIGNED_WINDOW: bool = false;
 
 /// BC2/BC3 alpha endpoint selection search (worth +1.8..+3.2 dB on the CryTIF set).
 pub(crate) const ALPHA_SELECT: bool = true;
@@ -39,6 +53,10 @@ mod imp {
     #[inline(always)]
     pub(crate) fn unsigned_window_enabled() -> bool {
         BC45_UNSIGNED_WINDOW
+    }
+    #[inline(always)]
+    pub(crate) fn signed_window_enabled() -> bool {
+        BC45_SIGNED_WINDOW
     }
     #[inline(always)]
     pub(crate) fn alpha_sel_enabled() -> bool {
@@ -78,6 +96,15 @@ mod imp {
             std::env::var("RUSTY_DDS_BC45U_WINDOW")
                 .map(|v| v == "1")
                 .unwrap_or(BC45_UNSIGNED_WINDOW)
+        })
+    }
+
+    pub(crate) fn signed_window_enabled() -> bool {
+        static E: OnceLock<bool> = OnceLock::new();
+        *E.get_or_init(|| {
+            std::env::var("RUSTY_DDS_BC45S_WINDOW")
+                .map(|v| v == "1")
+                .unwrap_or(BC45_SIGNED_WINDOW)
         })
     }
 

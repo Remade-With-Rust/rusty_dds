@@ -93,9 +93,15 @@ const QUALITY_HASHES: &[(&str, u64)] = &[
     ("bc2", 0x59c312d27ed5fb72),
     ("bc3", 0x012a397f35276966),
     ("bc4u", 0x9da20b575b3beeee),
-    ("bc4s", 0xe6eff0f829220b71),
+    // bc4s/bc5s moved when BC45_SIGNED_WINDOW was defaulted OFF. Evidence,
+    // measured serial against DirectXTex on the corpus: the sweep cost 3-5x the
+    // encode time for 0.05-0.61 dB. Shipped config now runs all eight signed
+    // cases FASTER than DirectXTex (ratios 0.099-0.259, from 3.6-7.9), and the
+    // corpus quality table goes 22/0/2 -> 22 win / 1 loss / 1 tie: only
+    // Wood095_NormalGL bc5s flips, from a tie (-0.09 dB) to -0.51 dB.
+    ("bc4s", 0x2d8096f8384cd6d1),
     ("bc5u", 0xc94a0b212743697b),
-    ("bc5s", 0xeb9ead77d6c359d9),
+    ("bc5s", 0x699bd633cf3503f9),
     ("bc7", 0x8c62727a6428b949),
     ("rgba8", 0xb4a9f13d78f8f76a),
     ("bgra8", 0x969a5dcee4bd125a),

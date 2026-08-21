@@ -45,13 +45,26 @@ Measured on the corpus, serial, signed sweep forced off:
 | Bricks097 Roughness bc4s | 5.490      | **1.858**     | -0.05       |
 | Bricks097 NormalGL bc5s  | 5.286      | **1.796**     | -0.05       |
 | Rock064 NormalGL bc5s    | 5.137      | **1.515**     | -0.17       |
-| Wood095 Roughness bc4s   | 3.620      | **0.822**     | -0.61       |
-| Metal063 NormalGL bc5s   | 0.663      | **0.309**     | 0.00        |
+
+Two further cases — `Wood095 Roughness bc4s` (3.620 → 0.822) and
+`Metal063 NormalGL bc5s` (0.663 → 0.309) — are **fully resolved** by the same
+switch and are no longer tracked here.
 
 **3-5x the CPU for 0.05-0.61 dB.** And without it we STILL hold higher PSNR than
 DirectXTex on 6 of 8 — only Wood095 NormalGL flips (-0.51 dB). We are spending
 several times the encode budget to extend a lead we already have, on exactly the
 grounds the unsigned path rejected.
+
+## STATUS: item 1 is DONE
+
+`BC45_SIGNED_WINDOW` now defaults off. Shipped-config result: **all eight signed
+cases run FASTER than DirectXTex**, ratios 0.099-0.259 where they were 3.6-7.9.
+Corpus quality moved 22/0/2 to **22 win / 1 loss / 1 tie**.
+
+The remaining work is the six rows above — they are still **1.18-1.86x slower
+per core** with the sweep gone, so that slowness is in the *presweep* path
+(`encode_alpha_block_signed_presweep`: LS + ±2 search, `consider_alpha_s`,
+`refine_alpha_s`), not in the sweep. Items 5-13 below are that path.
 
 ---
 

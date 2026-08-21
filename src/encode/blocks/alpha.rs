@@ -556,7 +556,10 @@ pub(super) fn encode_alpha_block_signed(samples: [u8; 16]) -> [u8; 8] {
     // Wood's ceiling gain at ~80 pairs/block; a full-span sweep costs 6-25x
     // more for gains only on maps already ahead of DirectXTex).
     let _ = (lo, hi);
-    if !quality_is_fast() && signed_sweep_gate(span, best_err) {
+    // DEFAULT OFF, matching the unsigned twin — see `BC45_SIGNED_WINDOW`.
+    // Measured serial on the corpus: this sweep cost 3-5x the encode time for
+    // 0.05-0.61 dB on maps we already led.
+    if signed_window_enabled() && !quality_is_fast() && signed_sweep_gate(span, best_err) {
         signed_window_sweep(&samples, &mut best, &mut best_err);
     }
     best
