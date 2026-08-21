@@ -1239,7 +1239,10 @@ impl<'a> Mode6Fixed<'a> {
     fn new(planar: &'a Mode6Planar, indices: &[u8; 16]) -> Self {
         let mut w = [0i16; 16];
         for (i, slot) in w.iter_mut().enumerate() {
-            *slot = W6M[indices[i] as usize] as i16;
+            // No-op mask: mode-6 indices are 4-bit, and it retires the
+            // bounds check the compiler would otherwise emit here.
+            debug_assert!(indices[i] < 16);
+            *slot = W6M[(indices[i] & 15) as usize] as i16;
         }
         Self { planar, w }
     }

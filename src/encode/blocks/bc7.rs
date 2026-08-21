@@ -556,7 +556,13 @@ pub(super) fn ls_endpoints_mode5(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> 
     let mut b0 = [0f32; 3];
     let mut b1 = [0f32; 3];
     for (i, p) in pixels.iter().enumerate() {
-        let w = WF[indices[i] as usize];
+        // Masked, not because the index can exceed the table but because the
+        // COMPILER cannot see that it cannot. `indices` is a `[u8; 16]` of
+        // 2-bit values, so `& 3` is a no-op on every input the encoder can
+        // produce — and it turns a bounds check plus a panic landing pad into
+        // nothing at all.
+        debug_assert!(indices[i] < 4);
+        let w = WF[(indices[i] & 3) as usize];
         let u = 1.0 - w;
         a00 += u * u;
         a01 += u * w;
@@ -1224,7 +1230,10 @@ pub(super) fn ls_endpoints_mode6_scalar(
     let mut b0 = [0.0f32; 4];
     let mut b1 = [0.0f32; 4];
     for i in 0..16 {
-        let w = W[indices[i] as usize];
+        // See the mode-5 solve: a no-op mask that lets the compiler retire the
+        // bounds check. Mode-6 indices are 4-bit.
+        debug_assert!(indices[i] < 16);
+        let w = W[(indices[i] & 15) as usize];
         let u = 1.0 - w;
         a00 += u * u;
         a01 += u * w;

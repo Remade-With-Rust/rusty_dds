@@ -791,10 +791,17 @@ fn bc2_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
     bc1_color_block(&blk[8..16], out, pitch, true);
     for row in 0..4usize {
         let a = u16::from_le_bytes([blk[row * 2], blk[row * 2 + 1]]);
+        // The row is taken as a sixteen-byte slice ONCE. Indexing `out`
+        // directly made every one of the sixteen writes its own bounds check,
+        // because `pitch` is a runtime value and nothing related it to `out`'s
+        // length; within a row of known length the four offsets are provable.
+        // Same panic behaviour: the old code's highest index was
+        // `row * pitch + 15`, which is exactly the end of this slice.
+        let r = &mut out[row * pitch..row * pitch + 16];
         for col in 0..4usize {
             // 4-bit alpha scaled to 8 bits by the reference's factor of 17,
             // which is exactly 0x0F -> 0xFF.
-            out[row * pitch + col * 4 + 3] = (((a >> (4 * col)) & 0x0f) as u8) * 17;
+            r[col * 4 + 3] = (((a >> (4 * col)) & 0x0f) as u8) * 17;
         }
     }
 }
@@ -810,9 +817,13 @@ fn bc3_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize) {
     bc1_color_block(&blk[8..16], out, pitch, true);
     let pal = bc3_alpha_palette(blk[0], blk[1]);
     let idx = bc4_indices(&blk[..8]);
-    for p in 0..16usize {
-        let o = (p / 4) * pitch + (p % 4) * 4;
-        out[o + 3] = pal[((idx >> (3 * p)) & 0x7) as usize];
+    // Row slices for the same reason as the BC2 path above.
+    for row in 0..4usize {
+        let r = &mut out[row * pitch..row * pitch + 16];
+        for col in 0..4usize {
+            let p = row * 4 + col;
+            r[col * 4 + 3] = pal[((idx >> (3 * p)) & 0x7) as usize];
+        }
     }
 }
 

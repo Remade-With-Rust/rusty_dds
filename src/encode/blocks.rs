@@ -227,7 +227,11 @@ fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 
             let sx = x.min(w.saturating_sub(1));
             let sy = y.min(h.saturating_sub(1));
             let i = (sy * w + sx) * 4;
-            pixels[row * 4 + col] = [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]];
+            // ONE range check for the pixel, not four for its channels. The
+            // four indices are consecutive, so the slice proves all of them and
+            // the compiler can see `px` has length four.
+            let px = &rgba[i..i + 4];
+            pixels[row * 4 + col] = [px[0], px[1], px[2], px[3]];
         }
     }
     pixels

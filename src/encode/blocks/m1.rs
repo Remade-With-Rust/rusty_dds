@@ -147,8 +147,15 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
     let mut anchor1 = 0usize;
     for i in 0..16 {
         let v = tbl[i / 4][i % 4];
-        let s = (v & 0x7F) as usize;
-        let slot = members[s].1;
+        // A BC7 two-subset partition names subset 0 or 1 in the low bits and
+        // flags the anchor in 0x80, so `& 1` and `& 15` below are no-ops on
+        // every table entry — but they are what lets the compiler retire the
+        // bounds checks. Sixteen pixels split across two subsets means neither
+        // count can pass sixteen, so `slot` is always a valid slot.
+        let s = ((v & 0x7F) as usize) & 1;
+        debug_assert!((v & 0x7F) < 2);
+        let slot = members[s].1 & 15;
+        debug_assert!(members[s].1 < 16);
         members[s].0[slot] = i;
         members[s].1 += 1;
         if v & 0x80 != 0 && s == 1 {
@@ -169,7 +176,10 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
         let mut e0 = [0u8; 3];
         let mut e1 = [0u8; 3];
         for &i in &idxs[..n] {
-            let p = pixels[i];
+            // Member lists hold pixel indices, so `& 15` is a no-op that makes
+            // the range provable. Same everywhere `i` indexes a block array.
+            debug_assert!(i < 16);
+            let p = pixels[i & 15];
             let l = p[0] as i32 * 2 + p[1] as i32 * 3 + p[2] as i32;
             if l > max_l {
                 max_l = l;
@@ -189,7 +199,8 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
         q[s] = bq;
         pbits[s] = bp;
         for (k, &i) in idxs[..n].iter().enumerate() {
-            indices[i] = bidx[k];
+            debug_assert!(i < 16);
+            indices[i & 15] = bidx[k];
         }
         total_err += berr as i64;
         if total_err >= err_limit {
@@ -200,11 +211,13 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
     // Anchor constraints: pixel 0 (subset 0) and anchor1 (subset 1) need
     // index MSB 0; W3 symmetry keeps recon identical under swap+invert.
     for &(s, anchor) in &[(0usize, 0usize), (1, anchor1)] {
-        if indices[anchor] >= 4 {
+        debug_assert!(anchor < 16);
+        if indices[anchor & 15] >= 4 {
             q[s].swap(0, 1);
             let (idxs, n) = (members[s].0, members[s].1);
             for &i in &idxs[..n] {
-                indices[i] = 7 - indices[i];
+                debug_assert!(i < 16);
+                indices[i & 15] = 7 - indices[i & 15];
             }
         }
     }
@@ -243,7 +256,8 @@ fn fit_subset(
             let mut idx = [0u8; 16];
             let mut err = 0i32;
             for (k, &i) in idxs.iter().enumerate() {
-                let px = pixels[i];
+                debug_assert!(i < 16 && k < 16);
+                let px = pixels[i & 15];
                 let mut bi = 0u8;
                 let mut be = i32::MAX;
                 for (j, pc) in pal.iter().enumerate() {
@@ -253,7 +267,7 @@ fn fit_subset(
                         bi = j as u8;
                     }
                 }
-                idx[k] = bi;
+                idx[k & 15] = bi;
                 err += be;
                 if err >= limit {
                     err = i32::MAX;
@@ -292,13 +306,16 @@ fn ls_endpoints(
     let mut b0 = [0f32; 3];
     let mut b1 = [0f32; 3];
     for (k, &i) in idxs.iter().enumerate() {
-        let w = W3[indices[k] as usize] as f32 / 64.0;
+        // Three-bit index into an eight-entry weight table, and a member index
+        // into the block: both masks are no-ops that retire a bounds check.
+        debug_assert!(i < 16 && indices[k] < 8);
+        let w = W3[(indices[k] & 7) as usize] as f32 / 64.0;
         let u = 1.0 - w;
         a00 += u * u;
         a01 += u * w;
         a11 += w * w;
         for c in 0..3 {
-            let x = pixels[i][c] as f32;
+            let x = pixels[i & 15][c] as f32;
             b0[c] += u * x;
             b1[c] += w * x;
         }
