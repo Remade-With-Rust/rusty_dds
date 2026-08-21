@@ -402,6 +402,23 @@ pub(super) fn pack_bc1_scored(
         let v = (c0 as u64) | ((c1 as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
+    // Everything below is the punch branch and the scalar fallback, moved OUT
+    // of line. Inlined here they put the whole per-pixel `sqr_rgb` walk — 33
+    // `imull` and its loads — into a function whose vector path returns above,
+    // and `punch` requires both 565 words equal after the nudge, which is the
+    // all-white-565 block and nothing else.
+    pack_bc1_scored_cold(pixels, c0, c1, punch, err_limit)
+}
+
+#[cold]
+#[inline(never)]
+fn pack_bc1_scored_cold(
+    pixels: &[[u8; 4]; 16],
+    c0: u16,
+    c1: u16,
+    punch: bool,
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
     // Reached only by the punch branch and the scalar fallback.
     let colors = {
         let ca = from_565(c0);
@@ -571,6 +588,19 @@ pub(super) fn channel_minmax_rgb(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
         let (mx, mn) = simd::channel_minmax_avx2(pixels);
         return ([mx[0], mx[1], mx[2]], [mn[0], mn[1], mn[2]]);
     }
+    channel_minmax_rgb_scalar(pixels)
+}
+
+/// The scalar arm of [`channel_minmax_rgb`], kept OUT of line.
+///
+/// Sixteen pixels by three channels by min-and-max unrolls to about ninety
+/// `cmov` plus the loads to feed them, and inlined at the dispatch it landed
+/// whole inside `encode_bc1_bytes` — which measured 95 `cmpb`, 85 `movzbl` and
+/// 91 `cmov` in its own body, none of which any AVX2 machine executes. Marking
+/// it cold moves it away from the hot path instead of interleaving it there.
+#[cold]
+#[inline(never)]
+fn channel_minmax_rgb_scalar(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     let mut mn = [255u8; 3];
     let mut mx = [0u8; 3];
     for p in pixels {

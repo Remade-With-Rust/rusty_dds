@@ -14,10 +14,32 @@
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
+/// Cached AVX2 detection.
+///
+/// This sits in front of EVERY vector dispatch in the encoder, so its cost is
+/// paid several times per block. A `OnceLock<bool>` is the wrong shape for it:
+/// acquire-ordered, with a state machine whose slow path LLVM cannot prove
+/// unreachable, so each dispatch carried a call site for `OnceLock::initialize`
+/// — three of them were inlined into `encode_bc1_bytes` alone.
+///
+/// A relaxed load is sufficient here. The value is a property of the CPU, so it
+/// never changes and every racing thread computes the SAME answer; the worst a
+/// race can do is detect twice and store the same byte twice. There is nothing
+/// to publish besides the byte itself, so no ordering is needed to make it
+/// safe to read.
+#[inline(always)]
 pub(super) fn has_avx2() -> bool {
-    use std::sync::OnceLock;
-    static F: OnceLock<bool> = OnceLock::new();
-    *F.get_or_init(|| std::is_x86_feature_detected!("avx2"))
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not yet probed, 1 = absent, 2 = present.
+    static F: AtomicU8 = AtomicU8::new(0);
+    match F.load(Ordering::Relaxed) {
+        0 => {
+            let v = if std::is_x86_feature_detected!("avx2") { 2 } else { 1 };
+            F.store(v, Ordering::Relaxed);
+            v == 2
+        }
+        v => v == 2,
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]

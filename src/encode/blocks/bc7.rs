@@ -334,6 +334,19 @@ fn fit_indices_rgb4(pixels: &[[u8; 4]; 16], pal: &[[u8; 3]; 4]) -> ([u8; 16], i3
             );
         }
     }
+    fit_indices_rgb4_scalar(pixels, pal)
+}
+
+/// The scalar arm of [`fit_indices_rgb4`], kept OUT of line.
+///
+/// Sixteen pixels against four palette entries unrolls to 600 instructions,
+/// not one of them a vector op — and because the dispatch is `#[inline]`, every
+/// one of those went into EVERY call site. The mode-4/5 fits are about 24% of
+/// BC7 encode, so this was the fallback bloating the hot BC7 bodies on machines
+/// that never run it.
+#[cold]
+#[inline(never)]
+fn fit_indices_rgb4_scalar(pixels: &[[u8; 4]; 16], pal: &[[u8; 3]; 4]) -> ([u8; 16], i32) {
     let mut idx = [0u8; 16];
     let mut err = 0i32;
     for (i, p) in pixels.iter().enumerate() {
@@ -811,6 +824,17 @@ pub(super) fn channel_minmax_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) 
     if simd::has_avx2() {
         return simd::channel_minmax_avx2(pixels);
     }
+    channel_minmax_rgba_scalar(pixels)
+}
+
+/// The scalar arm of [`channel_minmax_rgba`], kept OUT of line.
+///
+/// Sixteen pixels by four channels by min-and-max, inlined at the dispatch:
+/// 582 instructions, not one of them a vector op, on a path whose vector arm
+/// is a call to a 23-instruction kernel.
+#[cold]
+#[inline(never)]
+fn channel_minmax_rgba_scalar(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
     let mut mn = [255u8; 4];
     let mut mx = [0u8; 4];
     for p in pixels {
@@ -1472,6 +1496,18 @@ pub(super) fn extrema_opaque(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     if simd::has_avx2() {
         return simd::extrema_opaque_avx2(pixels);
     }
+    extrema_opaque_scalar(pixels)
+}
+
+/// The scalar arm of [`extrema_opaque`], kept OUT of line.
+///
+/// The vector arm above is a call to a 51-instruction kernel, so every one of
+/// this function's other 339 instructions — not one of them a vector op — was
+/// the fallback, inlined at the dispatch and interleaved with the hot path on
+/// machines that never execute it.
+#[cold]
+#[inline(never)]
+fn extrema_opaque_scalar(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     let mut min_l = i32::MAX;
     let mut max_l = i32::MIN;
     let mut min_rgb = [0u8; 3];
