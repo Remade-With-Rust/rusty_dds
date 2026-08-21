@@ -455,6 +455,14 @@ pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Optio
         return None; // 3-color + punch-through mode: skip LS.
     }
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    // The RDO path has solved these same normal equations with a vector
+    // accumulator since section 71; the plain encoder was never routed through
+    // it. Scalar this measured 551 instructions dynamic, 2.0 times a block.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let (e0, e1) = simd::bc1_ls_endpoints_avx2(pixels, table)?;
+        return Some(([e0[0], e0[1], e0[2]], [e1[0], e1[1], e1[2]]));
+    }
     const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
     let mut a00 = 0f32;
     let mut a01 = 0f32;

@@ -1862,6 +1862,80 @@ unsafe fn alpha_select_avx2_impl(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 1
     (out, err)
 }
 
+
+/// BC1 least-squares endpoints for a fixed index table — the plain encoder's
+/// equivalent of what `refit_with_ls` does on the RDO path.
+///
+/// # Why this exists
+///
+/// `ls_endpoints_bc1` solved the same normal equations SCALAR: a sixteen-pixel
+/// loop accumulating three `a` terms and six `b` terms, measured at **551
+/// instructions dynamic** and run 2.0 times a block. The RDO path has had a
+/// vectorised accumulator for this since section 71; the plain encoder was
+/// never routed through it.
+///
+/// # Bit-identity
+///
+/// Every lane performs `acc += w * x` in pixel order with the multiply and add
+/// separate, exactly as the scalar loop does for that lane — the same argument
+/// `ls_accum_sse` documents. The three `a` terms accumulate in their own lanes
+/// in the same order. `u8 -> f32` is exact, and the rounding stays in the
+/// existing `bc1_ls_solve`, which is already bit-identical to
+/// `round_clamp_u8`.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_ls_endpoints_avx2(
+    pixels: &[[u8; 4]; 16],
+    table: u32,
+) -> Option<([u8; 4], [u8; 4])> {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); the pixel
+    // array is fixed-size and read with unaligned loads.
+    unsafe { bc1_ls_endpoints_avx2_impl(pixels, table) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_ls_endpoints_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    table: u32,
+) -> Option<([u8; 4], [u8; 4])> {
+    use std::arch::x86_64::*;
+    // 4-colour weights toward c1 by index: 0 -> 0, 1 -> 1, 2 -> 1/3, 3 -> 2/3.
+    const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
+    let src = pixels.as_ptr() as *const u8;
+    // [b0.rgba, b1.rgba] in one register, as `ls_accum_sse`.
+    let mut acc = _mm256_setzero_ps();
+    let (mut a00, mut a01, mut a11) = (0f32, 0f32, 0f32);
+    let sel = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
+    for i in 0..16usize {
+        let wgt = W[((table >> (2 * i)) & 3) as usize];
+        let u = 1.0 - wgt;
+        a00 += u * u;
+        a01 += u * wgt;
+        a11 += wgt * wgt;
+        let pair = [u, wgt];
+        let bc = _mm256_castpd_ps(_mm256_broadcast_sd(&*(pair.as_ptr() as *const f64)));
+        let wv = _mm256_permutevar8x32_ps(bc, sel);
+        let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
+            *(src.add(i * 4) as *const i32),
+        )));
+        let pv = _mm256_permutevar8x32_ps(
+            _mm256_castps128_ps256(px),
+            _mm256_setr_epi32(0, 1, 2, 3, 0, 1, 2, 3),
+        );
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, pv));
+    }
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() < 1e-4 {
+        return None;
+    }
+    let mut v0 = [0f32; 4];
+    let mut v1 = [0f32; 4];
+    _mm_storeu_ps(v0.as_mut_ptr(), _mm256_castps256_ps128(acc));
+    _mm_storeu_ps(v1.as_mut_ptr(), _mm256_extractf128_ps(acc, 1));
+    Some(bc1_ls_solve(v0, v1, a00, a01, a11, det))
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
