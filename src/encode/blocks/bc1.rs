@@ -408,6 +408,11 @@ pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Optio
 
 
 pub(super) fn channel_minmax_rgb(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let (mx, mn) = simd::channel_minmax_avx2(pixels);
+        return ([mx[0], mx[1], mx[2]], [mn[0], mn[1], mn[2]]);
+    }
     let mut mn = [255u8; 3];
     let mut mx = [0u8; 3];
     for p in pixels {

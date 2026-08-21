@@ -800,6 +800,10 @@ pub(super) fn bc7_mode6_seeds_extra(
 }
 
 pub(super) fn channel_minmax_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::channel_minmax_avx2(pixels);
+    }
     let mut mn = [255u8; 4];
     let mut mx = [0u8; 4];
     for p in pixels {
