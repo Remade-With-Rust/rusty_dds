@@ -959,22 +959,6 @@ unsafe fn bc1_ls_solve_impl(
     (round_pack(e0), round_pack(e1))
 }
 
-/// `to_565` on four rounded lanes: shift each channel down, then weight and sum.
-///
-/// The three fields do not overlap, so the weighted sum IS the bitwise or the
-/// scalar builds. Inputs are already clamped to `0..=255`, so the shifted values
-/// need no masking — `r >> 3` and `b >> 3` are at most 31 and `g >> 2` at most
-/// 63 by construction.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn pack565(v: std::arch::x86_64::__m128i) -> u16 {
-    use std::arch::x86_64::*;
-    let sh = _mm_srlv_epi32(v, _mm_setr_epi32(3, 2, 3, 0));
-    let w = _mm_mullo_epi32(sh, _mm_setr_epi32(2048, 32, 1, 0));
-    let h = _mm_hadd_epi32(w, w);
-    let h = _mm_hadd_epi32(h, h);
-    _mm_cvtsi128_si32(h) as u16
-}
 
 /// `round_clamp_u8` for four lanes at once: clamp to `[0, 255]` in f32, widen to
 /// f64, add a half, truncate.
