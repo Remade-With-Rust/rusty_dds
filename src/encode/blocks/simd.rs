@@ -444,6 +444,62 @@ unsafe fn bc1_fixed_sse_avx2_impl(pixels: &[[u8; 4]; 16], pal: &[u32; 4], table:
     ))
 }
 
+
+/// Mode-6 SSE for one channel of a block: sixteen pixels, one AVX2 register.
+///
+/// # Why this is the whole ballgame
+///
+/// The RDO endpoint polish calls this **259 times per block**, and as a scalar
+/// sixteen-iteration loop it measured **305 instructions a call — 79,094 per
+/// block, 88.8% of BC7 RDO's entire instruction cost**. It is by a wide margin
+/// the most expensive thing in the RDO path.
+///
+/// # Why sixteen-bit lanes are exact
+///
+/// `base` is `v0 * 64 + 32` for an unquantized endpoint in `0..=255`, so it
+/// spans `32 ..= 16_352`; `w * delta` spans `+/-16_320`. Their sum *is* the
+/// original `(64 - w) * v0 + w * v1 + 32`, which cannot leave `32 ..= 16_352`.
+/// So `>> 6` lands in `0..=255`, the scalar's `as u8` truncation is the
+/// identity, and sixteen `i16` lanes hold the whole block in one register.
+///
+/// # Why the caller passes planar pixels and pre-looked-up weights
+///
+/// Both are **invariant across all 259 calls**: the indices are fixed by this
+/// function's contract, so `W6M[indices[i]]` is too, and the pixels never
+/// change. Hoisting them turns a strided gather and sixteen table lookups per
+/// call into one contiguous load.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn mode6_chan_sse_avx2(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8) -> i64 {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays are
+    // fixed-size and read with unaligned loads.
+    unsafe { mode6_chan_sse_avx2_impl(px, w, v0, v1) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8) -> i64 {
+    use std::arch::x86_64::*;
+    let base = _mm256_set1_epi16(v0 as i16 * 64 + 32);
+    let delta = _mm256_set1_epi16(v1 as i16 - v0 as i16);
+    let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
+    let v = _mm256_srai_epi16(
+        _mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)),
+        6,
+    );
+    let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
+    let d = _mm256_sub_epi16(v, pv);
+    // Each square is at most 255^2 and `madd` folds pairs, so the eight lanes
+    // sum to at most 1_040_400 — comfortably inside i32.
+    let sq = _mm256_madd_epi16(d, d);
+    let h = _mm256_hadd_epi32(sq, sq);
+    let h = _mm256_hadd_epi32(h, h);
+    _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    )) as i64
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -482,6 +538,52 @@ mod oracle {
     /// `<`, same clamping — for both palette widths.
     /// The vector block-SSE must equal the scalar walk exactly, across random
     /// palettes, random pixels and every index pattern shape.
+    /// The vector channel-SSE must equal the scalar formula exactly, across the
+    /// full endpoint range and every weight the mode-6 table can produce.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mode6_chan_sse_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        const W6M: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+        let mut state = 0x6d0d_6c1a_5151_2727u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..80_000u32 {
+            let mut px = [0u8; 16];
+            let mut w = [0i16; 16];
+            let (v0, v1) = match case {
+                0 => (0u8, 0u8),
+                1 => (255, 255),
+                // Widest separation in both directions: where an i16 lane would
+                // overflow if the range analysis were wrong.
+                2 => (0, 255),
+                3 => (255, 0),
+                _ => (next() as u8, (next() >> 8) as u8),
+            };
+            for k in 0..16usize {
+                px[k] = (next() >> 16) as u8;
+                w[k] = W6M[(next() >> 24) as usize % 16] as i16;
+            }
+            let got = mode6_chan_sse_avx2(&px, &w, v0, v1);
+            let base = v0 as i32 * 64 + 32;
+            let delta = v1 as i32 - v0 as i32;
+            let mut want = 0i64;
+            for k in 0..16usize {
+                let v = ((base + w[k] as i32 * delta) >> 6) as u8;
+                let d = v as i64 - px[k] as i64;
+                want += d * d;
+            }
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn bc1_fixed_sse_matches_scalar() {

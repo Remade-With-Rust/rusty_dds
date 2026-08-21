@@ -728,8 +728,36 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
 }
 
 /// Mode-6 SSE from quantized endpoints + fixed indices (native math).
+/// The block's invariants for a mode-6 endpoint sweep: pixels transposed to
+/// planar, and the sixteen weights already looked up.
+///
+/// Both are fixed for the whole sweep — the indices are, so `W6M[indices[i]]`
+/// is, and the pixels never change. Computing them once turns each of the 259
+/// per-block channel scores from a strided gather plus sixteen table lookups
+/// into one contiguous load.
+struct Mode6Fixed {
+    planar: [[u8; 16]; 4],
+    w: [i16; 16],
+}
+
+impl Mode6Fixed {
+    #[inline]
+    fn new(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Self {
+        let mut planar = [[0u8; 16]; 4];
+        let mut w = [0i16; 16];
+        for (i, px) in pixels.iter().enumerate() {
+            planar[0][i] = px[0];
+            planar[1][i] = px[1];
+            planar[2][i] = px[2];
+            planar[3][i] = px[3];
+            w[i] = W6M[indices[i] as usize] as i16;
+        }
+        Self { planar, w }
+    }
+}
+
 /// Mode-6 SSE for **one channel**, from that channel's two unquantized
-/// endpoints and fixed indices.
+/// endpoints and the block's fixed weights.
 ///
 /// The whole point of splitting it out: mode-6 SSE is a sum over channels, and
 /// each channel's palette depends only on that channel's endpoints. So the ±1
@@ -740,14 +768,17 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
 /// u8` truncation, so the sum over channels is bit-identical to the whole-
 /// palette form.
 #[inline]
-fn mode6_chan_sse(pixels: &[[u8; 4]; 16], c: usize, v0: u8, v1: u8, indices: &[u8; 16]) -> i64 {
+fn mode6_chan_sse(fixed: &Mode6Fixed, c: usize, v0: u8, v1: u8) -> i64 {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::mode6_chan_sse_avx2(&fixed.planar[c], &fixed.w, v0, v1);
+    }
     let base = v0 as i32 * 64 + 32;
     let delta = v1 as i32 - v0 as i32;
     let mut err = 0i64;
-    for (i, px) in pixels.iter().enumerate() {
-        let w = W6M[indices[i] as usize] as i32;
-        let v = ((base + w * delta) >> 6) as u8;
-        let d = v as i64 - px[c] as i64;
+    for (i, &x) in fixed.planar[c].iter().enumerate() {
+        let v = ((base + fixed.w[i] as i32 * delta) >> 6) as u8;
+        let d = v as i64 - x as i64;
         err += d * d;
     }
     err
@@ -755,19 +786,12 @@ fn mode6_chan_sse(pixels: &[[u8; 4]; 16], c: usize, v0: u8, v1: u8, indices: &[u
 
 /// The four channel errors, which sum to the block's mode-6 SSE.
 #[inline]
-fn mode6_chan_errs(
-    pixels: &[[u8; 4]; 16],
-    q0: [u8; 4],
-    p0: u8,
-    q1: [u8; 4],
-    p1: u8,
-    indices: &[u8; 16],
-) -> [i64; 4] {
+fn mode6_chan_errs(fixed: &Mode6Fixed, q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8) -> [i64; 4] {
     let c0 = unquantize_7p(q0, p0);
     let c1 = unquantize_7p(q1, p1);
     let mut e = [0i64; 4];
     for (c, ec) in e.iter_mut().enumerate() {
-        *ec = mode6_chan_sse(pixels, c, c0[c], c1[c], indices);
+        *ec = mode6_chan_sse(fixed, c, c0[c], c1[c]);
     }
     e
 }
@@ -780,7 +804,8 @@ fn mode6_sse(
     p1: u8,
     indices: &[u8; 16],
 ) -> i64 {
-    mode6_chan_errs(pixels, q0, p0, q1, p1, indices).iter().sum()
+    let fixed = Mode6Fixed::new(pixels, indices);
+    mode6_chan_errs(&fixed, q0, p0, q1, p1).iter().sum()
 }
 
 /// `(quantized value, squared reconstruction error)` for every channel value and
@@ -922,7 +947,8 @@ fn polish_mode6_endpoints(
     // candidate costs ONE channel rescore, not four, and the block's total is a
     // three-add fixup. Measured at 201 `mode6_sse` calls per block before this,
     // ~51% of BC7 RDO encode.
-    let mut ce = mode6_chan_errs(pixels, *q0, p0, *q1, p1, indices);
+    let fixed = Mode6Fixed::new(pixels, indices);
+    let mut ce = mode6_chan_errs(&fixed, *q0, p0, *q1, p1);
     debug_assert_eq!(ce.iter().sum::<i64>(), *err);
     for _round in 0..2 {
         let prev = *err;
@@ -942,11 +968,10 @@ fn polish_mode6_endpoints(
                         ((*q0)[c], nv as u8)
                     };
                     let cand = mode6_chan_sse(
-                        pixels,
+                        &fixed,
                         c,
                         unquantize_7p_chan(qa, p0),
                         unquantize_7p_chan(qb, p1),
-                        indices,
                     );
                     let total = *err - ce[c] + cand;
                     if total < *err {
