@@ -3669,3 +3669,66 @@ as wins, which is the distinction `LEDGER.md` draws and the reason it exists.
 a window of blocks already emitted. Even after +51.3%, that is the largest
 remaining factor in RDO — and unlike everything above it would change output,
 so it needs a quality gate rather than a payload hash.
+
+## §64 — Why #6, #7 and #10 are not wins, established rather than assumed
+
+The ten-target campaign was pushed a second time to try to convert the three
+flat items. It did not, and the reason is now measured rather than asserted.
+
+### The box's resolution, measured with a null arm
+
+Same binary, both arms, λ=25, at the time of the retry:
+
+| | sd of paired diff | single-pair swing | smallest resolvable effect at n=14 |
+|---|---|---|---|
+| BC7 RDO | 14.5% | ±28.2% | **~7.8%** |
+| BC1 RDO | 14.6% | ±30.6% | **~7.8%** |
+
+Four `ocr_text.exe` processes at ~940 MB each were resident. **Every one of the
+three remaining items has a ceiling below that floor**, so no amount of pairing
+resolves them:
+
+| item | ceiling | measured how |
+|---|---|---|
+| #6 `parse_mode6` | ~0.7% of a block's cycles | 8.27 calls/block of cheap inlined bit extraction |
+| #7 `score_*` | ~16 integer compares per block | 1.0 call/block over a 16-entry window |
+| #10 `polish_endpoints_fixed_table` | **3.5%** | doubling probe, taken before the work |
+
+### The second attempt on #6, and its deterministic refutation
+
+The interesting version of #6 is not the parse but its **call site**: the BC7
+donor loop had no futility bound, while the BC1 driver has always had one. Added
+it — exact, since every donor scores `err - lam * SAVE_HALF8` with non-negative
+`err`, so an incumbent at or below `-lam * SAVE_HALF8` cannot be beaten.
+
+It measured flat, and a counter says why:
+
+| λ | donors scanned | donors skipped by the bound |
+|---|---|---|
+| 4 | 261 904 | **0** |
+| 25 | 261 872 | **32** (0.012%) |
+| 100 | 260 608 | 1 296 (0.5%) |
+
+Reverted: a branch in the hot loop for 0.012% is a cost, not a saving. The bound
+is correct and useless, which is worth knowing.
+
+### What the three did deliver
+
+`parse_mode6` went from **8.267 calls per block to 1.000** — an 8.3x reduction,
+deterministic, from parsing on window entry instead of per examining block. That
+is a real reduction in work; it is simply not a *timing* win, because the work
+removed was cheap. The same is true of the integer window keys and the in-place
+polish trial: strictly less work, byte-identical, no more code — and below the
+threshold where a clock can see them.
+
+### The rule this earns
+
+> **A frequency ranking finds candidates; a doubling probe sizes them; and a null
+> arm says whether the size is even observable.** All three are needed. §62
+> ranked ten functions by calls per block and mispredicted exactly the three
+> whose per-call cost was low. Had the doubling probes been run first — as they
+> were for #1, #8, #9 and #10 — the three flats were predictable before a line
+> was written.
+
+Seven of ten produced measured timing wins, cumulatively **2.05x on BC7 RDO and
+1.29x on BC1 RDO**. Three did not and provably cannot at this scale.
