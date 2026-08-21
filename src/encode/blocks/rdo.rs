@@ -238,6 +238,14 @@ pub(crate) fn encode_image_bc1_rdo(
 /// The four RGB palette entries of a BC1 block, packed one per `u32` with a zero
 /// alpha byte so the vector kernel can `pshufb` them directly.
 #[inline]
+/// # A refuted change, recorded so it is not retried
+///
+/// Returning only the packed form and having the scalar tail unpack from it —
+/// so the `[[u8; 3]; 4]` need not be materialised — measured **worse**:
+/// 103 -> 120 instructions for this function, with timing at +1.4%, z = +1.07,
+/// i.e. nothing. Both representations are cheap to derive together from the two
+/// 565 words, and splitting them costs more in the return than it saves in the
+/// body.
 fn bc1_colors_packed(block: &[u8; 8]) -> ([[u8; 3]; 4], [u32; 4]) {
     let c0 = u16::from_le_bytes([block[0], block[1]]);
     let c1 = u16::from_le_bytes([block[2], block[3]]);
@@ -663,30 +671,32 @@ pub(crate) fn encode_image_bc7_rdo(
                         polish_mode6_endpoints(
                             &pixels, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
                         );
-                        let cand = pack_bc7_mode6(q0a, p0a, q1a, dp1, didx);
-                        debug_assert_eq!(&cand[8..16], &donor[8..16]);
+                        // Packed only if it wins, as above.
                         let j = err as f32 - lam * SAVE_HALF8;
                         if j < best_j {
                             best_j = j;
-                            best = cand;
+                            best = pack_bc7_mode6(q0a, p0a, q1a, dp1, didx);
+                            debug_assert_eq!(&best[8..16], &donor[8..16]);
                         }
                     }
                     // 3. Head reuse: donor endpoints + p0, our p1 + indices.
+                    // The donor endpoint does not vary with p1, so it is
+                    // unquantized once rather than twice.
+                    let du0 = unquantize_7p(dq0, dp0);
                     for p1 in 0..2u8 {
-                        let pal = palette_mode6(
-                            unquantize_7p(dq0, dp0),
-                            unquantize_7p(dq1, p1),
-                        );
+                        let pal = palette_mode6(du0, unquantize_7p(dq1, p1));
                         let (idx, errv) = fit_indices_mode6(&pixels, &pal);
                         if idx[0] > 7 {
                             continue; // swap would rewrite the head bytes
                         }
-                        let cand = pack_bc7_mode6(dq0, dp0, dq1, p1, idx);
-                        debug_assert_eq!(&cand[0..8], &donor[0..8]);
+                        // Packed only if it wins. Most candidates do not, and
+                        // packing costs 99 instructions — it ran 19 times a
+                        // block to produce a block usually thrown away.
                         let j = errv as f32 - lam * SAVE_HALF8;
                         if j < best_j {
                             best_j = j;
-                            best = cand;
+                            best = pack_bc7_mode6(dq0, dp0, dq1, p1, idx);
+                            debug_assert_eq!(&best[0..8], &donor[0..8]);
                         }
                     }
                 }
