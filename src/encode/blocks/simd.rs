@@ -1360,6 +1360,118 @@ unsafe fn mode6_chan_errs_avx2_impl(
     [o[0] as i64, o[1] as i64, o[2] as i64, o[3] as i64]
 }
 
+
+/// Build a mode-6 palette AND fit the block's indices to it, in one call.
+///
+/// # The round trip this removes
+///
+/// The palette builder produced sixteen 4-byte entries — four `packus` and four
+/// `permute4x64` to narrow i16 lanes down to bytes — and stored them; the index
+/// fit then loaded those bytes straight back and widened them to i16 again, four
+/// `vpmovzxbw` and four stores. Sixty-four bytes were packed and unpacked for
+/// nothing, across a `#[target_feature]` boundary. Fused, the palette simply
+/// stays in its i16 form, which is what the fit wanted all along.
+///
+/// Correctness of the i16 range and of the fit itself are unchanged — see
+/// [`palette_mode6_avx2`] and [`fit_indices_mode6_avx2`], whose bodies this is.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn palette_fit_mode6_avx2(
+    pixels: &[[u8; 4]; 16],
+    base: [i32; 4],
+    c0: [u8; 4],
+    c1: [u8; 4],
+) -> ([u8; 16], i64) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); all arrays are
+    // fixed-size and accessed with unaligned loads and stores.
+    unsafe { palette_fit_mode6_avx2_impl(pixels, base, c0, c1) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn palette_fit_mode6_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    base: [i32; 4],
+    c0: [u8; 4],
+    c1: [u8; 4],
+) -> ([u8; 16], i64) {
+    use std::arch::x86_64::*;
+
+    // --- palette, left in i16 ---
+    let b = _mm256_broadcastq_epi64(_mm_packs_epi32(
+        _mm_loadu_si128(base.as_ptr() as *const __m128i),
+        _mm_setzero_si128(),
+    ));
+    let d = _mm256_broadcastq_epi64(_mm_sub_epi16(
+        _mm_cvtepu8_epi16(_mm_cvtsi32_si128(u32::from_le_bytes(c1) as i32)),
+        _mm_cvtepu8_epi16(_mm_cvtsi32_si128(u32::from_le_bytes(c0) as i32)),
+    ));
+    // Entry `4g+j`, channel `c` lands at lane `4j+c` of group `g` — exactly the
+    // order the fit indexes, so no shuffling is needed between the two halves.
+    let mut pal16 = [0i16; 64];
+    for g in 0..4usize {
+        let wv = _mm256_loadu_si256(W6M_REP.as_ptr().add(g) as *const __m256i);
+        let v = _mm256_srai_epi16(_mm256_add_epi16(b, _mm256_mullo_epi16(d, wv)), 6);
+        _mm256_storeu_si256(pal16.as_mut_ptr().add(g * 16) as *mut __m256i, v);
+    }
+
+    // --- index fit ---
+    let src = pixels.as_ptr() as *const u8;
+    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+    let q0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(src as *const __m128i));
+    let q1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(16) as *const __m128i));
+    let q2 = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(32) as *const __m128i));
+    let q3 = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(48) as *const __m128i));
+
+    let mut best_lo = _mm256_set1_epi32(i32::MAX);
+    let mut best_hi = _mm256_set1_epi32(i32::MAX);
+    let mut idx_lo = _mm256_setzero_si256();
+    let mut idx_hi = _mm256_setzero_si256();
+    let one = _mm256_set1_epi32(1);
+    let mut kv = _mm256_setzero_si256();
+
+    for kk in 0..4usize {
+      for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
+        let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
+        let da = _mm256_sub_epi16(q0, pv);
+        let db = _mm256_sub_epi16(q1, pv);
+        let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
+        let dc = _mm256_sub_epi16(q2, pv);
+        let dd = _mm256_sub_epi16(q3, pv);
+        let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
+        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
+        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
+        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
+        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
+        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
+        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
+        kv = _mm256_add_epi32(kv, one);
+      }
+    }
+
+    let sum = _mm256_add_epi32(best_lo, best_hi);
+    let h = _mm256_hadd_epi32(sum, sum);
+    let h = _mm256_hadd_epi32(h, h);
+    let err = _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    )) as i64;
+
+    let idx_lo = _mm256_permutevar8x32_epi32(idx_lo, perm);
+    let idx_hi = _mm256_permutevar8x32_epi32(idx_hi, perm);
+    let i0 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_lo),
+        _mm256_extracti128_si256(idx_lo, 1),
+    );
+    let i1 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_hi),
+        _mm256_extracti128_si256(idx_hi, 1),
+    );
+    let mut best_i = [0u8; 16];
+    _mm_storeu_si128(best_i.as_mut_ptr() as *mut __m128i, _mm_packs_epi16(i0, i1));
+    (best_i, err)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

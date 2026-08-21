@@ -1005,12 +1005,12 @@ pub(crate) fn encode_image_bc7_rdo(
                                 // it is shared by both p-bits.
                                 let dbase = super::bc7::palette_mode6_base(du0);
                                 for p1 in 0..2u8 {
-                                    let pal = super::bc7::palette_mode6_from_base(
+                                    let (idx, errv) = super::bc7::palette_and_fit_mode6(
+                                        &pixels,
                                         dbase,
                                         du0,
                                         unquantize_7p(dq1, p1),
                                     );
-                                    let (idx, errv) = fit_indices_mode6(&pixels, &pal);
                                     if idx[0] > 7 {
                                         continue; // swap would rewrite the head bytes
                                     }

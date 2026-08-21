@@ -854,6 +854,7 @@ pub(super) fn palette_mode6_from_base(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) 
     pal
 }
 
+#[cfg(test)]
 pub(super) fn palette_mode6(c0: [u8; 4], c1: [u8; 4]) -> [[u8; 4]; 16] {
     palette_mode6_from_base(palette_mode6_base(c0), c0, c1)
 }
@@ -889,6 +890,26 @@ pub(super) fn best_index_pal(px: &[u8; 4], pal: &[[u8; 4]; 16]) -> (u8, i32) {
 /// every CPU, so payloads are machine-independent. (An earlier projection
 /// heuristic is superseded: the SIMD kernel is exact AND faster.)
 #[inline]
+/// Build the mode-6 palette for `(c0, c1)` and fit the block's indices to it.
+///
+/// Every caller that built a palette used it for exactly one index fit and
+/// nothing else, so the two are one operation. Fusing them keeps the palette in
+/// its i16 form instead of packing it to bytes and immediately widening it back
+/// — see [`simd::palette_fit_mode6_avx2`].
+pub(super) fn palette_and_fit_mode6(
+    pixels: &[[u8; 4]; 16],
+    base: [i32; 4],
+    c0: [u8; 4],
+    c1: [u8; 4],
+) -> ([u8; 16], i64) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::palette_fit_mode6_avx2(pixels, base, c0, c1);
+    }
+    let pal = palette_mode6_from_base(base, c0, c1);
+    fit_indices_mode6(pixels, &pal)
+}
+
 pub(super) fn fit_indices_mode6(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
@@ -938,10 +959,10 @@ impl Mode6Fit {
 pub(super) fn mode6_base(pixels: &[[u8; 4]; 16], ep0: [u8; 4], ep1: [u8; 4]) -> Mode6Fit {
     let (mut q0, mut p0) = quantize_7p(ep0);
     let (mut q1, mut p1) = quantize_7p(ep1);
-    let pal = palette_mode6(unquantize_7p(q0, p0), unquantize_7p(q1, p1));
     // SSE is accumulated during the index fit — the recon after an endpoint
     // swap + index inversion is identical (W6M symmetry), so no re-walk.
-    let (mut indices, err) = fit_indices_mode6(pixels, &pal);
+    let (u0, u1) = (unquantize_7p(q0, p0), unquantize_7p(q1, p1));
+    let (mut indices, err) = palette_and_fit_mode6(pixels, palette_mode6_base(u0), u0, u1);
     if indices[0] > 7 {
         std::mem::swap(&mut q0, &mut q1);
         std::mem::swap(&mut p0, &mut p1);
@@ -972,8 +993,8 @@ pub(super) fn mode6_refine(pixels: &[[u8; 4]; 16], base: Mode6Fit) -> Mode6Fit {
     };
     let (nq0, np0) = quantize_7p(r0);
     let (nq1, np1) = quantize_7p(r1);
-    let npal = palette_mode6(unquantize_7p(nq0, np0), unquantize_7p(nq1, np1));
-    let (mut nidx, nerr) = fit_indices_mode6(pixels, &npal);
+    let (n0, n1) = (unquantize_7p(nq0, np0), unquantize_7p(nq1, np1));
+    let (mut nidx, nerr) = palette_and_fit_mode6(pixels, palette_mode6_base(n0), n0, n1);
     let (q0, p0, q1, p1) = if nidx[0] > 7 {
         for idx in nidx.iter_mut() {
             *idx = 15 - *idx;
