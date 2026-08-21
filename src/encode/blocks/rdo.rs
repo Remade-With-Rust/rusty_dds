@@ -371,17 +371,35 @@ fn table_ls(table: u32) -> Option<TableLs> {
 /// The accumulation order is the original's — ascending `i`, `b0` then `b1` —
 /// so the float sums are bit-identical, and the solve is the original
 /// expression unchanged.
-fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8; 8]> {
+/// Scalar twin of [`simd::ls_accum_sse`], and its oracle.
+#[inline]
+fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[(f32, f32); 16]) -> ([f32; 3], [f32; 3]) {
     let mut b0 = [0f32; 3];
     let mut b1 = [0f32; 3];
     for (i, p) in pixels.iter().enumerate() {
-        let (u, wgt) = ls.uw[i];
+        let (u, wgt) = uw[i];
         for c in 0..3 {
             let x = p[c] as f32;
             b0[c] += u * x;
             b1[c] += wgt * x;
         }
     }
+    (b0, b1)
+}
+
+fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8; 8]> {
+    // 59% of BC1 RDO's instruction cost by the deterministic model. The kernel
+    // keeps one pixel per iteration and separate mul/add, so every lane's
+    // accumulation order and rounding match this loop exactly.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let (b0, b1) = if simd::has_avx2() {
+        let (v0, v1) = simd::ls_accum_sse(pixels, &ls.uw);
+        ([v0[0], v0[1], v0[2]], [v1[0], v1[1], v1[2]])
+    } else {
+        ls_accum_scalar(pixels, &ls.uw)
+    };
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let (b0, b1) = ls_accum_scalar(pixels, &ls.uw);
     let (a00, a01, a11, det) = (ls.a00, ls.a01, ls.a11, ls.det);
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];

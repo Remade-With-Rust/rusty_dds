@@ -500,6 +500,55 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
     )) as i64
 }
 
+
+/// The pixel-dependent half of BC1's LS refit: sixteen pixels accumulated into
+/// two four-lane float sums.
+///
+/// **59% of BC1 RDO's instruction cost** by the deterministic model — 476
+/// instructions a call, 32.19 calls a block — and never vectorised.
+///
+/// # Why one pixel per iteration, and why no FMA
+///
+/// Float addition is not associative, so the accumulation order has to survive
+/// exactly. One pixel per iteration keeps each lane's order at `i = 0..15`,
+/// identical to the scalar loop. And `mul` then `add` is kept separate rather
+/// than fused: `fmadd` rounds once where the scalar rounds twice, which would
+/// change the result. Both choices cost throughput and buy bit-identity, which
+/// is the trade this crate makes everywhere.
+///
+/// The fourth lane accumulates alpha, which the caller ignores. It is free —
+/// the lane exists either way — and keeps the load a single `u32`.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_accum_sse(pixels: &[[u8; 4]; 16], uw: &[(f32, f32); 16]) -> ([f32; 4], [f32; 4]) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 implies SSE4.1, guaranteed by dispatch (debug-asserted).
+    unsafe { ls_accum_sse_impl(pixels, uw) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ls_accum_sse_impl(
+    pixels: &[[u8; 4]; 16],
+    uw: &[(f32, f32); 16],
+) -> ([f32; 4], [f32; 4]) {
+    use std::arch::x86_64::*;
+    let mut b0 = _mm_setzero_ps();
+    let mut b1 = _mm_setzero_ps();
+    for i in 0..16usize {
+        let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
+            u32::from_le_bytes(pixels[i]) as i32,
+        )));
+        let (u, w) = uw[i];
+        b0 = _mm_add_ps(b0, _mm_mul_ps(_mm_set1_ps(u), px));
+        b1 = _mm_add_ps(b1, _mm_mul_ps(_mm_set1_ps(w), px));
+    }
+    let mut o0 = [0f32; 4];
+    let mut o1 = [0f32; 4];
+    _mm_storeu_ps(o0.as_mut_ptr(), b0);
+    _mm_storeu_ps(o1.as_mut_ptr(), b1);
+    (o0, o1)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -540,6 +589,53 @@ mod oracle {
     /// palettes, random pixels and every index pattern shape.
     /// The vector channel-SSE must equal the scalar formula exactly, across the
     /// full endpoint range and every weight the mode-6 table can produce.
+    /// The vector LS accumulation must be **bit-identical** to the scalar loop,
+    /// which means the same order and no fused multiply-add.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn ls_accum_matches_scalar_bitwise() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x15ac_c072_9090_3131u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            for q in px.iter_mut() {
+                let r = next();
+                *q = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            }
+            let table = if case == 0 { 0 } else { next() as u32 };
+            let mut uw = [(0f32, 0f32); 16];
+            for (i, slot) in uw.iter_mut().enumerate() {
+                let w = W[((table >> (2 * i)) & 3) as usize];
+                *slot = (1.0 - w, w);
+            }
+            let (g0, g1) = ls_accum_sse(&px, &uw);
+            let mut b0 = [0f32; 3];
+            let mut b1 = [0f32; 3];
+            for (i, p) in px.iter().enumerate() {
+                let (u, wgt) = uw[i];
+                for c in 0..3 {
+                    let x = p[c] as f32;
+                    b0[c] += u * x;
+                    b1[c] += wgt * x;
+                }
+            }
+            for c in 0..3 {
+                assert_eq!(g0[c].to_bits(), b0[c].to_bits(), "case {case} b0[{c}]");
+                assert_eq!(g1[c].to_bits(), b1[c].to_bits(), "case {case} b1[{c}]");
+            }
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn mode6_chan_sse_matches_scalar() {
