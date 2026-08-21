@@ -199,6 +199,8 @@ pub(crate) fn encode_image_bc1_rdo(
                                 }
                             }
 
+                            // Block-invariant: the accumulator runs 25.4 times on these.
+                            let pxv = ls_pixels(&pixels);
                             let n = filled.min(WINDOW);
                             // The window can hold the SAME table more than once
                             // — repetitive content emits repeats constantly —
@@ -222,7 +224,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 if lim > 0 && !dup {
                                     if let Some(cand) = recent_ls[k]
                                         .as_ref()
-                                        .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                                        .and_then(|ls| refit_with_ls(&pixels, &pxv, ls, table))
                                     {
                                         if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
                                             let j = err as f32 - lam * SAVE_PART;
@@ -276,7 +278,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 }
                                 if let Some(cand) = dict_ls[di]
                                     .as_ref()
-                                    .and_then(|ls| refit_with_ls(&pixels, ls, table))
+                                    .and_then(|ls| refit_with_ls(&pixels, &pxv, ls, table))
                                 {
                                     if let Some(err) = bc1_block_sse_limited(&pixels, &cand, lim) {
                                         let j = err as f32 - lam * SAVE_PART;
@@ -424,6 +426,24 @@ fn bc1_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> i32 {
 /// The raw terms are stored rather than `a11/det` etc. because the caller's
 /// expression is `(a11 * b0 - a01 * b1) / det`, and pre-dividing would change
 /// the floating-point result.
+/// Per-block pixels in the shape the LS accumulator wants. Empty without SIMD,
+/// where `ls_accum_scalar` reads the bytes directly.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+type LsPixels = [[f32; 8]; 16];
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+type LsPixels = ();
+
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn ls_pixels(pixels: &[[u8; 4]; 16]) -> LsPixels {
+    if simd::has_avx2() {
+        simd::ls_pixels(pixels)
+    } else {
+        [[0f32; 8]; 16]
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn ls_pixels(_pixels: &[[u8; 4]; 16]) -> LsPixels {}
+
 #[derive(Clone, Copy)]
 struct TableLs {
     a00: f32,
@@ -477,7 +497,12 @@ fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[(f32, f32); 16]) -> ([f32; 3], 
     (b0, b1)
 }
 
-fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8; 8]> {
+fn refit_with_ls(
+    pixels: &[[u8; 4]; 16],
+    pxv: &LsPixels,
+    ls: &TableLs,
+    table: u32,
+) -> Option<[u8; 8]> {
     // 59% of BC1 RDO's instruction cost by the deterministic model. The kernel
     // keeps one pixel per iteration and separate mul/add, so every lane's
     // accumulation order and rounding match this loop exactly.
@@ -490,7 +515,7 @@ fn refit_with_ls(pixels: &[[u8; 4]; 16], ls: &TableLs, table: u32) -> Option<[u8
     // mode matches it.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let done = if simd::has_avx2() {
-        let (v0, v1) = simd::ls_accum_sse(pixels, &ls.uw);
+        let (v0, v1) = simd::ls_accum_sse(pxv, &ls.uw);
         let (s0, s1) = simd::bc1_ls_solve(v0, v1, a00, a01, a11, det);
         for c in 0..3 {
             e0[c] = s0[c].round().clamp(0.0, 255.0) as u8;

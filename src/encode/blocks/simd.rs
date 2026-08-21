@@ -519,34 +519,85 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
 /// The fourth lane accumulates alpha, which the caller ignores. It is free —
 /// the lane exists either way — and keeps the load a single `u32`.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn ls_accum_sse(pixels: &[[u8; 4]; 16], uw: &[(f32, f32); 16]) -> ([f32; 4], [f32; 4]) {
+/// Least-squares accumulator for a BC1 index table: `b0 = sum (1-w)*px`,
+/// `b1 = sum w*px`.
+///
+/// # Two changes over the obvious kernel, both structural
+///
+/// **The pixels arrive pre-converted.** `refit_with_ls` runs 25.4 times a block
+/// and the pixels are identical on every one of them, yet the old kernel
+/// converted all sixteen from bytes to floats each time — three instructions a
+/// pixel, 48 a call, **1,219 instructions a block** re-deriving a constant. The
+/// caller now converts once per block and passes `pxv`.
+///
+/// **Both accumulator chains live in one register.** `b0` and `b1` are
+/// independent 3-lane chains; as two `__m128`s that is half of each register
+/// idle and two separate broadcast/mul/add triples per pixel. Packed as
+/// `[b0.rgba, b1.rgba]` in one `__m256` they cost one broadcast, one permute,
+/// one mul and one add.
+///
+/// # Why this is still bit-identical
+///
+/// Each lane performs exactly `acc += weight * x`, one pixel per iteration, in
+/// pixel order, with the multiply and the add separate — the same sequence the
+/// scalar loop performs for that lane. Widening the register changes which
+/// lanes run in parallel, never the order or the rounding within a lane. The
+/// byte-to-float conversion is exact for `u8`, so hoisting it out of the loop
+/// cannot move a result either.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[(f32, f32); 16]) -> ([f32; 4], [f32; 4]) {
     debug_assert!(has_avx2());
-    // SAFETY: AVX2 implies SSE4.1, guaranteed by dispatch (debug-asserted).
-    unsafe { ls_accum_sse_impl(pixels, uw) }
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
+    // are fixed-size and read with unaligned loads.
+    unsafe { ls_accum_sse_impl(pxv, uw) }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn ls_accum_sse_impl(
-    pixels: &[[u8; 4]; 16],
+    pxv: &[[f32; 8]; 16],
     uw: &[(f32, f32); 16],
 ) -> ([f32; 4], [f32; 4]) {
     use std::arch::x86_64::*;
-    let mut b0 = _mm_setzero_ps();
-    let mut b1 = _mm_setzero_ps();
+    // [u,u,u,u, w,w,w,w] out of the broadcast [u,w,u,w,u,w,u,w].
+    let idx = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
+    let mut acc = _mm256_setzero_ps();
+    for i in 0..16usize {
+        let pair = _mm256_castpd_ps(_mm256_broadcast_sd(&*(uw.as_ptr().add(i) as *const f64)));
+        let wv = _mm256_permutevar8x32_ps(pair, idx);
+        let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
+    }
+    let mut o0 = [0f32; 4];
+    let mut o1 = [0f32; 4];
+    _mm_storeu_ps(o0.as_mut_ptr(), _mm256_castps256_ps128(acc));
+    _mm_storeu_ps(o1.as_mut_ptr(), _mm256_extractf128_ps(acc, 1));
+    (o0, o1)
+}
+
+/// Convert a block's sixteen pixels to the `[rgba, rgba]` float pairs
+/// [`ls_accum_sse`] wants. Block-invariant, so this runs once where the
+/// accumulator runs 25.4 times.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_pixels(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { ls_pixels_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ls_pixels_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
+    use std::arch::x86_64::*;
+    let mut out = [[0f32; 8]; 16];
     for i in 0..16usize {
         let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
             u32::from_le_bytes(pixels[i]) as i32,
         )));
-        let (u, w) = uw[i];
-        b0 = _mm_add_ps(b0, _mm_mul_ps(_mm_set1_ps(u), px));
-        b1 = _mm_add_ps(b1, _mm_mul_ps(_mm_set1_ps(w), px));
+        _mm_storeu_ps(out[i].as_mut_ptr(), px);
+        _mm_storeu_ps(out[i].as_mut_ptr().add(4), px);
     }
-    let mut o0 = [0f32; 4];
-    let mut o1 = [0f32; 4];
-    _mm_storeu_ps(o0.as_mut_ptr(), b0);
-    _mm_storeu_ps(o1.as_mut_ptr(), b1);
-    (o0, o1)
+    out
 }
 
 
