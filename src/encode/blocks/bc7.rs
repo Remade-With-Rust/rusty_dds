@@ -1067,13 +1067,60 @@ pub(super) fn try_bc7_mode6(
 ///
 /// Caching the index-only half was refuted separately above. Both routes are
 /// now closed with numbers.
-pub(super) fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 4], [u8; 4])> {
+/// Least-squares endpoints for a fixed mode-6 index assignment.
+///
+/// Called 9.14 times a block by the RDO donor loop on identical pixels, so the
+/// hot entry point is [`ls_endpoints_mode6_pxv`], which takes them
+/// pre-converted. This wrapper is for the one-per-block baseline call.
+pub(super) fn ls_endpoints_mode6(
+    pixels: &[[u8; 4]; 16],
+    indices: &[u8; 16],
+) -> Option<([u8; 4], [u8; 4])> {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return ls_endpoints_mode6_pxv(&simd::ls_pixels(pixels), indices);
+    }
+    ls_endpoints_mode6_scalar(pixels, indices)
+}
+
+/// [`ls_endpoints_mode6`] with the pixels already in `[rgba, rgba]` float form.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(super) fn ls_endpoints_mode6_pxv(
+    pxv: &[[f32; 8]; 16],
+    indices: &[u8; 16],
+) -> Option<([u8; 4], [u8; 4])> {
+    if !simd::has_avx2() {
+        unreachable!("ls_endpoints_mode6_pxv requires AVX2");
+    }
+    let (a, b0, b1) = simd::ls_accum_mode6(pxv, indices);
+    let (a00, a01, a11) = (a[0], a[1], a[2]);
+    let det = a00 * a11 - a01 * a01;
+    if det.abs() < 1e-4 {
+        return None;
+    }
+    // The same solve BC1 uses: six divisions become two `divps`, bit-identical
+    // because IEEE defines division lane-wise. Rounding stays scalar — Rust's
+    // `round` is half-away-from-zero and no SSE mode matches it.
+    let (s0, s1) = simd::bc1_ls_solve(b0, b1, a00, a01, a11, det);
+    let mut e0 = [0u8; 4];
+    let mut e1 = [0u8; 4];
+    for c in 0..4 {
+        e0[c] = s0[c].round().clamp(0.0, 255.0) as u8;
+        e1[c] = s1[c].round().clamp(0.0, 255.0) as u8;
+    }
+    Some((e0, e1))
+}
+
+pub(super) fn ls_endpoints_mode6_scalar(
+    pixels: &[[u8; 4]; 16],
+    indices: &[u8; 16],
+) -> Option<([u8; 4], [u8; 4])> {
     const W: [f32; 16] = [
         0.0, 4.0 / 64.0, 9.0 / 64.0, 13.0 / 64.0, 17.0 / 64.0, 21.0 / 64.0, 26.0 / 64.0,
         30.0 / 64.0, 34.0 / 64.0, 38.0 / 64.0, 43.0 / 64.0, 47.0 / 64.0, 51.0 / 64.0, 55.0 / 64.0,
         60.0 / 64.0, 1.0,
     ];
-    // pixel ≈ (1-w)*e0 + w*e1
+    // pixel ~= (1-w)*e0 + w*e1
     let mut a00 = 0.0f32;
     let mut a01 = 0.0f32;
     let mut a11 = 0.0f32;
@@ -1213,6 +1260,58 @@ pub(super) fn quantize_7p(c: [u8; 4]) -> ([u8; 4], u8) {
 
 #[cfg(test)]
 mod qtab_tests {
+
+    /// The vectorised mode-6 least-squares must reproduce the scalar loop
+    /// **bitwise**, including the table-driven normal-equation terms.
+    ///
+    /// The exactness argument says every `AW6` entry is a multiple of `1/4096`
+    /// bounded by 1, so both the products and every partial sum are exact in
+    /// f32. This checks it rather than trusting it, over the full index range
+    /// and including the degenerate all-one-index tables that drive `det` to
+    /// zero.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn ls_endpoints_mode6_vector_matches_scalar_bitwise() {
+        if !super::simd::has_avx2() {
+            return;
+        }
+        let mut state = 0x51ac_1d0e_7717_3355u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            for q in px.iter_mut() {
+                let r = next();
+                *q = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            }
+            let mut idx = [0u8; 16];
+            match case {
+                // Degenerate: every pixel on one endpoint, so `det` collapses.
+                0 => {}
+                1 => idx = [15u8; 16],
+                // Widest spread.
+                2 => {
+                    for (i, s) in idx.iter_mut().enumerate() {
+                        *s = if i % 2 == 0 { 0 } else { 15 };
+                    }
+                }
+                _ => {
+                    for s in idx.iter_mut() {
+                        *s = (next() >> 20) as u8 & 15;
+                    }
+                }
+            }
+            let pxv = super::simd::ls_pixels(&px);
+            let got = super::ls_endpoints_mode6_pxv(&pxv, &idx);
+            let want = super::ls_endpoints_mode6_scalar(&px, &idx);
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
     use super::{quantize_7p, unquantize_7p_chan};
 
     /// The table must reproduce the direct search for **every** input, not the

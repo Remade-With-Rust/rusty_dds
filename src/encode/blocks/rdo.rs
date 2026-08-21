@@ -444,6 +444,29 @@ fn ls_pixels(pixels: &[[u8; 4]; 16]) -> LsPixels {
 #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
 fn ls_pixels(_pixels: &[[u8; 4]; 16]) -> LsPixels {}
 
+/// Mode-6 LS on pre-converted pixels where the target supports it, falling back
+/// to the byte-taking scalar path otherwise.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+fn ls_endpoints_mode6_hot(
+    pixels: &[[u8; 4]; 16],
+    pxv: &LsPixels,
+    indices: &[u8; 16],
+) -> Option<([u8; 4], [u8; 4])> {
+    if simd::has_avx2() {
+        super::bc7::ls_endpoints_mode6_pxv(pxv, indices)
+    } else {
+        super::bc7::ls_endpoints_mode6_scalar(pixels, indices)
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+fn ls_endpoints_mode6_hot(
+    pixels: &[[u8; 4]; 16],
+    _pxv: &LsPixels,
+    indices: &[u8; 16],
+) -> Option<([u8; 4], [u8; 4])> {
+    super::bc7::ls_endpoints_mode6_scalar(pixels, indices)
+}
+
 #[derive(Clone, Copy)]
 struct TableLs {
     a00: f32,
@@ -827,6 +850,9 @@ pub(crate) fn encode_image_bc7_rdo(
                         let pixels = gather_block(rgba, w, h, bx, by);
                             // Transposed once per block; every candidate borrows it.
                             let planar = Mode6Planar::new(&pixels);
+                            // Likewise block-invariant: the mode-6 LS accumulator
+                            // runs 9.14 times a block on these.
+                            let pxv = ls_pixels(&pixels);
 
                         let mut base = [0u8; 16];
                         encode_bc7_mode6(pixels, &mut base);
@@ -900,7 +926,8 @@ pub(crate) fn encode_image_bc7_rdo(
                                     continue;
                                 };
                                 // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
-                                if let Some((e0, e1)) = ls_endpoints_mode6(&pixels, &didx) {
+                                if let Some((e0, e1)) = ls_endpoints_mode6_hot(&pixels, &pxv, &didx)
+                                {
                                     let q0 = quantize_7p_best(e0);
                                     let q1 = quantize_7p_fixed(e1, dp1);
                                     // p0 is ours (head byte); try both cheaply via helper.

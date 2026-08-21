@@ -715,6 +715,116 @@ unsafe fn bc1_ls_solve_impl(
     (o0, o1)
 }
 
+
+/// `(1 - w, w)` per mode-6 index. Every value is `k/64` for `k` in the mode-6
+/// weight table, so all sixteen are exact binary fractions and these literals
+/// are the f32 the runtime `W[i]` / `1.0 - w` computation produces, bit for bit.
+#[cfg(target_arch = "x86_64")]
+static UW6: [[f32; 2]; 16] = [
+    [1.0, 0.0],
+    [0.9375, 0.0625],
+    [0.859375, 0.140625],
+    [0.796875, 0.203125],
+    [0.734375, 0.265625],
+    [0.671875, 0.328125],
+    [0.59375, 0.40625],
+    [0.53125, 0.46875],
+    [0.46875, 0.53125],
+    [0.40625, 0.59375],
+    [0.328125, 0.671875],
+    [0.265625, 0.734375],
+    [0.203125, 0.796875],
+    [0.140625, 0.859375],
+    [0.0625, 0.9375],
+    [0.0, 1.0]
+];
+
+/// `(u*u, u*w, w*w)` per mode-6 index — the three normal-equation terms, which
+/// depend only on the INDEX, never on the pixels.
+///
+/// Every entry is an exact multiple of `1/4096` and bounded by 1, so each
+/// product is exact in f32 and so is every partial sum (they are multiples of
+/// `1/4096` bounded by 16, well inside a 24-bit mantissa). Reading them from a
+/// table is therefore bit-identical to recomputing `u*u` from `1.0 - w` each
+/// time, not merely close.
+#[cfg(target_arch = "x86_64")]
+static AW6: [[f32; 4]; 16] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.87890625, 0.05859375, 0.00390625, 0.0],
+    [0.738525390625, 0.120849609375, 0.019775390625, 0.0],
+    [0.635009765625, 0.161865234375, 0.041259765625, 0.0],
+    [0.539306640625, 0.195068359375, 0.070556640625, 0.0],
+    [0.451416015625, 0.220458984375, 0.107666015625, 0.0],
+    [0.3525390625, 0.2412109375, 0.1650390625, 0.0],
+    [0.2822265625, 0.2490234375, 0.2197265625, 0.0],
+    [0.2197265625, 0.2490234375, 0.2822265625, 0.0],
+    [0.1650390625, 0.2412109375, 0.3525390625, 0.0],
+    [0.107666015625, 0.220458984375, 0.451416015625, 0.0],
+    [0.070556640625, 0.195068359375, 0.539306640625, 0.0],
+    [0.041259765625, 0.161865234375, 0.635009765625, 0.0],
+    [0.019775390625, 0.120849609375, 0.738525390625, 0.0],
+    [0.00390625, 0.05859375, 0.87890625, 0.0],
+    [0.0, 0.0, 1.0, 0.0]
+];
+
+/// Mode-6 least-squares accumulation: the three normal-equation terms and both
+/// right-hand sides, for all four channels, in one pass.
+///
+/// # Why one AVX2 register covers it
+///
+/// BC7 has four channels, so `b0` and `b1` are eight accumulators — exactly one
+/// `__m256`. The scalar loop ran them as two `[f32; 4]` arrays with an inner
+/// `for c in 0..4`, which is 8 multiplies and 8 adds a pixel plus the array
+/// traffic. Packed as `[b0.rgba, b1.rgba]` it is one broadcast, one permute,
+/// one multiply and one add.
+///
+/// The three `a` terms ride along in an `__m128` fed straight from [`AW6`],
+/// replacing a subtract and three multiply-adds a pixel with a load and an add.
+///
+/// # Bit-identity
+///
+/// Every lane performs the same `acc += weight * x` in pixel order with the
+/// multiply and add separate, so nothing about a lane's arithmetic changes.
+/// `pxv` is exact (`u8` -> `f32`), and [`AW6`]'s exactness is argued above.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_accum_mode6(
+    pxv: &[[f32; 8]; 16],
+    indices: &[u8; 16],
+) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above). Indices are
+    // 4-bit mode-6 values, so every table read below is in bounds — asserted.
+    unsafe { ls_accum_mode6_impl(pxv, indices) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ls_accum_mode6_impl(
+    pxv: &[[f32; 8]; 16],
+    indices: &[u8; 16],
+) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    use std::arch::x86_64::*;
+    let sel = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
+    let mut acc = _mm256_setzero_ps();
+    let mut aacc = _mm_setzero_ps();
+    for i in 0..16usize {
+        let k = indices[i] as usize;
+        debug_assert!(k < 16);
+        let pair = _mm256_castpd_ps(_mm256_broadcast_sd(&*(UW6.as_ptr().add(k) as *const f64)));
+        let wv = _mm256_permutevar8x32_ps(pair, sel);
+        let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
+        aacc = _mm_add_ps(aacc, _mm_loadu_ps(AW6.as_ptr().add(k) as *const f32));
+    }
+    let mut a = [0f32; 4];
+    let mut o0 = [0f32; 4];
+    let mut o1 = [0f32; 4];
+    _mm_storeu_ps(a.as_mut_ptr(), aacc);
+    _mm_storeu_ps(o0.as_mut_ptr(), _mm256_castps256_ps128(acc));
+    _mm_storeu_ps(o1.as_mut_ptr(), _mm256_extractf128_ps(acc, 1));
+    (a, o0, o1)
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
