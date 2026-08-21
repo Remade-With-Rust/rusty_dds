@@ -755,6 +755,8 @@ pub(crate) fn encode_image_bc7_rdo(
                 for by in by0..by1 {
                     for bx in 0..blocks_x {
                         let pixels = gather_block(rgba, w, h, bx, by);
+                            // Transposed once per block; every candidate borrows it.
+                            let planar = Mode6Planar::new(&pixels);
 
                         let mut base = [0u8; 16];
                         encode_bc7_mode6(pixels, &mut base);
@@ -830,9 +832,9 @@ pub(crate) fn encode_image_bc7_rdo(
                                     // Endpoint polish with indices FIXED: the tail bytes
                                     // are the LZ match, head endpoint bytes are literals
                                     // either way — ±1 moves recover quality for free.
-                                    let mut err = mode6_sse(&pixels, q0a, p0a, q1a, dp1, &didx);
+                                    let mut err = mode6_sse(&planar, q0a, p0a, q1a, dp1, &didx);
                                     polish_mode6_endpoints(
-                                        &pixels, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
+                                        &planar, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
                                     );
                                     // Packed only if it wins, as above.
                                     let j = err as f32 - lam * SAVE_HALF8;
@@ -914,22 +916,41 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
 /// is, and the pixels never change. Computing them once turns each of the 259
 /// per-block channel scores from a strided gather plus sixteen table lookups
 /// into one contiguous load.
-struct Mode6Fixed {
-    planar: [[u8; 16]; 4],
+struct Mode6Fixed<'a> {
+    planar: &'a Mode6Planar,
     w: [i16; 16],
 }
 
-impl Mode6Fixed {
+/// The block's pixels, transposed. Constant for every candidate the block will
+/// ever try, so it is built once and borrowed.
+///
+/// It used to live inside `Mode6Fixed` and be rebuilt on every construction —
+/// 64 stores, 8.18 times a block for the polish alone, plus once per
+/// `mode6_sse`. Only the weights actually vary between those calls.
+pub(super) struct Mode6Planar {
+    planar: [[u8; 16]; 4],
+}
+
+impl Mode6Planar {
     #[inline]
-    fn new(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Self {
+    fn new(pixels: &[[u8; 4]; 16]) -> Self {
         let mut planar = [[0u8; 16]; 4];
-        let mut w = [0i16; 16];
         for (i, px) in pixels.iter().enumerate() {
             planar[0][i] = px[0];
             planar[1][i] = px[1];
             planar[2][i] = px[2];
             planar[3][i] = px[3];
-            w[i] = W6M[indices[i] as usize] as i16;
+        }
+        Self { planar }
+    }
+}
+
+impl<'a> Mode6Fixed<'a> {
+    #[inline]
+    fn new(planar: &'a Mode6Planar, indices: &[u8; 16]) -> Self {
+        let mut w = [0i16; 16];
+        for (i, slot) in w.iter_mut().enumerate() {
+            *slot = W6M[indices[i] as usize] as i16;
         }
         Self { planar, w }
     }
@@ -950,12 +971,12 @@ impl Mode6Fixed {
 fn mode6_chan_sse(fixed: &Mode6Fixed, c: usize, v0: u8, v1: u8) -> i64 {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        return simd::mode6_chan_sse_avx2(&fixed.planar[c], &fixed.w, v0, v1);
+        return simd::mode6_chan_sse_avx2(&fixed.planar.planar[c], &fixed.w, v0, v1);
     }
     let base = v0 as i32 * 64 + 32;
     let delta = v1 as i32 - v0 as i32;
     let mut err = 0i64;
-    for (i, &x) in fixed.planar[c].iter().enumerate() {
+    for (i, &x) in fixed.planar.planar[c].iter().enumerate() {
         let v = ((base + fixed.w[i] as i32 * delta) >> 6) as u8;
         let d = v as i64 - x as i64;
         err += d * d;
@@ -976,14 +997,14 @@ fn mode6_chan_errs(fixed: &Mode6Fixed, q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8)
 }
 
 fn mode6_sse(
-    pixels: &[[u8; 4]; 16],
+    planar: &Mode6Planar,
     q0: [u8; 4],
     p0: u8,
     q1: [u8; 4],
     p1: u8,
     indices: &[u8; 16],
 ) -> i64 {
-    let fixed = Mode6Fixed::new(pixels, indices);
+    let fixed = Mode6Fixed::new(planar, indices);
     mode6_chan_errs(&fixed, q0, p0, q1, p1).iter().sum()
 }
 
@@ -1130,7 +1151,7 @@ fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])>
 /// ±1 moves on the 7-bit mode-6 endpoint channels with p-bits and indices
 /// held fixed (the polish never touches the matched tail bytes).
 fn polish_mode6_endpoints(
-    pixels: &[[u8; 4]; 16],
+    planar: &Mode6Planar,
     q0: &mut [u8; 4],
     p0: u8,
     q1: &mut [u8; 4],
@@ -1143,7 +1164,7 @@ fn polish_mode6_endpoints(
     // candidate costs ONE channel rescore, not four, and the block's total is a
     // three-add fixup. Measured at 201 `mode6_sse` calls per block before this,
     // ~51% of BC7 RDO encode.
-    let fixed = Mode6Fixed::new(pixels, indices);
+    let fixed = Mode6Fixed::new(planar, indices);
     let mut ce = mode6_chan_errs(&fixed, *q0, p0, *q1, p1);
     debug_assert_eq!(ce.iter().sum::<i64>(), *err);
     for _round in 0..2 {
