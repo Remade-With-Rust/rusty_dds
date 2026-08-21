@@ -3930,3 +3930,101 @@ channels, not four.
 `bc1_colors_packed` (#7) returning only the packed form measured **worse**
 (103 -> 120). Both representations fall out of the same two 565 words cheaply;
 splitting them costs more in the return than the body saves.
+
+## §68 — RDO round three: the model re-measured, and ten more including the serial one
+
+Round two moved enough that §66's ranking is stale. Re-measured on the current
+tree, same method — calls per block from counters, instructions per call from
+`#[inline(never)]` assembly:
+
+### BC7 RDO — 41,878 instructions per block
+
+| function | calls/blk | instr/call | instr/blk | share |
+|---|---:|---:|---:|---:|
+| **`mode6_chan_sse`** | 259.32 | 130 | **33,712** | **80.5%** |
+| `ls_endpoints_mode6` | 9.23 | 272 | 2,511 | 6.0% |
+| `fit_indices_mode6` | 19.37 | 75 | 1,453 | 3.5% |
+| `encode_bc7_mode6_inner` | 1.00 | 1418 | 1,418 | 3.4% |
+| `palette_mode6` | 19.37 | 67 | 1,298 | 3.1% |
+| `quantize_7p_fixed` | 16.53 | 35 | 579 | 1.4% |
+
+### BC1 RDO — 25,978 instructions per block
+
+| function | calls/blk | instr/call | instr/blk | share |
+|---|---:|---:|---:|---:|
+| **`refit_with_ls`** | 32.19 | 476 | **15,321** | **59.0%** |
+| `bc1_colors_packed` | 18.72 | 135 | 2,527 | 9.7% |
+| `bc1_fit_4color` | 16.74 | 128 | 2,143 | 8.2% |
+| `bc1_block_sse_limited` | 17.72 | 74 | 1,311 | 5.0% |
+| `encode_bc1_bytes` | 1.00 | 1173 | 1,173 | 4.5% |
+| `bc1_chan_sse` | 5.94 | 182 | 1,082 | 4.2% |
+
+### The serial gap, measured
+
+CPU against wall on a four-core pin. Non-RDO encode parallelises; RDO does not:
+
+| | CPU | wall | parallelism |
+|---|---:|---:|---|
+| BC1 λ=0 | 7.81 ms | 2.41 ms | **3.2x** |
+| BC1 λ=25 | 63.80 ms | 63.54 ms | **1.0x** |
+| BC7 λ=0 | 26.04 ms | 12.01 ms | **2.2x** |
+| BC7 λ=25 | 166.67 ms | 166.19 ms | **1.0x** |
+
+### The ten
+
+**1. Parallelise pass 1 — byte-identical, and nobody has to argue about it.**
+`build_table_dict` walks every block, runs the baseline encoder, and histograms
+index tables. Its only shared state is a `HashMap` of counts and an
+index-addressed `Vec` of blocks. Per-thread histograms merged at the end are
+order-independent, and the final sort is `(count desc, table asc)` — total, so
+the dictionary is identical. This is `encode_bc1_bytes` at 1,173 instructions a
+block plus a `gather_block`, done on one thread today.
+
+**2. Parallelise pass 2 — strip-parallel, quality-gated.** The real prize: 1.0x
+becomes ~3x. The dependency is the sliding window and the `prev_block`/`above`
+references, so strips need their own windows. That **changes output**, so unlike
+everything else in this campaign its gate is the `harvest_rdo` ladder not
+regressing, not a payload hash. Worth doing as an opt-in first.
+
+**3. `mode6_chan_sse` — still 80.5% after being vectorised.** The per-call cost
+is already 130 instructions; the lever now is the **call count of 259**. The
+polish sweep evaluates 2 rounds x 2 endpoints x 4 channels x 2 directions = 32
+candidates, and `Mode6Fixed` is rebuilt per `polish_mode6_endpoints` call (8.27 a
+block). Candidates whose channel `delta` is unchanged by the perturbation cannot
+improve; a cheap skip would cut the 259 directly.
+
+**4. `refit_with_ls` — 59.0% of BC1 RDO, and never vectorised.** 476 instructions
+of scalar float LS: sixteen pixels x three channels of multiply-accumulate into
+`b0`/`b1`. That is one AVX2 register per accumulator. The same shape
+`mode6_chan_sse` just won 28.2% on.
+
+**5. `ls_endpoints_mode6` — 272 instructions, four channels.** Same vectorisation
+as #4, and the caching version was already refuted (§67), so this is the
+remaining route.
+
+**6. `bc1_colors_packed` — 9.7%.** 135 instructions building four RGB entries and
+four packed `u32`s. Round two refuted *splitting* it; vectorising the whole
+palette build (two `from_565`, two `lerp_rgb`, four packs) has not been tried.
+
+**7. `bc1_fit_4color` — 8.2%, 128 instructions, 16.74 calls.** Already dispatches
+to AVX2; the 128 is the wrapper plus palette marshalling. Check whether the
+boundary can be hoisted the way BC1 decode's was in 0.3.28.
+
+**8. `bc1_chan_sse` — 182 instructions, scalar.** The BC1 twin of #3, still a
+sixteen-iteration scalar loop. Sixteen `i16` lanes is one register.
+
+**9. `encode_bc1_bytes` / `encode_bc7_mode6_inner` — 1,173 and 1,418 instructions,
+once a block each.** These are the *baseline* encoders, run inside RDO's first
+pass. They are the largest single functions in the whole path and have never been
+examined in an RDO context.
+
+**10. `quantize_7p_fixed` — 579, and `unquantize_7p` — 381.** Both already
+table-driven or SWAR, but called 16.5 and 63.6 times a block. The remaining lever
+is the same as #3: fewer calls, not cheaper calls.
+
+### The method note this round adds
+
+The dominant function is the one round two *created* and then vectorised, and it
+is **still** 80.5%. Per-call cost fell from 305 to 130 instructions and the share
+barely moved, because the call count did not. **When a function stays dominant
+after being made cheaper, stop optimising the body and attack the caller.**
