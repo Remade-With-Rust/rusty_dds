@@ -1544,6 +1544,72 @@ unsafe fn ls_accum_solve_565_impl(
     (p565(r0), p565(r1))
 }
 
+
+/// The block's luminance-extreme pixels: `(max, min)` by `2r + 3g + b`.
+///
+/// The scalar form is a sixteen-iteration argmin/argmax with two unpredictable
+/// branches a pixel — 310 instructions for the block.
+///
+/// # Packing the index into the key
+///
+/// Luminance is at most `2*255 + 3*255 + 255 = 1530`, so `l * 16 + i` fits an
+/// i32 with room and a single `min_epi32` finds the argmin. The tie-break has to
+/// be watched: the scalar keeps the FIRST extreme (strict `<` and `>`), which
+/// `min` reproduces directly for the minimum, but for the maximum the key must
+/// carry `15 - i` so that `max` also prefers the smaller index.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn extrema_opaque_avx2(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); the array is
+    // fixed-size and read with unaligned loads.
+    unsafe { extrema_opaque_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn extrema_opaque_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
+    use std::arch::x86_64::*;
+    let src = pixels.as_ptr() as *const u8;
+    // `madd` folds (r,g) to 2r+3g and (b,a) to b; `hadd` folds those two into
+    // the luminance, and the permute undoes `hadd`'s lane interleave.
+    let wv = _mm256_setr_epi16(2, 3, 1, 0, 2, 3, 1, 0, 2, 3, 1, 0, 2, 3, 1, 0);
+    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+    let lum = |off: usize| {
+        let a = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(off) as *const __m128i));
+        let b = _mm256_cvtepu8_epi16(_mm_loadu_si128(src.add(off + 16) as *const __m128i));
+        _mm256_permutevar8x32_epi32(
+            _mm256_hadd_epi32(_mm256_madd_epi16(a, wv), _mm256_madd_epi16(b, wv)),
+            perm,
+        )
+    };
+    let l0 = lum(0);
+    let l1 = lum(32);
+    let s0 = _mm256_slli_epi32(l0, 4);
+    let s1 = _mm256_slli_epi32(l1, 4);
+    let kmin = _mm256_min_epi32(
+        _mm256_or_si256(s0, _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)),
+        _mm256_or_si256(s1, _mm256_setr_epi32(8, 9, 10, 11, 12, 13, 14, 15)),
+    );
+    let kmax = _mm256_max_epi32(
+        _mm256_or_si256(s0, _mm256_setr_epi32(15, 14, 13, 12, 11, 10, 9, 8)),
+        _mm256_or_si256(s1, _mm256_setr_epi32(7, 6, 5, 4, 3, 2, 1, 0)),
+    );
+    let fold = |v: __m256i, is_min: bool| -> i32 {
+        let a = _mm256_castsi256_si128(v);
+        let b = _mm256_extracti128_si256(v, 1);
+        let r = if is_min { _mm_min_epi32(a, b) } else { _mm_max_epi32(a, b) };
+        let r2 = _mm_shuffle_epi32(r, 0b01_00_11_10);
+        let r = if is_min { _mm_min_epi32(r, r2) } else { _mm_max_epi32(r, r2) };
+        let r3 = _mm_shuffle_epi32(r, 0b10_11_00_01);
+        let r = if is_min { _mm_min_epi32(r, r3) } else { _mm_max_epi32(r, r3) };
+        _mm_cvtsi128_si32(r)
+    };
+    let imin = (fold(kmin, true) & 15) as usize;
+    let imax = (15 - (fold(kmax, false) & 15)) as usize;
+    let (mx, mn) = (pixels[imax], pixels[imin]);
+    ([mx[0], mx[1], mx[2]], [mn[0], mn[1], mn[2]])
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

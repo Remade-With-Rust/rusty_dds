@@ -1433,6 +1433,10 @@ pub(super) fn unquantize_7p_chan(q: u8, p: u8) -> u8 {
 }
 
 pub(super) fn extrema_opaque(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::extrema_opaque_avx2(pixels);
+    }
     let mut min_l = i32::MAX;
     let mut max_l = i32::MIN;
     let mut min_rgb = [0u8; 3];
