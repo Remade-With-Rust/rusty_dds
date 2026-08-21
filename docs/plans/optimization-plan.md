@@ -3781,3 +3781,99 @@ instead of three removed the six whole-block SSE calls from the sweep entirely.
 > `#[inline(never)]` arms. Both are deterministic and neither needs a quiet
 > machine. Three of these ten looked unwinnable for a whole round because the
 > only instrument in hand was a stopwatch.
+
+## §66 — RDO round two: a deterministic cost model, and ten more targets
+
+Round one ranked by **calls per block** and mispredicted three items (§64). This
+round builds the metric that ranking should have been:
+
+> **instructions per block = calls per block x instructions per call**
+
+Calls come from atomic counters. Instructions per call come from the emitted
+assembly with `#[inline(never)]` forcing each candidate out of line. Both halves
+are deterministic — no clock, no z-score, no quiet machine. The instrumentation
+reaches across `rdo.rs` into `bc1.rs`, `bc7.rs` and `blocks.rs`, which round one
+never touched.
+
+(BC1 counters double-count: the dictionary pass runs its own block loop, so BC1
+rates below are the printed value doubled.)
+
+### BC7 RDO
+
+| function | calls/blk | instr/call | instr/blk | share |
+|---|---:|---:|---:|---:|
+| **`mode6_chan_sse`** | 259.32 | 305 | **79,094** | **88.8%** |
+| `ls_endpoints_mode6` | 9.23 | 272 | 2,511 | 2.8% |
+| `pack_bc7_mode6` | 18.97 | 118 | 2,239 | 2.5% |
+| `unquantize_7p` | 71.82 | 24 | 1,724 | 1.9% |
+| `fit_indices_mode6` | 19.37 | 75 | 1,453 | 1.6% |
+| `palette_mode6` | 19.37 | 67 | 1,298 | 1.5% |
+
+### BC1 RDO
+
+| function | calls/blk | instr/call | instr/blk | share |
+|---|---:|---:|---:|---:|
+| **`lerp_rgb`** | 70.92 | 45 | **3,191** | **27.1%** |
+| `bc1_colors_packed` | 18.72 | 103 | 1,928 | 16.4% |
+| `from_565` | 70.92 | 26 | 1,844 | 15.7% |
+| `pack_bc1_scored_565` | 15.74 | 78 | 1,227 | 10.4% |
+| `encode_bc1_bytes` | 1.00 | 1173 | 1,173 | 10.0% |
+| `to_565` | 66.38 | 11 | 730 | 6.2% |
+| `gather_block` | 2.00 | 294 | 588 | 5.0% |
+
+### The ten, and what to do to each
+
+**1. `mode6_chan_sse` — 88.8% of BC7 RDO.** Round one's own creation: it cut
+`mode6_sse` from 201 calls to 8.27, but the replacement is a **scalar
+16-iteration loop** running 259 times a block. Sixteen `i16` lanes is *one* AVX2
+register. Further: `W6M[indices[i]]` is looked up per pixel, and the indices are
+FIXED across all 259 calls for a block — the sixteen weights can be hoisted to
+the caller and passed in. This single function is worth more than the other nine
+combined.
+
+**2. `ls_endpoints_mode6` (2,511).** Structurally identical to round one's #8,
+which won +13.4%: its normal-equation terms depend only on the **index set**, and
+the indices come from the sliding window. Precompute them as a block enters the
+window instead of per examining block.
+
+**3. `pack_bc7_mode6` (2,239).** 118 instructions to assemble 128 bits, 19x a
+block. Mode 6 is a fixed layout — a `u128` built by shifts, written once.
+
+**4. `unquantize_7p` (1,724).** 24 instructions to do `(q << 1) | p` four times.
+The four bytes fit one `u32`: `(v << 1) & 0xFEFEFEFE | (p * 0x01010101)` is three
+operations for all four channels. Confirmed against the emitted code, which does
+it channel-by-channel with separate shifts, masks and ors.
+
+**5. `palette_mode6` + `fit_indices_mode6` (2,751 together).** Called **19.37
+times each** — always as a pair. The palette is materialised as a
+`[[u8; 4]; 16]` (64 bytes) and immediately consumed. Fusing them keeps it in
+registers and removes a store/load round trip of exactly the kind this crate has
+paid six times.
+
+**6. `lerp_rgb` — 27.1% of BC1 RDO.** 45 instructions per call, 70.9 calls a
+block, and it performs **three integer divisions** by `aw + bw`. Both call sites
+use constant weights (2,1 / 1,2 / 1,1), so the divisor is 3 or 2 — but the
+function takes them as runtime `u32` parameters, which blocks strength reduction
+unless it inlines. Const-generic weights, or a SWAR form over the packed `u32`.
+
+**7. `bc1_colors_packed` (1,928, 16.4%).** The BC1 palette build, and the parent
+of #6 and #8 — it calls `from_565` twice and `lerp_rgb` twice. Fixing those two
+fixes most of this; what remains is its own 103 instructions of repacking.
+
+**8. `from_565` (1,844) and `to_565` (730).** Three channels each, done one at a
+time: 26 and 11 instructions. Both are SWAR candidates over a packed `u32`.
+
+**9. `pack_bc1_scored_565` (1,227).** 78 instructions, 15.7 calls a block. Packs
+*and* scores; the scoring half overlaps `bc1_block_sse`, which is already
+vectorised — check whether it can call it rather than repeat it.
+
+**10. `gather_block` — 294 instructions per call.** It gathers sixteen pixels and
+costs more than `palette_mode6` and `fit_indices_mode6` combined, because it
+clamps for edge blocks on **every** block. An interior fast path (no clamping,
+four 16-byte row copies) should be a fraction of that.
+
+### The method note worth keeping
+
+`mode6_chan_sse` at 88.8% would never have surfaced from a calls-per-block
+ranking — at 259 calls it looked comparable to `unquantize_7p` at 72. It is 46x
+more expensive. **Multiply the two; never rank on either alone.**
