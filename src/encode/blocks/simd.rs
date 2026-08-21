@@ -200,8 +200,11 @@ unsafe fn sse8_rgb(
     );
     let da = _mm256_sub_epi16(a, pv);
     let db = _mm256_sub_epi16(b, pv);
-    let h = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
-    _mm256_permutevar8x32_epi32(h, perm)
+    // The permute back to pixel order is NOT done here — see the caller, which
+    // does it once at the end. Everything downstream is lane-wise, so a
+    // consistent permutation of all lanes commutes with the whole loop.
+    let _ = perm;
+    _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db))
 }
 
 /// BC1 four-colour fit, entirely in registers.
@@ -289,6 +292,11 @@ unsafe fn bc1_fit_4color_avx2_impl(
     if err >= err_limit {
         return None;
     }
+
+    // Pixel order is restored once, here, and only for the indices — the error
+    // total above is a sum, so it is order-independent.
+    let idx_lo = _mm256_permutevar8x32_epi32(idx_lo, perm);
+    let idx_hi = _mm256_permutevar8x32_epi32(idx_hi, perm);
 
     // Indices: 32-bit lanes in pixel order down to sixteen bytes of 0..=3.
     // `packs` saturates, which cannot bite on values that small.

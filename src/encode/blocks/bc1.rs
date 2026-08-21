@@ -18,7 +18,13 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     // contribution, so the old pack-then-bc1_sse re-walk is pure recompute.
     let (a, a_err) = pack_bc1_scored(&pixels, max_c, min_c, i32::MAX)
         .expect("unbounded pack always packs");
-    if rgb_channel_span_sum(&pixels) < 24 {
+    // `rgb_channel_span_sum` and `channel_minmax_rgb` are character-for-character
+    // the same sixteen-pixel walk — the first just sums the second's spans — and
+    // both ran on this block. One walk now serves both. (`encode_bc7_mode6_inner`
+    // had the same duplication and records the same fix.)
+    let (mx, mn) = channel_minmax_rgb(&pixels);
+    let span = (mx[0] - mn[0]) as i32 + (mx[1] - mn[1]) as i32 + (mx[2] - mn[2]) as i32;
+    if span < 24 {
         return a;
     }
     let mut best = a;
@@ -26,7 +32,6 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     if best_err == 0 {
         return best;
     }
-    let (mx, mn) = channel_minmax_rgb(&pixels);
     if !(mx == max_c && mn == min_c) {
         consider_bc1(&pixels, mx, mn, &mut best, &mut best_err);
     }
@@ -401,17 +406,6 @@ pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Optio
     Some((e0, e1))
 }
 
-pub(super) fn rgb_channel_span_sum(pixels: &[[u8; 4]; 16]) -> i32 {
-    let mut mn = [255u8; 3];
-    let mut mx = [0u8; 3];
-    for p in pixels {
-        for c in 0..3 {
-            mn[c] = mn[c].min(p[c]);
-            mx[c] = mx[c].max(p[c]);
-        }
-    }
-    (mx[0] - mn[0]) as i32 + (mx[1] - mn[1]) as i32 + (mx[2] - mn[2]) as i32
-}
 
 pub(super) fn channel_minmax_rgb(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     let mut mn = [255u8; 3];
