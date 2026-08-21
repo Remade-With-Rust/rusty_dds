@@ -219,15 +219,20 @@ pub(crate) fn encode_image_bc1_rdo(
                             // refit is 40.9% of BC1 RDO.
                             let mut tried: [u32; WINDOW] = [0; WINDOW];
                             let mut ntried = 0usize;
+                            let mut tried_bits = 0u64;
                             let mut tried_eps: [(u16, u16); WINDOW] = [(0, 0); WINDOW];
                             let mut neps = 0usize;
+                            let mut eps_bits = 0u64;
                             for k in 0..n {
                                 // 2. Reuse index table, LS-refit endpoints.
                                 let table = recent_tables[k];
-                                let dup = tried[..ntried].contains(&table);
+                                let tb = filter_bit(table);
+                                let dup = (tried_bits & tb) != 0
+                                    && tried[..ntried].contains(&table);
                                 if !dup {
                                     tried[ntried] = table;
                                     ntried += 1;
+                                    tried_bits |= tb;
                                 }
                                 // `lim` tracks `best_j`, which only moves when a
                                 // candidate WINS. It was recomputed for the
@@ -257,10 +262,13 @@ pub(crate) fn encode_image_bc1_rdo(
                                 // endpoint pair repeated in the window refits to
                                 // the same block and the same error.
                                 let (c0, c1) = recent_eps[k];
-                                let edup = tried_eps[..neps].contains(&(c0, c1));
+                                let eb = filter_bit((c0 as u32) | ((c1 as u32) << 16));
+                                let edup = (eps_bits & eb) != 0
+                                    && tried_eps[..neps].contains(&(c0, c1));
                                 if !edup {
                                     tried_eps[neps] = (c0, c1);
                                     neps += 1;
+                                    eps_bits |= eb;
                                 }
                                 if c0 > c1 && lim > 0 && !edup {
                                     if let Some((blk, err)) = super::bc1::pack_bc1_scored_pre(
@@ -284,7 +292,9 @@ pub(crate) fn encode_image_bc1_rdo(
                                 // while the scan is shorter by however many
                                 // repeats the window held (about 6.7 of 16 on
                                 // this corpus). DICT_N of these run per block.
-                                if tried[..ntried].contains(&table) {
+                                if (tried_bits & filter_bit(table)) != 0
+                                    && tried[..ntried].contains(&table)
+                                {
                                     continue; // already tried via the window
                                 }
                                 let lim = (best_j + lam * SAVE_PART).ceil() as i32;
@@ -579,6 +589,26 @@ fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 3], [f
         }
     }
     (b0, b1)
+}
+
+/// A 64-bit presence filter over the window's dedup scratch arrays.
+///
+/// Two membership tests run per window entry and the dictionary scan runs more,
+/// 55.3 calls a block in total, and they walk 361 elements between them because
+/// the answer is usually NO. One bit per hashed value answers "definitely
+/// absent" in four instructions, and only a set bit costs a scan.
+///
+/// This is EXACT: a clear bit proves absence, and a set bit falls through to the
+/// same linear scan as before, so the result never changes — only the work does.
+///
+/// A vectorised `contains` was tried instead and REFUTED: at 55 calls a block a
+/// `#[target_feature]` kernel pays about 553 instructions of call boundary
+/// alone, against the roughly 1,083 of scalar scanning it replaces.
+#[inline]
+fn filter_bit(v: u32) -> u64 {
+    // Multiply-shift rather than `v & 63`: index tables share low bits far too
+    // often for the bottom six to spread well.
+    1u64 << ((v.wrapping_mul(0x9E37_79B1) >> 26) & 63)
 }
 
 fn refit_with_ls(
