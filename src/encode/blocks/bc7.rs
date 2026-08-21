@@ -127,7 +127,8 @@ pub(super) fn unquant7(v: u8) -> u8 {
 pub(super) struct ColorSeeds {
     extrema: ([u8; 3], [u8; 3]),
     cminmax: ([u8; 3], [u8; 3]),
-    pca: Option<([u8; 3], [u8; 3])>,
+    /// Computed on FIRST USE, not on construction — see [`ColorSeeds::pca`].
+    pca: std::cell::OnceCell<Option<([u8; 3], [u8; 3])>>,
 }
 
 impl ColorSeeds {
@@ -135,8 +136,26 @@ impl ColorSeeds {
         Self {
             extrema: extrema_opaque(pixels),
             cminmax: channel_minmax_rgb(pixels),
-            pca: pca_extremes_rgb(pixels),
+            pca: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The PCA-axis seed, computed at most once per seed set and only if
+    /// something asks for it.
+    ///
+    /// It is by far the most expensive of the three — 525 instructions against
+    /// 51 and 23 — and both consumers sit behind an early-out that usually
+    /// fires first. Mode 5 abandons the block when its alpha half alone already
+    /// reaches the incumbent, which happens on **89%** of blocks, and mode 4
+    /// abandons after its colour search on **69%**; neither reaches this seed on
+    /// those blocks. Building it eagerly paid for it every time regardless.
+    ///
+    /// `OnceCell` rather than `OnceLock`: a seed set is a local, never shared
+    /// across threads, so there is nothing to synchronise and no atomic to pay
+    /// for. Caching still matters because modes 4 and 5 share one seed set at
+    /// rotation 0, which is the whole reason this struct exists.
+    fn pca(&self, pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+        *self.pca.get_or_init(|| pca_extremes_rgb(pixels))
     }
 }
 
@@ -158,13 +177,9 @@ pub(super) fn try_bc7_mode5(
     err_limit: i64,
 ) -> Option<([u8; 16], i64)> {
     // --- alpha half: 8-bit endpoints, 4-entry palette, own index set ---
-    let alpha: [u8; 16] = pixels.map(|p| p[3]);
-    let mut a0 = 255u8;
-    let mut a1 = 0u8;
-    for &a in &alpha {
-        a0 = a0.min(a);
-        a1 = a1.max(a);
-    }
+    let alpha: [u8; 16] = super::alpha::alpha_channel(pixels);
+    // Fifth and sixth copies of this reduction; see `simd::alpha_minmax_avx2`.
+    let (a0, a1) = super::alpha::sample_minmax(&alpha);
     let (a_ep0, a_ep1, a_idx, a_err) = fit_alpha_mode5(&alpha, a1, a0);
     // Colour error is non-negative, so this mode can no longer win: skip the
     // whole colour search. Fires on 89% of blocks.
@@ -186,7 +201,7 @@ pub(super) fn try_bc7_mode5(
                 best_c = cand.0;
             }
         }
-        if let Some((pa, pb)) = seeds.pca {
+        if let Some((pa, pb)) = seeds.pca(pixels) {
             if (pa, pb) != seeds.extrema && (pa, pb) != seeds.cminmax {
                 let cand = fit_color_mode5(pixels, pa, pb);
                 if cand.1 < c_err {
@@ -234,7 +249,7 @@ pub(super) fn try_bc7_mode4(
                 best_c = cand.0;
             }
         }
-        if let Some((pa, pb)) = seeds.pca {
+        if let Some((pa, pb)) = seeds.pca(pixels) {
             if (pa, pb) != seeds.extrema && (pa, pb) != seeds.cminmax {
                 let cand = fit_color_mode4(pixels, pa, pb);
                 if cand.1 < c_err {
@@ -259,13 +274,8 @@ pub(super) fn try_bc7_mode4(
     }
 
     // Alpha half: 6-bit endpoints, 8-entry W3 palette, ±2 lattice window.
-    let alpha: [u8; 16] = pixels.map(|p| p[3]);
-    let mut lo = 255u8;
-    let mut hi = 0u8;
-    for &a in &alpha {
-        lo = lo.min(a);
-        hi = hi.max(a);
-    }
+    let alpha: [u8; 16] = super::alpha::alpha_channel(pixels);
+    let (lo, hi) = super::alpha::sample_minmax(&alpha);
     let (mut a_ep0, mut a_ep1, mut a_idx, mut a_err) = score_alpha_mode4(&alpha, hi >> 2, lo >> 2);
     if a_err > 0 {
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]

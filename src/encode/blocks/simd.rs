@@ -472,6 +472,39 @@ unsafe fn bc1_fit_4color_avx2_impl(
     bc1_fit_core_avx2(pixels, p8, cst4, bc1_psq_rgb_avx2_impl(pixels), err_limit)
 }
 
+/// The alpha channel of a block as sixteen contiguous bytes.
+///
+/// `pixels.map(|p| p[3])` is sixteen strided byte loads and sixteen stores.
+/// One `pshufb` per row gathers that row's four alpha bytes into a dword, and
+/// three unpacks stack the four dwords — twelve operations for thirty-two, and
+/// no scalar store feeding a vector load afterwards.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn alpha_channel_avx2(pixels: &[[u8; 4]; 16]) -> [u8; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { alpha_channel_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn alpha_channel_avx2_impl(pixels: &[[u8; 4]; 16]) -> [u8; 16] {
+    use std::arch::x86_64::*;
+    let base = pixels.as_ptr() as *const u8;
+    let m = _mm_setr_epi8(3, 7, 11, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+    let row = |off: usize| {
+        _mm_shuffle_epi8(_mm_loadu_si128(base.add(off) as *const __m128i), m)
+    };
+    let (r0, r1, r2, r3) = (row(0), row(16), row(32), row(48));
+    // Each row left its four bytes in dword 0; stack them in order.
+    let v = _mm_unpacklo_epi64(
+        _mm_unpacklo_epi32(r0, r1),
+        _mm_unpacklo_epi32(r2, r3),
+    );
+    let mut out = [0u8; 16];
+    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, v);
+    out
+}
+
 /// Sixteen 3-bit alpha indices packed into one 48-bit word.
 ///
 /// The scalar form is sixteen shift-and-or steps with a loop-carried dependency
@@ -2350,7 +2383,33 @@ mod oracle {
     /// The vector LS accumulation must be **bit-identical** to the scalar loop,
     /// which means the same order and no fused multiply-add.
     #[cfg(target_arch = "x86_64")]
-            #[test]
+                #[test]
+    fn alpha_channel_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x77c1_0e35_bb92_4416u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            for p in px.iter_mut() {
+                for q in p.iter_mut() {
+                    *q = (next() >> 11) as u8;
+                }
+            }
+            let got = alpha_channel_avx2(&px);
+            let want: [u8; 16] = px.map(|p| p[3]);
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
+#[test]
     fn alpha_pack_indices_matches_scalar() {
         use super::*;
         if !has_avx2() {

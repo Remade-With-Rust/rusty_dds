@@ -6,11 +6,23 @@
 
 use super::*;
 
+/// The alpha channel of a block as sixteen contiguous bytes.
+///
+/// Three call sites wrote `pixels.map(|p| p[3])`; see
+/// `simd::alpha_channel_avx2`.
+pub(super) fn alpha_channel(pixels: &[[u8; 4]; 16]) -> [u8; 16] {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::alpha_channel_avx2(pixels);
+    }
+    pixels.map(|p| p[3])
+}
+
 /// Min and max of the sixteen samples.
 ///
 /// Four call sites ran this as a scalar sixteen-iteration `min`/`max` chain;
 /// see `simd::alpha_minmax_avx2`, which is exact rather than approximate.
-fn sample_minmax(samples: &[u8; 16]) -> (u8, u8) {
+pub(super) fn sample_minmax(samples: &[u8; 16]) -> (u8, u8) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
         return simd::alpha_minmax_avx2(samples);

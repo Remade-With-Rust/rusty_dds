@@ -691,7 +691,7 @@ pub fn encode_bc3(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     // min/max-only fast path: quality-monotone (same dual seed, candidates
     // only added under strict `<`), and CryTIF-style UI content is
     // alpha-gradient-heavy.
-    out[..8].copy_from_slice(&encode_alpha_block_unsigned(pixels.map(|p| p[3])));
+    out[..8].copy_from_slice(&encode_alpha_block_unsigned(super::alpha::alpha_channel(&pixels)));
     out[8..16].copy_from_slice(&encode_bc1_bytes(pixels));
 }
 
