@@ -1001,6 +1001,26 @@ pub(super) fn try_bc7_mode6(
     Some(f.pack())
 }
 
+/// # A refuted optimisation, recorded so it is not retried
+///
+/// Splitting the index-only half (`a00`, `a01`, `a11`, `det`) out and caching it
+/// per window entry — the trick that won **+13.4%** for BC1's
+/// `refit_endpoints_for_table` — **does not transfer here**, measured twice:
+///
+/// | form | instructions per block |
+/// |---|---|
+/// | as-is | 9.23 calls x 272 = **2,511** |
+/// | split, caching `(1-w, w)` too | 9.23 x 244 + 451 = 2,703 |
+/// | split, four scalars only | 9.23 x 255 + 362 = 2,716 |
+///
+/// The reason is the shape of this loop rather than the idea: the index-only
+/// terms are three mult-adds of eleven, and **both** halves still pay the table
+/// lookup and the `1 - w`. Removing three of eleven saved 17 instructions a
+/// call while the cached half cost 362 once. BC1's version wins because its
+/// pixel loop is three channels rather than four, so the fixed part is a much
+/// larger share.
+///
+/// Timing agreed it was not there: +2.0%, z = +1.41, 8 ties of 16.
 pub(super) fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 4], [u8; 4])> {
     const W: [f32; 16] = [
         0.0, 4.0 / 64.0, 9.0 / 64.0, 13.0 / 64.0, 17.0 / 64.0, 21.0 / 64.0, 26.0 / 64.0,
@@ -1041,22 +1061,32 @@ pub(super) fn ls_endpoints_mode6(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> 
 }
 
 pub(super) fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: [u8; 16]) -> [u8; 16] {
-    let mut bw = BitWriter::default();
-    for _ in 0..6 {
-        bw.write_bits(0, 1);
-    }
-    bw.write_bits(1, 1);
+    // `BitWriter` is a little-endian 128-bit accumulator — `low |= v << pos`,
+    // `high` above 64, and `into_array` emits low then high as LE bytes. That is
+    // exactly `u128::to_le_bytes`, and mode 6's layout is FIXED, so every shift
+    // here is a compile-time constant instead of 33 calls through a running bit
+    // cursor. Measured at 118 instructions a call, 19 calls a block.
+    //
+    // Layout: 7 mode bits (unary, so bit 6 set), then eight 7-bit endpoints
+    // interleaved q0/q1 per channel, two p-bits, a 3-bit anchor index and
+    // fifteen 4-bit indices. 7 + 56 + 2 + 3 + 60 = 128.
+    let mut v: u128 = 1 << 6;
+    let mut pos = 7u32;
     for c in 0..4 {
-        bw.write_bits(q0[c] as u32, 7);
-        bw.write_bits(q1[c] as u32, 7);
+        v |= (q0[c] as u128) << pos;
+        v |= (q1[c] as u128) << (pos + 7);
+        pos += 14;
     }
-    bw.write_bits(p0 as u32, 1);
-    bw.write_bits(p1 as u32, 1);
-    bw.write_bits(indices[0] as u32, 3);
+    v |= (p0 as u128) << pos;
+    v |= (p1 as u128) << (pos + 1);
+    pos += 2;
+    v |= (indices[0] as u128) << pos;
+    pos += 3;
     for i in 1..16 {
-        bw.write_bits(indices[i] as u32, 4);
+        v |= (indices[i] as u128) << pos;
+        pos += 4;
     }
-    bw.into_array()
+    v.to_le_bytes()
 }
 
 /// Best 7-bit quantization of one channel for a given p-bit, and its squared
@@ -1207,12 +1237,15 @@ mod qtab_tests {
 }
 
 pub(super) fn unquantize_7p(q: [u8; 4], p: u8) -> [u8; 4] {
-    [
-        unquantize_7p_chan(q[0], p),
-        unquantize_7p_chan(q[1], p),
-        unquantize_7p_chan(q[2], p),
-        unquantize_7p_chan(q[3], p),
-    ]
+    // All four channels in one word. `(q << 1) | p` per byte becomes a shift, a
+    // mask and an or: `& 0xFEFE_FEFE` clears each byte's bit 0, which is exactly
+    // where the previous byte's bit 7 spills, and `p * 0x0101_0101` sets it.
+    //
+    // Identical to the per-channel form for every input, including `q > 127`:
+    // there the scalar's `as u8` drops the same high bit the mask does.
+    // Measured at 24 instructions a call, 72 calls a block.
+    let v = u32::from_le_bytes(q);
+    (((v << 1) & 0xFEFE_FEFE) | (p as u32 * 0x0101_0101)).to_le_bytes()
 }
 
 pub(super) fn unquantize_7p_chan(q: u8, p: u8) -> u8 {
