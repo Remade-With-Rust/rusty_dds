@@ -420,10 +420,71 @@ fn build_table_dict(
     (dict, blocks)
 }
 
+/// One 565 field expanded to 8 bits — [`from_565`], one channel of it.
+#[inline]
+fn from_565_chan(c: u16, ch: usize) -> u8 {
+    match ch {
+        0 => {
+            let r = ((c >> 11) & 31) as u8;
+            (r << 3) | (r >> 2)
+        }
+        1 => {
+            let g = ((c >> 5) & 63) as u8;
+            (g << 2) | (g >> 4)
+        }
+        _ => {
+            let b = (c & 31) as u8;
+            (b << 3) | (b >> 2)
+        }
+    }
+}
+
+/// SSE of ONE channel of a 4-colour BC1 block against the source.
+///
+/// `polish_endpoints_fixed_table` perturbs a single 565 field, which can only
+/// move that channel's palette column and therefore only that channel's error
+/// term. Scoring one channel instead of three is two-thirds less work in both
+/// the palette build and the pixel loop.
+///
+/// Four-colour mode only, which is this function's contract — it returns before
+/// the sweep when `c0 <= c1`. The interpolants are `lerp_rgb`'s, one column.
+#[inline]
+fn bc1_chan_sse(pixels: &[[u8; 4]; 16], ch: usize, c0: u16, c1: u16, table: u32) -> i32 {
+    let a = from_565_chan(c0, ch) as u32;
+    let b = from_565_chan(c1, ch) as u32;
+    let cols = [
+        a as u8,
+        b as u8,
+        ((2 * a + b) / 3) as u8,
+        ((a + 2 * b) / 3) as u8,
+    ];
+    let mut e = 0i32;
+    for (i, p) in pixels.iter().enumerate() {
+        let idx = ((table >> (2 * i)) & 3) as usize;
+        let d = cols[idx] as i32 - p[ch] as i32;
+        e += d * d;
+    }
+    e
+}
+
 /// +-1 contract moves on the 565 endpoints with the index table HELD FIXED
 /// (the table bytes are the LZ match; endpoints are literals either way).
 fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
-    let mut err = bc1_block_sse(pixels, block);
+    let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    // Per-channel error, carried across the sweep: a candidate moves one 565
+    // field, so only one term can change and the total is a two-add fixup.
+    let mut ce = [0i32; 3];
+    {
+        let (c0, c1) = (
+            u16::from_le_bytes([block[0], block[1]]),
+            u16::from_le_bytes([block[2], block[3]]),
+        );
+        for (ch, e) in ce.iter_mut().enumerate() {
+            *e = bc1_chan_sse(pixels, ch, c0, c1, table);
+        }
+    }
+    let mut err = ce[0] + ce[1] + ce[2];
+    debug_assert_eq!(err, bc1_block_sse(pixels, block));
     for _round in 0..2 {
         let c0 = u16::from_le_bytes([block[0], block[1]]);
         let c1 = u16::from_le_bytes([block[2], block[3]]);
@@ -431,12 +492,10 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
             return;
         }
         let prev = err;
-        // The endpoints only move when a candidate is accepted, so they are
-        // carried rather than re-read from the block bytes on every one of the
-        // six candidates per round.
-        let (mut c0n, mut c1n) = (c0, c1);
         for (base_is_c0, d) in [(true, -1i32), (false, 1i32)] {
             for (shift, maxv) in [(11u16, 31u16), (5, 63), (0, 31)] {
+                let c0n = u16::from_le_bytes([block[0], block[1]]);
+                let c1n = u16::from_le_bytes([block[2], block[3]]);
                 let base = if base_is_c0 { c0n } else { c1n };
                 let cur = (base >> shift) & maxv;
                 let nv = cur as i32 + d;
@@ -448,19 +507,19 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
                 if n0 <= n1 {
                     continue; // must stay 4-color or the table reinterprets
                 }
-                // Only the four endpoint bytes differ; the table half is fixed
-                // by this function's contract, so the block is edited in place
-                // and rolled back rather than copied per candidate.
-                let keep = [block[0], block[1], block[2], block[3]];
-                block[0..2].copy_from_slice(&n0.to_le_bytes());
-                block[2..4].copy_from_slice(&n1.to_le_bytes());
-                let e = bc1_block_sse(pixels, block);
-                if e < err {
-                    err = e;
-                    c0n = n0;
-                    c1n = n1;
-                } else {
-                    block[0..4].copy_from_slice(&keep);
+                // 11 -> red, 5 -> green, 0 -> blue.
+                let ch = match shift {
+                    11 => 0usize,
+                    5 => 1,
+                    _ => 2,
+                };
+                let cand = bc1_chan_sse(pixels, ch, n0, n1, table);
+                let total = err - ce[ch] + cand;
+                if total < err {
+                    err = total;
+                    ce[ch] = cand;
+                    block[0..2].copy_from_slice(&n0.to_le_bytes());
+                    block[2..4].copy_from_slice(&n1.to_le_bytes());
                 }
             }
         }

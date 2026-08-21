@@ -3732,3 +3732,52 @@ threshold where a clock can see them.
 
 Seven of ten produced measured timing wins, cumulatively **2.05x on BC7 RDO and
 1.29x on BC1 RDO**. Three did not and provably cannot at this scale.
+
+
+## §65 — All ten, with the right instrument for each
+
+§64 concluded three items were unwinnable. That was wrong — or rather, it was
+right about the *clock* and wrong about stopping there. The box's null arm puts
+the timing floor at ~7.8%, and three items have ceilings below it. But this
+campaign has a documented instrument for exactly that case, and it was not used
+until pushed: **count the work, not the seconds.**
+
+Forcing the three inlined functions out of line with `#[inline(never)]` **in both
+arms** makes them countable, and the attribute cancels, so the delta is the
+change under test. No clock, no z-score, no quiet box.
+
+| # | function | instrument | result |
+|---|---|---|---|
+| 1 | `mode6_sse` | paired CPU | **+44.1%** BC7 |
+| 2 | `polish_mode6_endpoints` | call counter | `mode6_sse` **201.45 -> 8.27** per block (24.4x) |
+| 3 | `quantize_7p_fixed` | paired CPU | **+9.9%** BC7 |
+| 4 | `bc7_block_sse` | paired CPU | **+3.9%** BC7 |
+| 5 | `dp0_choice` | call counter | `quantize_7p_fixed` **33.07 -> 16.53** per block (2.0x) |
+| 6 | `parse_mode6` | call counter | **8.27 -> 1.00** per block (8.3x) |
+| 7 | `score_bc1` / `score_bc7` | emitted instructions | **163 -> 77** (-52.8%) and **138 -> 44** (-68.1%) |
+| 8 | `refit_endpoints_for_table` | paired CPU | **+13.4%** BC1 |
+| 9 | `bc1_block_sse` (+ limited) | paired CPU | **+12.4%** BC1 |
+| 10 | `polish_endpoints_fixed_table` | emitted instructions | **297 -> 220** (-25.9%), and the six out-of-line SSE calls it made are gone |
+
+Cumulative on the clock, where the clock can see: **BC7 RDO 2.05x, BC1 RDO
+1.29x**, byte-identical across the whole ladder throughout.
+
+### #10 took two attempts, and the first was a measured regression
+
+The first version carried the endpoints and edited the block in place instead of
+copying a trial. It read -0.6% on the clock — inside the noise, so easy to file
+as "flat". The instruction count was not ambiguous: **297 -> 323, +8.8% worse.**
+The rollback path costs more than the eight-byte copy it removes. Reverted.
+
+The second version applies §63's own lesson from `mode6_sse`: a candidate moves
+one 565 field, so only one channel's error can change. Scoring one channel
+instead of three removed the six whole-block SSE calls from the sweep entirely.
+
+### The rule
+
+> **A flat clock is not a verdict when the effect is below the floor — it is a
+> missing instrument.** Measure the floor with a null arm; if the ceiling is
+> under it, switch to counting work: calls, or instructions from
+> `#[inline(never)]` arms. Both are deterministic and neither needs a quiet
+> machine. Three of these ten looked unwinnable for a whole round because the
+> only instrument in hand was a stopwatch.
