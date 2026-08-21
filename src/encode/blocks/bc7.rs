@@ -17,7 +17,14 @@ use super::*;
 /// blocks whose alpha gradient disagrees with the color gradient (UI/decal
 /// content); mode 5 carries separate 2-bit index sets per channel group.
 pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
-    encode_bc7_mode6_scored(pixels, out);
+    // The public entry keeps the slice; the scored form takes the block as an
+    // ARRAY so every write inside it is provably in range. This one conversion
+    // replaces a bounds check that was inlined into the whole encoder.
+    let block: &mut [u8; 16] = match (&mut out[..16]).try_into() {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    encode_bc7_mode6_scored(pixels, block);
 }
 
 /// [`encode_bc7_mode6`] returning the block's SSE, which it computes anyway.
@@ -25,7 +32,7 @@ pub fn encode_bc7_mode6(pixels: [[u8; 4]; 16], out: &mut [u8]) {
 /// The RDO driver needs that error and used to recompute it with
 /// `bc7_block_sse` — 52 instructions a block to re-derive a value this function
 /// already had in hand.
-pub(crate) fn encode_bc7_mode6_scored(pixels: [[u8; 4]; 16], out: &mut [u8]) -> i64 {
+pub(crate) fn encode_bc7_mode6_scored(pixels: [[u8; 4]; 16], out: &mut [u8; 16]) -> i64 {
     // `a_lo`/`a_hi` come back from the inner encoder, which computes the whole
     // per-channel min/max for its seeds. Walking the block again here for the
     // alpha pair alone was the same sixteen pixels a second time.
@@ -100,7 +107,7 @@ pub(crate) fn encode_bc7_mode6_scored(pixels: [[u8; 4]; 16], out: &mut [u8]) -> 
             }
         }
     }
-    out[..16].copy_from_slice(&best_bits);
+    out.copy_from_slice(&best_bits);
     best_err
 }
 
@@ -729,7 +736,10 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, 
     let (mut seeds, mut n_seeds) = bc7_mode6_seeds_base(ex, cm);
     let mut tried = 0usize;
     loop {
-        for &(ep0, ep1) in &seeds[tried..n_seeds] {
+        // Iterator adaptors rather than a range slice: `take`/`skip` yield only
+        // what exists and cannot panic, where `seeds[tried..n_seeds]` carried a
+        // slice bounds check on two runtime bounds.
+        for &(ep0, ep1) in seeds.iter().take(n_seeds).skip(tried) {
             let f = mode6_base(pixels, ep0, ep1);
             if f.err < best_err {
                 best_err = f.err;
@@ -790,7 +800,9 @@ pub(super) fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
     if *n >= seeds.len() {
         return;
     }
-    for seed in seeds[..*n].iter() {
+    // `take` rather than a range slice: it yields at most what exists and so
+    // cannot panic, where `seeds[..*n]` carried a slice bounds check.
+    for seed in seeds.iter().take(*n) {
         if *seed == s {
             return;
         }

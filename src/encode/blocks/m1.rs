@@ -169,13 +169,16 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
     let mut total_err = 0i64;
 
     for s in 0..2 {
-        let (idxs, n) = (members[s].0, members[s].1);
+        // `n` counts members of one subset of a sixteen-pixel block, so the
+        // clamp is a no-op — and it is what lets every `idxs[..n]` below drop
+        // its slice bounds check.
+        let (idxs, n) = (members[s].0, members[s].1.min(16));
         // seed endpoints: luminance extrema over the subset
         let mut min_l = i32::MAX;
         let mut max_l = i32::MIN;
         let mut e0 = [0u8; 3];
         let mut e1 = [0u8; 3];
-        for &i in &idxs[..n] {
+        for &i in idxs.iter().take(n) {
             // Member lists hold pixel indices, so `& 15` is a no-op that makes
             // the range provable. Same everywhere `i` indexes a block array.
             debug_assert!(i < 16);
@@ -198,7 +201,7 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
         }
         q[s] = bq;
         pbits[s] = bp;
-        for (k, &i) in idxs[..n].iter().enumerate() {
+        for (k, &i) in idxs.iter().take(n).enumerate() {
             debug_assert!(i < 16);
             indices[i & 15] = bidx[k];
         }
@@ -214,8 +217,11 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
         debug_assert!(anchor < 16);
         if indices[anchor & 15] >= 4 {
             q[s].swap(0, 1);
-            let (idxs, n) = (members[s].0, members[s].1);
-            for &i in &idxs[..n] {
+            // `n` counts members of one subset of a sixteen-pixel block, so the
+        // clamp is a no-op — and it is what lets every `idxs[..n]` below drop
+        // its slice bounds check.
+        let (idxs, n) = (members[s].0, members[s].1.min(16));
+            for &i in idxs.iter().take(n) {
                 debug_assert!(i < 16);
                 indices[i & 15] = 7 - indices[i & 15];
             }

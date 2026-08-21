@@ -87,8 +87,13 @@ pub(super) fn write2(b0: i64, d0: i64, b1: i64, d1: i64, w0: i16, w1: i16, dst: 
 
 /// Pre-pack the base/delta pairs of an opaque-alpha mode into register form.
 #[inline(always)]
-pub(super) fn pack_bd3(bd: &[([i32; 3], [i32; 3])], pairs: usize) -> [(i64, i64); 3] {
-    let mut out = [(0i64, 0i64); 3];
+pub(super) fn pack_bd3(bd: &[([i32; 3], [i32; 3])], pairs: usize) -> [(i64, i64); 4] {
+    // FOUR slots for three subsets. Callers index this with a two-bit field
+    // (`(subsets >> 2 * p) & 0x3`), and although a three-subset partition never
+    // names subset 3, nothing tells the compiler that — so a three-slot array
+    // left a live bounds check on every lookup. The fourth slot is never read;
+    // it exists so the mask itself proves the index.
+    let mut out = [(0i64, 0i64); 4];
     for (k, slot) in out.iter_mut().enumerate().take(pairs) {
         slot.0 = pack3_opaque_base(bd[k].0);
         slot.1 = pack3_opaque_delta(bd[k].1);

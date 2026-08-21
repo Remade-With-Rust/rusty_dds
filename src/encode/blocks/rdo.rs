@@ -1180,7 +1180,7 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
     // faster than `bcdec_rs::bc7` and oracle-tested against it, and it declines
     // exactly one input — the reserved encoding — which falls through here just
     // as it does in `decode_bc7`. Byte-identical by construction.
-    if !crate::decode::bcn::bc7_fast_block(block, &mut dec, 16) {
+    if !crate::decode::bcn::bc7_fast_block(block, &mut dec) {
         bcdec_rs::bc7(block, &mut dec, 16);
     }
     let mut err = 0i64;
