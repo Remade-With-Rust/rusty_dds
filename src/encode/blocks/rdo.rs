@@ -244,9 +244,9 @@ fn bc1_colors_packed(block: &[u8; 8]) -> ([[u8; 3]; 4], [u32; 4]) {
     let a = from_565(c0);
     let b = from_565(c1);
     let colors = if c0 > c1 {
-        [a, b, lerp_rgb(a, b, 2, 1), lerp_rgb(a, b, 1, 2)]
+        [a, b, lerp_rgb::<2, 1>(a, b), lerp_rgb::<1, 2>(a, b)]
     } else {
-        [a, b, lerp_rgb(a, b, 1, 1), [0, 0, 0]]
+        [a, b, lerp_rgb::<1, 1>(a, b), [0, 0, 0]]
     };
     let packed = [
         u32::from_le_bytes([colors[0][0], colors[0][1], colors[0][2], 0]),

@@ -136,7 +136,7 @@ pub(super) fn pack_bc1_scored_565(
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
     let ca = from_565(hi);
     let cb = from_565(lo);
-    let colors = [ca, cb, lerp_rgb(ca, cb, 2, 1), lerp_rgb(ca, cb, 1, 2)];
+    let colors = [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)];
     let (table, err) = bc1_fit_4color(pixels, &colors, err_limit)?;
     let mut out = [0u8; 8];
     out[0..2].copy_from_slice(&hi.to_le_bytes());
@@ -211,7 +211,7 @@ pub(super) fn pack_bc1_scored(
         (
             max565,
             min565,
-            [ca, cb, lerp_rgb(ca, cb, 2, 1), lerp_rgb(ca, cb, 1, 2)],
+            [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)],
             false,
         )
     } else if max565 < min565 {
@@ -224,7 +224,7 @@ pub(super) fn pack_bc1_scored(
         (
             min565,
             max565,
-            [ca, cb, lerp_rgb(ca, cb, 2, 1), lerp_rgb(ca, cb, 1, 2)],
+            [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)],
             false,
         )
     } else {
@@ -234,7 +234,7 @@ pub(super) fn pack_bc1_scored(
         (
             min565,
             max565,
-            [ca, cb, lerp_rgb(ca, cb, 1, 1), [0, 0, 0]],
+            [ca, cb, lerp_rgb::<1, 1>(ca, cb), [0, 0, 0]],
             true,
         )
     };
@@ -415,14 +415,14 @@ pub(super) fn bc1_sse(pixels: &[[u8; 4]; 16], block: &[u8]) -> i32 {
         [
             from_565(c0),
             from_565(c1),
-            lerp_rgb(from_565(c0), from_565(c1), 2, 1),
-            lerp_rgb(from_565(c0), from_565(c1), 1, 2),
+            lerp_rgb::<2, 1>(from_565(c0), from_565(c1)),
+            lerp_rgb::<1, 2>(from_565(c0), from_565(c1)),
         ]
     } else {
         [
             from_565(c0),
             from_565(c1),
-            lerp_rgb(from_565(c0), from_565(c1), 1, 1),
+            lerp_rgb::<1, 1>(from_565(c0), from_565(c1)),
             [0, 0, 0],
         ]
     };
@@ -468,8 +468,8 @@ pub(super) fn pack_bc1(pixels: [[u8; 4]; 16], max_c: [u8; 3], min_c: [u8; 3]) ->
         let colors = [
             from_565(max565),
             from_565(min565),
-            lerp_rgb(from_565(max565), from_565(min565), 2, 1),
-            lerp_rgb(from_565(max565), from_565(min565), 1, 2),
+            lerp_rgb::<2, 1>(from_565(max565), from_565(min565)),
+            lerp_rgb::<1, 2>(from_565(max565), from_565(min565)),
         ];
         (max565, min565, pack_indices_2bit(&pixels, &colors, false))
     } else if max565 < min565 {
@@ -477,15 +477,15 @@ pub(super) fn pack_bc1(pixels: [[u8; 4]; 16], max_c: [u8; 3], min_c: [u8; 3]) ->
         let colors = [
             from_565(min565),
             from_565(max565),
-            lerp_rgb(from_565(min565), from_565(max565), 2, 1),
-            lerp_rgb(from_565(min565), from_565(max565), 1, 2),
+            lerp_rgb::<2, 1>(from_565(min565), from_565(max565)),
+            lerp_rgb::<1, 2>(from_565(min565), from_565(max565)),
         ];
         (min565, max565, pack_indices_2bit(&pixels, &colors, false))
     } else {
         let colors = [
             from_565(min565),
             from_565(max565),
-            lerp_rgb(from_565(min565), from_565(max565), 1, 1),
+            lerp_rgb::<1, 1>(from_565(min565), from_565(max565)),
             [0, 0, 0],
         ];
         (min565, max565, pack_indices_2bit(&pixels, &colors, true))
