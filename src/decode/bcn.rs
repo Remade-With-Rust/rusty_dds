@@ -1597,8 +1597,12 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     {
         let (mut bo, mut dobj) = ([0i32; 4], [0i32; 4]);
         for k in 0..4 {
-            bo[map[k]] = base[k];
-            dobj[map[k]] = delta[k];
+            // `map` is the BC7 channel rotation, a permutation of 0..3, so the
+            // mask is a no-op — and it is what lets the compiler drop the two
+            // bounds checks this loop otherwise carries on every iteration.
+            debug_assert!(map[k] < 4);
+            bo[map[k] & 3] = base[k];
+            dobj[map[k] & 3] = delta[k];
         }
         let (bp, dp) = (
             crate::decode::simd::pack4(bo),
@@ -2095,8 +2099,12 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         // before the vector op, leaving only the alpha lane to name.
         let (mut bo, mut dobj) = ([0i32; 4], [0i32; 4]);
         for k in 0..4 {
-            bo[map[k]] = base[k];
-            dobj[map[k]] = delta[k];
+            // `map` is the BC7 channel rotation, a permutation of 0..3, so the
+            // mask is a no-op — and it is what lets the compiler drop the two
+            // bounds checks this loop otherwise carries on every iteration.
+            debug_assert!(map[k] < 4);
+            bo[map[k] & 3] = base[k];
+            dobj[map[k] & 3] = delta[k];
         }
         let (bp, dp) = (
             crate::decode::simd::pack4(bo),
