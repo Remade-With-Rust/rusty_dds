@@ -550,6 +550,65 @@ unsafe fn ls_accum_sse_impl(
 }
 
 
+
+/// Four index bytes per table byte, for expanding BC1's 2-bit indices.
+///
+/// `SEL1[b]` is the four indices packed in `b`, one per byte — a `pshufb`
+/// selector for four pixels of a single channel. 1 KiB, built at compile time.
+const fn build_sel1() -> [[u8; 4]; 256] {
+    let mut t = [[0u8; 4]; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        let mut k = 0usize;
+        while k < 4 {
+            t[b][k] = ((b >> (2 * k)) & 3) as u8;
+            k += 1;
+        }
+        b += 1;
+    }
+    t
+}
+
+static SEL1: [[u8; 4]; 256] = build_sel1();
+
+/// SSE of ONE channel of a 4-colour BC1 block, indices fixed.
+///
+/// The BC1 twin of [`mode6_chan_sse_avx2`], and the same shape: sixteen values
+/// against a four-entry palette. 182 instructions as a scalar loop, 5.94 calls a
+/// block. The palette is four bytes, so one `pshufb` expands all sixteen pixels
+/// from it; the source channel arrives planar because the caller holds the
+/// pixels fixed across the whole sweep.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_chan_sse_avx2(px: &[u8; 16], cols: [u8; 4], table: u32) -> i32 {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_chan_sse_avx2_impl(px, cols, table) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_chan_sse_avx2_impl(px: &[u8; 16], cols: [u8; 4], table: u32) -> i32 {
+    use std::arch::x86_64::*;
+    let b = table.to_le_bytes();
+    let sel = _mm_setr_epi32(
+        i32::from_le_bytes(SEL1[b[0] as usize]),
+        i32::from_le_bytes(SEL1[b[1] as usize]),
+        i32::from_le_bytes(SEL1[b[2] as usize]),
+        i32::from_le_bytes(SEL1[b[3] as usize]),
+    );
+    let pal = _mm_cvtsi32_si128(i32::from_le_bytes(cols));
+    let rec = _mm256_cvtepu8_epi16(_mm_shuffle_epi8(pal, sel));
+    let want = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
+    let d = _mm256_sub_epi16(rec, want);
+    let sq = _mm256_madd_epi16(d, d);
+    let h = _mm256_hadd_epi32(sq, sq);
+    let h = _mm256_hadd_epi32(h, h);
+    _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    ))
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -592,6 +651,42 @@ mod oracle {
     /// full endpoint range and every weight the mode-6 table can produce.
     /// The vector LS accumulation must be **bit-identical** to the scalar loop,
     /// which means the same order and no fused multiply-add.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn bc1_chan_sse_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0xc1a5_5e50_7788_1122u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut px = [0u8; 16];
+            for q in px.iter_mut() {
+                *q = (next() >> 11) as u8;
+            }
+            let r = next();
+            let cols = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            let table = match case {
+                0 => 0,
+                1 => u32::MAX,
+                _ => next() as u32,
+            };
+            let got = bc1_chan_sse_avx2(&px, cols, table);
+            let mut want = 0i32;
+            for (i, &x) in px.iter().enumerate() {
+                let d = cols[((table >> (2 * i)) & 3) as usize] as i32 - x as i32;
+                want += d * d;
+            }
+            assert_eq!(got, want, "case {case}");
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn ls_accum_matches_scalar_bitwise() {

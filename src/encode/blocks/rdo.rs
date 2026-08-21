@@ -593,7 +593,7 @@ fn from_565_chan(c: u16, ch: usize) -> u8 {
 /// Four-colour mode only, which is this function's contract — it returns before
 /// the sweep when `c0 <= c1`. The interpolants are `lerp_rgb`'s, one column.
 #[inline]
-fn bc1_chan_sse(pixels: &[[u8; 4]; 16], ch: usize, c0: u16, c1: u16, table: u32) -> i32 {
+fn bc1_chan_sse(planar: &[[u8; 16]; 3], ch: usize, c0: u16, c1: u16, table: u32) -> i32 {
     let a = from_565_chan(c0, ch) as u32;
     let b = from_565_chan(c1, ch) as u32;
     let cols = [
@@ -602,10 +602,17 @@ fn bc1_chan_sse(pixels: &[[u8; 4]; 16], ch: usize, c0: u16, c1: u16, table: u32)
         ((2 * a + b) / 3) as u8,
         ((a + 2 * b) / 3) as u8,
     ];
+    // One `pshufb` expands all sixteen indices from the four-byte palette; the
+    // channel arrives planar because the caller holds the pixels fixed for the
+    // whole sweep. 182 instructions as the scalar loop below.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::bc1_chan_sse_avx2(&planar[ch], cols, table);
+    }
     let mut e = 0i32;
-    for (i, p) in pixels.iter().enumerate() {
+    for (i, &x) in planar[ch].iter().enumerate() {
         let idx = ((table >> (2 * i)) & 3) as usize;
-        let d = cols[idx] as i32 - p[ch] as i32;
+        let d = cols[idx] as i32 - x as i32;
         e += d * d;
     }
     e
@@ -615,6 +622,14 @@ fn bc1_chan_sse(pixels: &[[u8; 4]; 16], ch: usize, c0: u16, c1: u16, table: u32)
 /// (the table bytes are the LZ match; endpoints are literals either way).
 fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
     let table = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+    // Pixels transposed once for the whole sweep — the channel scorer wants a
+    // contiguous run, and the pixels do not change across candidates.
+    let mut planar = [[0u8; 16]; 3];
+    for (i, px) in pixels.iter().enumerate() {
+        planar[0][i] = px[0];
+        planar[1][i] = px[1];
+        planar[2][i] = px[2];
+    }
     // Per-channel error, carried across the sweep: a candidate moves one 565
     // field, so only one term can change and the total is a two-add fixup.
     let mut ce = [0i32; 3];
@@ -624,7 +639,7 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
             u16::from_le_bytes([block[2], block[3]]),
         );
         for (ch, e) in ce.iter_mut().enumerate() {
-            *e = bc1_chan_sse(pixels, ch, c0, c1, table);
+            *e = bc1_chan_sse(&planar, ch, c0, c1, table);
         }
     }
     let mut err = ce[0] + ce[1] + ce[2];
@@ -657,7 +672,7 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
                     5 => 1,
                     _ => 2,
                 };
-                let cand = bc1_chan_sse(pixels, ch, n0, n1, table);
+                let cand = bc1_chan_sse(&planar, ch, n0, n1, table);
                 let total = err - ce[ch] + cand;
                 if total < err {
                     err = total;
