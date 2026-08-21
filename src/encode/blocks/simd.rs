@@ -1138,15 +1138,15 @@ unsafe fn ls_accum_mode6_impl(
 pub(super) fn mode6_chan_sse_pair_avx2(
     px: &[u8; 16],
     w: &[i16; 16],
-    a0: u8,
-    b0: u8,
-    a1: u8,
-    b1: u8,
+    a: u8,
+    b: u8,
+    dbase: i16,
+    ddelta: i16,
 ) -> (i64, i64) {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
     // are fixed-size and read with unaligned loads.
-    unsafe { mode6_chan_sse_pair_avx2_impl(px, w, a0, b0, a1, b1) }
+    unsafe { mode6_chan_sse_pair_avx2_impl(px, w, a, b, dbase, ddelta) }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1154,17 +1154,26 @@ pub(super) fn mode6_chan_sse_pair_avx2(
 unsafe fn mode6_chan_sse_pair_avx2_impl(
     px: &[u8; 16],
     w: &[i16; 16],
-    a0: u8,
-    b0: u8,
-    a1: u8,
-    b1: u8,
+    a: u8,
+    b: u8,
+    dbase: i16,
+    ddelta: i16,
 ) -> (i64, i64) {
     use std::arch::x86_64::*;
     let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
     let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
-    let sq = |a: u8, b: u8| {
-        let base = _mm256_set1_epi16(a as i16 * 64 + 32);
-        let delta = _mm256_set1_epi16(b as i16 - a as i16);
+    // The second candidate is derived from the first with two adds rather than
+    // rebuilt from scratch. The polish only ever moves ONE quantized endpoint by
+    // +/-1, and `unquantize` is `(q << 1) | p`, so the two candidates'
+    // unquantized values differ by exactly 4 — which makes `base` differ by
+    // `4 * 64 = 256` and `delta` by 4, both known constants at the call site.
+    // Building the second pair the long way cost two scalar operations and two
+    // broadcasts.
+    let base0 = _mm256_set1_epi16(a as i16 * 64 + 32);
+    let delta0 = _mm256_set1_epi16(b as i16 - a as i16);
+    let base1 = _mm256_add_epi16(base0, _mm256_set1_epi16(dbase));
+    let delta1 = _mm256_add_epi16(delta0, _mm256_set1_epi16(ddelta));
+    let sq = |base: __m256i, delta: __m256i| {
         let v = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
         let d = _mm256_sub_epi16(v, pv);
         _mm256_madd_epi16(d, d)
@@ -1173,7 +1182,10 @@ unsafe fn mode6_chan_sse_pair_avx2_impl(
     // once, so the second `hadd` leaves lane 0 holding candidate 0's per-half
     // sum and lane 1 candidate 1's; adding the two 128-bit halves finishes both.
     // Two separate six-instruction chains become one of seven.
-    let h = _mm256_hadd_epi32(_mm256_hadd_epi32(sq(a0, b0), sq(a1, b1)), _mm256_setzero_si256());
+    let h = _mm256_hadd_epi32(
+        _mm256_hadd_epi32(sq(base0, delta0), sq(base1, delta1)),
+        _mm256_setzero_si256(),
+    );
     let t = _mm_add_epi32(
         _mm256_castsi256_si128(h),
         _mm256_extracti128_si256(h, 1),

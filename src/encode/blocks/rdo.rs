@@ -220,7 +220,13 @@ pub(crate) fn encode_image_bc1_rdo(
                                     tried[ntried] = table;
                                     ntried += 1;
                                 }
-                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                // `lim` tracks `best_j`, which only moves when a
+                                // candidate WINS. It was recomputed for the
+                                // endpoint path a few lines below on every
+                                // iteration; now it is recomputed only where it
+                                // can have changed — same value, one `ceil` and
+                                // one convert fewer per pass.
+                                let mut lim = (best_j + lam * SAVE_PART).ceil() as i32;
                                 if lim > 0 && !dup {
                                     if let Some(cand) = recent_ls[k]
                                         .as_ref()
@@ -232,6 +238,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                                 best_j = j;
                                                 best = cand;
                                                 best_class = Class::Table;
+                                                lim = (best_j + lam * SAVE_PART).ceil() as i32;
                                             }
                                         }
                                     }
@@ -246,7 +253,6 @@ pub(crate) fn encode_image_bc1_rdo(
                                     tried_eps[neps] = (c0, c1);
                                     neps += 1;
                                 }
-                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
                                 if c0 > c1 && lim > 0 && !edup {
                                     if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
                                         &pixels, c0, c1, &recent_pal[k], lim,
@@ -954,6 +960,17 @@ pub(crate) fn encode_image_bc7_rdo(
                             }
 
                             let n = filled.min(BC7_WINDOW);
+                            // An exact early-out was tried here, the analogue of
+                            // BC1's `lim > 0` guard which this loop never had: a
+                            // candidate wins only if `err - lam * SAVE_HALF8 <
+                            // best_j`, and `err` is a sum of squares, so once
+                            // `best_j + lam * SAVE_HALF8 <= 0` nothing can win
+                            // and the loop may `break`. It is correct and it was
+                            // byte-identical — and it FIRES ALMOST NEVER:
+                            // polish calls went 8.178 -> 8.176 a block. `best_j`
+                            // simply never gets good enough to close the bound
+                            // here, unlike BC1's, so the guard costs two float
+                            // operations an iteration to save nothing. Removed.
                             // Deduplicating donors was tried and REVERTED: a
                             // counter found **0.000 duplicate donors per block**
                             // on representative content, so the check is pure
@@ -1147,20 +1164,42 @@ fn mode6_chan_sse(fixed: &Mode6Fixed, c: usize, v0: u8, v1: u8) -> i64 {
 /// Two candidates for one channel in one call — see
 /// [`simd::mode6_chan_sse_pair_avx2`]. Falls back to two scalar evaluations.
 #[inline]
+/// Score the `-1` and `+1` candidates for one channel.
+///
+/// The second candidate is passed as DELTAS from the first, not as absolute
+/// endpoints: the polish only ever moves one quantized endpoint by `+/-1`, and
+/// `unquantize` is `(q << 1) | p`, so the two unquantized values differ by
+/// exactly 4. That makes `base` differ by `4 * 64 = 256` and `delta` by 4, both
+/// compile-time constants at the call site, so the kernel derives the second
+/// candidate with two adds instead of two scalar computations and two
+/// broadcasts.
 fn mode6_chan_sse_pair(
     fixed: &Mode6Fixed,
     c: usize,
-    a0: u8,
-    b0: u8,
-    a1: u8,
-    b1: u8,
+    a: u8,
+    b: u8,
+    dbase: i16,
+    ddelta: i16,
 ) -> (i64, i64) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if simd::has_avx2() {
-        return simd::mode6_chan_sse_pair_avx2(&fixed.planar.planar[c], &fixed.w, a0, b0, a1, b1);
+        return simd::mode6_chan_sse_pair_avx2(
+            &fixed.planar.planar[c],
+            &fixed.w,
+            a,
+            b,
+            dbase,
+            ddelta,
+        );
     }
+    // Scalar fallback rebuilds the second candidate from the same deltas.
+    let (a1, b1) = if dbase != 0 {
+        ((a as i16 + dbase / 64) as u8, b)
+    } else {
+        (a, (b as i16 + ddelta) as u8)
+    };
     (
-        mode6_chan_sse(fixed, c, a0, b0),
+        mode6_chan_sse(fixed, c, a, b),
         mode6_chan_sse(fixed, c, a1, b1),
     )
 }
@@ -1432,8 +1471,11 @@ fn polish_mode6_endpoints(
                 let (mut cand_lo, mut cand_hi) = match (lo_ok, hi_ok) {
                     (true, true) => {
                         let (a0, b0) = mk(start - 1);
-                        let (a1, b1) = mk(start + 1);
-                        let (l, h) = mode6_chan_sse_pair(fixed, c, a0, b0, a1, b1);
+                        // `+1` differs from `-1` by 4 in the unquantized domain,
+                        // on whichever endpoint is moving.
+                        let (dbase, ddelta) =
+                            if which == 0 { (4 * 64, -4) } else { (0, 4) };
+                        let (l, h) = mode6_chan_sse_pair(fixed, c, a0, b0, dbase, ddelta);
                         (Some(l), Some(h))
                     }
                     (true, false) => {
