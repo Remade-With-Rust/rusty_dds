@@ -200,11 +200,24 @@ pub(crate) fn encode_image_bc1_rdo(
                             }
 
                             let n = filled.min(WINDOW);
+                            // The window can hold the SAME table more than once
+                            // — repetitive content emits repeats constantly —
+                            // and refitting a table twice yields the same
+                            // endpoints, the same error, and a strict `<` that
+                            // cannot fire. Skipping repeats is exact, and the
+                            // refit is 40.9% of BC1 RDO.
+                            let mut tried: [u32; WINDOW] = [0; WINDOW];
+                            let mut ntried = 0usize;
                             for k in 0..n {
                                 // 2. Reuse index table, LS-refit endpoints.
                                 let table = recent_tables[k];
+                                let dup = tried[..ntried].contains(&table);
+                                if !dup {
+                                    tried[ntried] = table;
+                                    ntried += 1;
+                                }
                                 let lim = (best_j + lam * SAVE_PART).ceil() as i32;
-                                if lim > 0 {
+                                if lim > 0 && !dup {
                                     if let Some(cand) = recent_ls[k]
                                         .as_ref()
                                         .and_then(|ls| refit_with_ls(&pixels, ls, table))
