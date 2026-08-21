@@ -347,10 +347,6 @@ fn table_ls(table: u32) -> Option<TableLs> {
     Some(TableLs { a00, a01, a11, det, uw })
 }
 
-fn refit_endpoints_for_table(pixels: &[[u8; 4]; 16], table: u32) -> Option<[u8; 8]> {
-    refit_with_ls(pixels, &table_ls(table)?, table)
-}
-
 /// The pixel-dependent half: accumulate `b0`/`b1` and solve.
 ///
 /// The accumulation order is the original's — ascending `i`, `b0` then `b1` —
@@ -435,10 +431,12 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
             return;
         }
         let prev = err;
+        // The endpoints only move when a candidate is accepted, so they are
+        // carried rather than re-read from the block bytes on every one of the
+        // six candidates per round.
+        let (mut c0n, mut c1n) = (c0, c1);
         for (base_is_c0, d) in [(true, -1i32), (false, 1i32)] {
             for (shift, maxv) in [(11u16, 31u16), (5, 63), (0, 31)] {
-                let c0n = u16::from_le_bytes([block[0], block[1]]);
-                let c1n = u16::from_le_bytes([block[2], block[3]]);
                 let base = if base_is_c0 { c0n } else { c1n };
                 let cur = (base >> shift) & maxv;
                 let nv = cur as i32 + d;
@@ -450,13 +448,19 @@ fn polish_endpoints_fixed_table(pixels: &[[u8; 4]; 16], block: &mut [u8; 8]) {
                 if n0 <= n1 {
                     continue; // must stay 4-color or the table reinterprets
                 }
-                let mut trial = *block;
-                trial[0..2].copy_from_slice(&n0.to_le_bytes());
-                trial[2..4].copy_from_slice(&n1.to_le_bytes());
-                let e = bc1_block_sse(pixels, &trial);
+                // Only the four endpoint bytes differ; the table half is fixed
+                // by this function's contract, so the block is edited in place
+                // and rolled back rather than copied per candidate.
+                let keep = [block[0], block[1], block[2], block[3]];
+                block[0..2].copy_from_slice(&n0.to_le_bytes());
+                block[2..4].copy_from_slice(&n1.to_le_bytes());
+                let e = bc1_block_sse(pixels, block);
                 if e < err {
                     err = e;
-                    *block = trial;
+                    c0n = n0;
+                    c1n = n1;
+                } else {
+                    block[0..4].copy_from_slice(&keep);
                 }
             }
         }
@@ -508,6 +512,11 @@ pub(crate) fn encode_image_bc7_rdo(
     }
 
     let mut recent: [([u8; 16], bool); BC7_WINDOW] = [([0u8; 16], false); BC7_WINDOW];
+    // Parsed once when a block enters the window, not once per block that later
+    // examines it. `parse_mode6` measured 8.27 calls per block, every one of them
+    // re-extracting bitfields from a block this driver had already emitted.
+    type Mode6Parts = ([u8; 4], u8, [u8; 4], u8, [u8; 16]);
+    let mut recent_m6: [Option<Mode6Parts>; BC7_WINDOW] = [None; BC7_WINDOW];
     let mut prev_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
     let mut cur_row: Vec<[u8; 16]> = vec![[0u8; 16]; blocks_x];
     let mut filled = 0usize;
@@ -530,6 +539,7 @@ pub(crate) fn encode_image_bc7_rdo(
                 cur_row[bx] = base;
                 let slot = (by * blocks_x + bx) % BC7_WINDOW;
                 recent[slot] = (base, base[0] & 0x7F == 0x40);
+                recent_m6[slot] = parse_mode6(&base);
                 filled += 1;
                 continue;
             }
@@ -576,7 +586,8 @@ pub(crate) fn encode_image_bc7_rdo(
                     if !is_m6 {
                         continue;
                     }
-                    let Some((dq0, dp0, dq1, dp1, didx)) = parse_mode6(&donor) else {
+                    let _ = &donor;
+                    let Some((dq0, dp0, dq1, dp1, didx)) = recent_m6[k] else {
                         continue;
                     };
                     // 2. Tail reuse: donor p1 + indices, our endpoints by LS.
@@ -628,6 +639,7 @@ pub(crate) fn encode_image_bc7_rdo(
             cur_row[bx] = best;
             let slot = (by * blocks_x + bx) % BC7_WINDOW;
             recent[slot] = (best, best[0] & 0x7F == 0x40);
+            recent_m6[slot] = parse_mode6(&best);
             filled += 1;
         }
         std::mem::swap(&mut prev_row, &mut cur_row);
@@ -899,12 +911,18 @@ fn polish_mode6_endpoints(
 /// LZ-match value the block ALREADY carries against the recent window:
 /// whole-block repeat, or a repeated 4-byte half (table / endpoints).
 fn score_bc1(block: &[u8; 8], recent: &[[u8; 8]]) -> f32 {
+    // One `u64` per block and one `u32` per half: the whole-block test and both
+    // half tests become integer compares instead of slice compares, and the
+    // halves fall out of the same load. Same short-circuit, same result.
+    let key = u64::from_le_bytes(*block);
+    let (lo, hi) = (key as u32, (key >> 32) as u32);
     let mut best = 0f32;
     for r in recent {
-        if r == block {
+        let rk = u64::from_le_bytes(*r);
+        if rk == key {
             return SAVE_WHOLE;
         }
-        if r[4..8] == block[4..8] || r[0..4] == block[0..4] {
+        if (rk >> 32) as u32 == hi || rk as u32 == lo {
             best = SAVE_PART;
         }
     }
@@ -914,12 +932,17 @@ fn score_bc1(block: &[u8; 8], recent: &[[u8; 8]]) -> f32 {
 
 /// LZ-match value a BC7 block already carries vs the recent window.
 fn score_bc7(block: &[u8; 16], recent: &[([u8; 16], bool)]) -> f32 {
+    // As `score_bc1`: one `u128` for the block, two `u64` halves out of the same
+    // value. Integer compares rather than slice compares.
+    let key = u128::from_le_bytes(*block);
+    let (lo, hi) = (key as u64, (key >> 64) as u64);
     let mut best = 0f32;
     for (r, _) in recent {
-        if r == block {
+        let rk = u128::from_le_bytes(*r);
+        if rk == key {
             return SAVE_WHOLE16;
         }
-        if r[8..16] == block[8..16] || r[0..8] == block[0..8] {
+        if (rk >> 64) as u64 == hi || rk as u64 == lo {
             best = SAVE_HALF8;
         }
     }

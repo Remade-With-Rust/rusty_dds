@@ -3615,3 +3615,57 @@ image to histogram index tables before pass 2 begins.
   in `harvest_rdo` moving no worse, not a payload hash. Items 1-10 as described
   are all *exact* (same arithmetic, less of it), so they should hold the hash
   anyway — which makes the hash a useful check that an "exact" refactor really was.
+
+## §63 — The ten RDO targets, hammered: seven wins, three measured flat
+
+Cumulative, 512^2 λ=25, pinned, paired CPU, byte-identical across the whole
+ladder (8 payload hashes, 2 formats, 4 lambdas):
+
+| | before | after | verdict |
+|---|---|---|---|
+| **BC7 RDO** | 389.8809 ms | **189.7321 ms** | 14/14, z = +3.74, **+51.3%** (2.05x) |
+| **BC1 RDO** | 65.3832 ms | **50.5022 ms** | 14/14, z = +3.74, **+22.8%** (1.29x) |
+
+| # | function | outcome |
+|---|---|---|
+| 1 | `mode6_sse` | **+44.1%** BC7 — per-channel incremental error |
+| 2 | `polish_mode6_endpoints` | shipped with #1; it owns the sweep |
+| 3 | `quantize_7p_fixed` | **+9.9%** BC7 — 512-entry compile-time table |
+| 4 | `bc7_block_sse` | **+3.9%** BC7 — our decoder, not the reference |
+| 5 | `dp0_choice` | shipped with #3; the error is in the same table |
+| 6 | `parse_mode6` | **flat** (z = -0.33) |
+| 7 | `score_bc7` / `score_bc1` | **flat** (z = +0.63) |
+| 8 | `refit_endpoints_for_table` | **+13.4%** BC1 — table-only LS terms precomputed |
+| 9 | `bc1_block_sse` (+ limited) | **+12.4%** BC1 — vectorised fixed-table SSE |
+| 10 | `polish_endpoints_fixed_table` | **flat** (z = +0.50), ceiling only 3.5% |
+
+### The ranking was wrong about three of them, and the reason is general
+
+§62 ranked these by **calls per block**. That ranking mispredicted #6, #7 and
+#10, and the correction is worth more than the three items were:
+
+> **Call count is not cost.** `parse_mode6` runs 8.27 times per block and is
+> ~0.7% of a block's cycles, because it is cheap bit extraction that inlines.
+> `mode6_sse` ran 201 times per block and was ~51% of BC7 RDO, because each call
+> rebuilt a 16-entry palette and summed 64 error terms. A frequency ranking finds
+> candidates; only a doubling probe sizes them.
+
+Doubling probes taken before building anything would have predicted all three
+flats. The one taken for #10 *did*: its ceiling measured 3.5% before the work
+started, and #9 had already absorbed most of what was inside it.
+
+### The three flat items were kept, not reverted
+
+Unlike the batched seed fit (§59, ~130 lines reverted), each of these is
+**strictly less work and no more code** — an integer compare replacing a slice
+compare, a parse hoisted to window entry, an in-place trial replacing a
+per-candidate array copy. They are recorded as within-noise rather than claimed
+as wins, which is the distinction `LEDGER.md` draws and the reason it exists.
+
+### What is left in RDO, and it is bigger than all ten
+
+§61's finding stands untouched: **the RDO path is serial**. BC7 at λ=0 runs
+4.4x parallel; at λ=25 it runs on one thread, because each block scores against
+a window of blocks already emitted. Even after +51.3%, that is the largest
+remaining factor in RDO — and unlike everything above it would change output,
+so it needs a quality gate rather than a payload hash.
