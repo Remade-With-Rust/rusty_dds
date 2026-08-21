@@ -1138,6 +1138,20 @@ fn mode6_chan_sse_pair(
 fn mode6_chan_errs(fixed: &Mode6Fixed, q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8) -> [i64; 4] {
     let c0 = unquantize_7p(q0, p0);
     let c1 = unquantize_7p(q1, p1);
+    // All four channels share the weight vector and all four are always needed,
+    // so they go in one call. (Contrast the four-CANDIDATE fusion in polish,
+    // which was refuted: there, some of the four are discarded by the range
+    // guards, and scoring them anyway gave back what the saved boundaries won.)
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let v = [
+            (c0[0], c1[0]),
+            (c0[1], c1[1]),
+            (c0[2], c1[2]),
+            (c0[3], c1[3]),
+        ];
+        return simd::mode6_chan_errs_avx2(&fixed.planar.planar, &fixed.w, &v);
+    }
     let mut e = [0i64; 4];
     for (c, ec) in e.iter_mut().enumerate() {
         *ec = mode6_chan_sse(fixed, c, c0[c], c1[c]);

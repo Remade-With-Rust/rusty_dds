@@ -1075,6 +1075,54 @@ unsafe fn palette_mode6_avx2_impl(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [
     out
 }
 
+
+/// All four channel errors for one endpoint pair, in a single call.
+///
+/// Unlike the four-candidate polish fusion — which was refuted because it had to
+/// score candidates the range guards would discard — every one of these four is
+/// always needed, so there is no speculation and nothing is wasted. The weight
+/// vector is loaded once instead of four times, and three call boundaries
+/// disappear.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn mode6_chan_errs_avx2(
+    planar: &[[u8; 16]; 4],
+    w: &[i16; 16],
+    v: &[(u8, u8); 4],
+) -> [i64; 4] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); all arrays are
+    // fixed-size and read with unaligned loads.
+    unsafe { mode6_chan_errs_avx2_impl(planar, w, v) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn mode6_chan_errs_avx2_impl(
+    planar: &[[u8; 16]; 4],
+    w: &[i16; 16],
+    v: &[(u8, u8); 4],
+) -> [i64; 4] {
+    use std::arch::x86_64::*;
+    let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
+    let mut out = [0i64; 4];
+    for c in 0..4usize {
+        let (a, b) = v[c];
+        let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(planar[c].as_ptr() as *const __m128i));
+        let base = _mm256_set1_epi16(a as i16 * 64 + 32);
+        let delta = _mm256_set1_epi16(b as i16 - a as i16);
+        let val = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
+        let d = _mm256_sub_epi16(val, pv);
+        let sq = _mm256_madd_epi16(d, d);
+        let h = _mm256_hadd_epi32(sq, sq);
+        let h = _mm256_hadd_epi32(h, h);
+        out[c] = _mm_cvtsi128_si32(_mm_add_epi32(
+            _mm256_castsi256_si128(h),
+            _mm256_extracti128_si256(h, 1),
+        )) as i64;
+    }
+    out
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
