@@ -909,14 +909,13 @@ pub(crate) fn encode_image_bc7_rdo(
                                     // Endpoint polish with indices FIXED: the tail bytes
                                     // are the LZ match, head endpoint bytes are literals
                                     // either way — ±1 moves recover quality for free.
-                                    let mut ce = {
-                                        let f = Mode6Fixed::new(&planar, &didx);
-                                        mode6_chan_errs(&f, q0a, p0a, q1a, dp1)
-                                    };
+                                    let dfixed = Mode6Fixed::new(&planar, &didx);
+                                    let mut ce =
+                                        mode6_chan_errs(&dfixed, q0a, p0a, q1a, dp1);
                                     let mut err: i64 = ce.iter().sum();
                                     polish_mode6_endpoints(
-                                        &planar,
-                                        &mut ce, &mut q0a, p0a, &mut q1a, dp1, &didx, &mut err,
+                                        &dfixed,
+                                        &mut ce, &mut q0a, p0a, &mut q1a, dp1, &mut err,
                                     );
                                     // Packed only if it wins, as above.
                                     let j = err as f32 - lam * SAVE_HALF8;
@@ -1229,13 +1228,12 @@ fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])>
 /// ±1 moves on the 7-bit mode-6 endpoint channels with p-bits and indices
 /// held fixed (the polish never touches the matched tail bytes).
 fn polish_mode6_endpoints(
-    planar: &Mode6Planar,
+    fixed: &Mode6Fixed,
     ce: &mut [i64; 4],
     q0: &mut [u8; 4],
     p0: u8,
     q1: &mut [u8; 4],
     p1: u8,
-    indices: &[u8; 16],
     err: &mut i64,
 ) {
     // Per-channel error, carried across the sweep. A candidate moves one channel
@@ -1243,7 +1241,14 @@ fn polish_mode6_endpoints(
     // candidate costs ONE channel rescore, not four, and the block's total is a
     // three-add fixup. Measured at 201 `mode6_sse` calls per block before this,
     // ~51% of BC7 RDO encode.
-    let fixed = Mode6Fixed::new(planar, indices);
+    // `fixed` arrives from the caller rather than being rebuilt here — but do
+    // NOT read that as a win. It was measured, and the second build was worth
+    // **624 -> 618 instructions, -6**, against the ~50 that sixteen table
+    // lookups and stores imply in the source. Whatever the second build looked
+    // like at this level, the compiler had already made it nearly free. The
+    // parameter is kept for the cleaner boundary and the -49/block, and the
+    // number is recorded so nobody re-derives the idea expecting more.
+    //
     // `ce` arrives from the caller, which just computed exactly these four
     // values to produce `err` — recomputing them here was one full
     // `mode6_chan_errs` (four kernel calls) per donor, 8.18 times a block.
@@ -1289,7 +1294,7 @@ fn polish_mode6_endpoints(
                         ((*q0)[c], nv as u8)
                     };
                     let cand = mode6_chan_sse(
-                        &fixed,
+                        fixed,
                         c,
                         unquantize_7p_chan(qa, p0),
                         unquantize_7p_chan(qb, p1),
