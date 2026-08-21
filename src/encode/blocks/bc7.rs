@@ -561,13 +561,50 @@ pub(super) fn ls_endpoints_mode5(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> 
     if det.abs() < 1e-4 {
         return None;
     }
+    // The same solve BC1 and mode 6 use: six scalar divisions become two
+    // `divps`, bit-identical for free because IEEE defines division lane-wise.
+    //
+    // The rounding matches too. This wrote `x.round().clamp(0.0, 255.0)` while
+    // the kernel folds in `round_clamp_u8`, and the two are the SAME function —
+    // `round_clamp_u8_matches_round_then_clamp` asserts it over 400_000 cases
+    // including the f32 tie that breaks the naive `(x + 0.5)` form, both clamp
+    // boundaries and negatives.
+    //
+    // The fourth lane is fed zeros and discarded: it solves to zero and cannot
+    // disturb the other three, which are lane-independent.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let (q0, q1) = simd::bc1_ls_solve(
+            [b0[0], b0[1], b0[2], 0.0],
+            [b1[0], b1[1], b1[2], 0.0],
+            a00,
+            a01,
+            a11,
+            det,
+        );
+        return Some(([q0[0], q0[1], q0[2]], [q1[0], q1[1], q1[2]]));
+    }
+    Some(ls_solve_mode5_scalar(b0, b1, a00, a01, a11, det))
+}
+
+/// Kept OUT of line: the fallback arm of an AVX2 dispatch.
+#[cold]
+#[inline(never)]
+fn ls_solve_mode5_scalar(
+    b0: [f32; 3],
+    b1: [f32; 3],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> ([u8; 3], [u8; 3]) {
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
     for c in 0..3 {
-        e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 255.0) as u8;
-        e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 255.0) as u8;
+        e0[c] = super::round_clamp_u8((a11 * b0[c] - a01 * b1[c]) / det);
+        e1[c] = super::round_clamp_u8((a00 * b1[c] - a01 * b0[c]) / det);
     }
-    Some((e0, e1))
+    (e0, e1)
 }
 
 /// Mode-5 alpha half: exact 8-bit endpoints, 4-entry palette, ±2 endpoint
