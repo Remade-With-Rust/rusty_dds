@@ -47,21 +47,6 @@ pub(super) fn fit_indices_mode6_avx2(
 /// interleaved as `[p0,p1,p4,p5,p2,p3,p6,p7]`; `perm` puts them back in order.
 #[inline]
 #[target_feature(enable = "avx2")]
-unsafe fn sse8_rgba(
-    base: *const u8,
-    off: usize,
-    pv: std::arch::x86_64::__m256i,
-    perm: std::arch::x86_64::__m256i,
-) -> std::arch::x86_64::__m256i {
-    use std::arch::x86_64::*;
-    let a = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i));
-    let b = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off + 16) as *const __m128i));
-    let da = _mm256_sub_epi16(a, pv);
-    let db = _mm256_sub_epi16(b, pv);
-    // madd gives (r*r + g*g, b*b + a*a) per pixel; hadd folds those two.
-    let h = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
-    _mm256_permutevar8x32_epi32(h, perm)
-}
 
 /// Exhaustive mode-6 index fit, entirely in registers.
 ///
@@ -87,19 +72,51 @@ unsafe fn fit_indices_mode6_avx2_impl(
     let base = pixels.as_ptr() as *const u8;
     let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
 
+    // The sixteen pixels are invariant across all sixteen palette entries, but
+    // LLVM will not hoist the loads: `pixels` and `pal` are both raw-pointer
+    // casts of `&[[u8; 4]; 16]`, so it must assume the palette read may alias
+    // the pixel data and reloads them every iteration. The emitted body carried
+    // four `vpmovzxbw` — 64 loads and converts a call — for a block constant.
+    let q0 = _mm256_cvtepu8_epi16(_mm_loadu_si128(base as *const __m128i));
+    let q1 = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(16) as *const __m128i));
+    let q2 = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(32) as *const __m128i));
+    let q3 = _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(48) as *const __m128i));
+
+    // Same story for the palette. `u64::from_le_bytes([e0,0,e1,0,e2,0,e3,0])` is
+    // exactly a byte-to-i16 widen, but written as bytes it emitted ten scalar
+    // instructions per entry — four `movzbl`, three `orq`, three shifts — 160 a
+    // call to rebuild a value `vpmovzxbw` produces in one. Widening all sixteen
+    // entries up front turns the loop's copy into a single broadcast-from-memory.
+    let pb = pal.as_ptr() as *const u8;
+    let mut pal16 = [0i16; 64];
+    for h in 0..4usize {
+        _mm256_storeu_si256(
+            pal16.as_mut_ptr().add(h * 16) as *mut __m256i,
+            _mm256_cvtepu8_epi16(_mm_loadu_si128(pb.add(h * 16) as *const __m128i)),
+        );
+    }
+
     let mut best_lo = _mm256_set1_epi32(i32::MAX);
     let mut best_hi = _mm256_set1_epi32(i32::MAX);
     let mut idx_lo = _mm256_setzero_si256();
     let mut idx_hi = _mm256_setzero_si256();
 
-    for (k, &entry) in pal.iter().enumerate() {
-        let pv = _mm256_set1_epi64x(u64::from_le_bytes([
-            entry[0], 0, entry[1], 0, entry[2], 0, entry[3], 0,
-        ]) as i64);
+    for k in 0..16usize {
+        let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
         let kv = _mm256_set1_epi32(k as i32);
 
-        let cur_lo = sse8_rgba(base, 0, pv, perm);
-        let cur_hi = sse8_rgba(base, 32, pv, perm);
+        let da = _mm256_sub_epi16(q0, pv);
+        let db = _mm256_sub_epi16(q1, pv);
+        let cur_lo = _mm256_permutevar8x32_epi32(
+            _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db)),
+            perm,
+        );
+        let dc = _mm256_sub_epi16(q2, pv);
+        let dd = _mm256_sub_epi16(q3, pv);
+        let cur_hi = _mm256_permutevar8x32_epi32(
+            _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd)),
+            perm,
+        );
 
         let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
         let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
@@ -109,19 +126,31 @@ unsafe fn fit_indices_mode6_avx2_impl(
         idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
     }
 
-    let mut e = [0i32; 16];
-    let mut ix = [0i32; 16];
-    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, best_lo);
-    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, best_hi);
-    _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx_lo);
-    _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx_hi);
+    // The tail stored 128 bytes and read them back scalar; LLVM rendered that as
+    // twelve `vpextrd` lane extractions plus a scalar add chain. Both halves
+    // fold in registers instead.
+    //
+    // Each lane is at most 4*255^2 = 260_100 and there are sixteen, so the total
+    // is under 4.2M — inside i32, and the i64 return is just the caller's type.
+    let s = _mm256_add_epi32(best_lo, best_hi);
+    let h = _mm256_hadd_epi32(s, s);
+    let h = _mm256_hadd_epi32(h, h);
+    let err = _mm_cvtsi128_si32(_mm_add_epi32(
+        _mm256_castsi256_si128(h),
+        _mm256_extracti128_si256(h, 1),
+    )) as i64;
 
+    // Indices are 0..=15, so neither `packs` saturates.
+    let i0 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_lo),
+        _mm256_extracti128_si256(idx_lo, 1),
+    );
+    let i1 = _mm_packs_epi32(
+        _mm256_castsi256_si128(idx_hi),
+        _mm256_extracti128_si256(idx_hi, 1),
+    );
     let mut best_i = [0u8; 16];
-    let mut err = 0i64;
-    for i in 0..16 {
-        best_i[i] = ix[i] as u8;
-        err += e[i] as i64;
-    }
+    _mm_storeu_si128(best_i.as_mut_ptr() as *mut __m128i, _mm_packs_epi16(i0, i1));
     (best_i, err)
 }
 
