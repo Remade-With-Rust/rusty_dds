@@ -1701,6 +1701,44 @@ unsafe fn channel_minmax_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4])
     )
 }
 
+
+/// Transpose a block's sixteen RGBA pixels into four 16-byte channel planes.
+///
+/// Scalar this is 64 individual byte moves. As vectors it is the standard 4x16
+/// byte transpose: one `pshufb` per 16-byte group gathers that group's four
+/// channels into four contiguous dwords, and four `unpack`s interleave the
+/// groups into the finished planes.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn planar_avx2(pixels: &[[u8; 4]; 16]) -> [[u8; 16]; 4] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 implies SSSE3; the array is 64 contiguous bytes read with
+    // four unaligned 16-byte loads.
+    unsafe { planar_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn planar_avx2_impl(pixels: &[[u8; 4]; 16]) -> [[u8; 16]; 4] {
+    use std::arch::x86_64::*;
+    let src = pixels.as_ptr() as *const u8;
+    // Each group of four pixels becomes [RRRR GGGG BBBB AAAA].
+    let sh = _mm_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    let g = |o: usize| _mm_shuffle_epi8(_mm_loadu_si128(src.add(o) as *const __m128i), sh);
+    let (s0, s1, s2, s3) = (g(0), g(16), g(32), g(48));
+    // Dword j of `sk` is channel j of pixels 4k..4k+3, so interleaving dwords
+    // then quadwords lands each channel's sixteen bytes contiguously.
+    let lo01 = _mm_unpacklo_epi32(s0, s1);
+    let lo23 = _mm_unpacklo_epi32(s2, s3);
+    let hi01 = _mm_unpackhi_epi32(s0, s1);
+    let hi23 = _mm_unpackhi_epi32(s2, s3);
+    let mut out = [[0u8; 16]; 4];
+    _mm_storeu_si128(out[0].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(lo01, lo23));
+    _mm_storeu_si128(out[1].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(lo01, lo23));
+    _mm_storeu_si128(out[2].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(hi01, hi23));
+    _mm_storeu_si128(out[3].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(hi01, hi23));
+    out
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]

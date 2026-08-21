@@ -1111,6 +1111,10 @@ pub(super) struct Mode6Planar {
 impl Mode6Planar {
     #[inline]
     fn new(pixels: &[[u8; 4]; 16]) -> Self {
+        #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+        if simd::has_avx2() {
+            return Self { planar: simd::planar_avx2(pixels) };
+        }
         let mut planar = [[0u8; 16]; 4];
         for (i, px) in pixels.iter().enumerate() {
             planar[0][i] = px[0];
