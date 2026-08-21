@@ -493,8 +493,17 @@ struct TableLs {
     a01: f32,
     a11: f32,
     det: f32,
-    /// `(1 - w, w)` per pixel position — also table-only.
-    uw: [(f32, f32); 16],
+    /// `(1-w, 1-w, 1-w, 1-w, w, w, w, w)` per pixel position — table-only, and
+    /// pre-spread to the shape [`simd::ls_accum_sse`] multiplies by.
+    ///
+    /// The kernel used to rebuild that spread every pixel with a
+    /// `vbroadcastsd` plus a `vpermps`. Storing it costs 512 bytes a table
+    /// rather than 128; the same trick FAILED for the mode-6 accumulator
+    /// (160 -> 177) because there the row index is `indices[i]`, data-dependent,
+    /// so a 32-byte stride needs real address arithmetic. Here the index is the
+    /// unrolled loop counter, so every offset is a compile-time constant and
+    /// there is no address arithmetic to pay.
+    uw: [[f32; 8]; 16],
 }
 
 fn table_ls(table: u32) -> Option<TableLs> {
@@ -503,14 +512,14 @@ fn table_ls(table: u32) -> Option<TableLs> {
     let mut a00 = 0f32;
     let mut a01 = 0f32;
     let mut a11 = 0f32;
-    let mut uw = [(0f32, 0f32); 16];
+    let mut uw = [[0f32; 8]; 16];
     for (i, slot) in uw.iter_mut().enumerate() {
         let wgt = W[((table >> (2 * i)) & 3) as usize];
         let u = 1.0 - wgt;
         a00 += u * u;
         a01 += u * wgt;
         a11 += wgt * wgt;
-        *slot = (u, wgt);
+        *slot = [u, u, u, u, wgt, wgt, wgt, wgt];
     }
     let det = a00 * a11 - a01 * a01;
     if det.abs() < 1e-4 {
@@ -526,11 +535,11 @@ fn table_ls(table: u32) -> Option<TableLs> {
 /// expression unchanged.
 /// Scalar twin of [`simd::ls_accum_sse`], and its oracle.
 #[inline]
-fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[(f32, f32); 16]) -> ([f32; 3], [f32; 3]) {
+fn ls_accum_scalar(pixels: &[[u8; 4]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 3], [f32; 3]) {
     let mut b0 = [0f32; 3];
     let mut b1 = [0f32; 3];
     for (i, p) in pixels.iter().enumerate() {
-        let (u, wgt) = uw[i];
+        let (u, wgt) = (uw[i][0], uw[i][4]);
         for c in 0..3 {
             let x = p[c] as f32;
             b0[c] += u * x;

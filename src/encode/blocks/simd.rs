@@ -736,7 +736,7 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
 /// byte-to-float conversion is exact for `u8`, so hoisting it out of the loop
 /// cannot move a result either.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[(f32, f32); 16]) -> ([f32; 4], [f32; 4]) {
+pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 4], [f32; 4]) {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
     // are fixed-size and read with unaligned loads.
@@ -747,15 +747,15 @@ pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[(f32, f32); 16]) -> ([f32
 #[target_feature(enable = "avx2")]
 unsafe fn ls_accum_sse_impl(
     pxv: &[[f32; 8]; 16],
-    uw: &[(f32, f32); 16],
+    uw: &[[f32; 8]; 16],
 ) -> ([f32; 4], [f32; 4]) {
     use std::arch::x86_64::*;
-    // [u,u,u,u, w,w,w,w] out of the broadcast [u,w,u,w,u,w,u,w].
-    let idx = _mm256_setr_epi32(0, 0, 0, 0, 1, 1, 1, 1);
     let mut acc = _mm256_setzero_ps();
     for i in 0..16usize {
-        let pair = _mm256_castpd_ps(_mm256_broadcast_sd(&*(uw.as_ptr().add(i) as *const f64)));
-        let wv = _mm256_permutevar8x32_ps(pair, idx);
+        // `uw` arrives pre-spread to [u,u,u,u,w,w,w,w]; this was a
+        // `vbroadcastsd` plus a `vpermps` per pixel. `i` is the unrolled loop
+        // counter, so the offset is a compile-time constant.
+        let wv = _mm256_loadu_ps(uw.as_ptr().add(i) as *const f32);
         let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
         acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
     }
@@ -1395,10 +1395,10 @@ mod oracle {
                 *q = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
             }
             let table = if case == 0 { 0 } else { next() as u32 };
-            let mut uw = [(0f32, 0f32); 16];
+            let mut uw = [[0f32; 8]; 16];
             for (i, slot) in uw.iter_mut().enumerate() {
                 let w = W[((table >> (2 * i)) & 3) as usize];
-                *slot = (1.0 - w, w);
+                *slot = [1.0 - w, 1.0 - w, 1.0 - w, 1.0 - w, w, w, w, w];
             }
             // The oracle now covers BOTH halves of the change: `ls_pixels`
             // must reproduce the bytes exactly as floats, and the accumulator
@@ -1414,7 +1414,7 @@ mod oracle {
             let mut b0 = [0f32; 3];
             let mut b1 = [0f32; 3];
             for (i, p) in px.iter().enumerate() {
-                let (u, wgt) = uw[i];
+                let (u, wgt) = (uw[i][0], uw[i][4]);
                 for c in 0..3 {
                     let x = p[c] as f32;
                     b0[c] += u * x;
