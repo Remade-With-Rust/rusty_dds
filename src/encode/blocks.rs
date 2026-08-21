@@ -128,14 +128,21 @@ fn encode_image_serial(
     encode_block: impl Fn([[u8; 4]; 16], &mut [u8]),
     out: &mut [u8],
 ) {
-    let mut scratch = [0u8; 16];
+    // The encoder writes STRAIGHT into the output block.
+    //
+    // This used to encode into a scratch buffer and copy, and to address the
+    // destination as `out[oi..oi + block_bytes]` — a bounds check per block,
+    // because both the offset and the width are runtime values with no stated
+    // relation to `out`'s length. `chunks_exact_mut` yields the blocks in the
+    // same order the loop visits them, cannot panic, and hands over a slice of
+    // exactly `block_bytes`, so the scratch and its copy go too.
+    let mut slots = out.chunks_exact_mut(block_bytes);
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
-            let pixels = gather_block(rgba, w, h, bx, by);
-            let slot = &mut scratch[..block_bytes];
-            encode_block(pixels, slot);
-            let oi = (by * blocks_x + bx) * block_bytes;
-            out[oi..oi + block_bytes].copy_from_slice(slot);
+            let Some(slot) = slots.next() else {
+                return; // length checked by the caller; unreachable
+            };
+            encode_block(gather_block(rgba, w, h, bx, by), slot);
         }
     }
 }
@@ -173,20 +180,22 @@ fn encode_image_parallel(
         let mut rest = out;
         for &(by0, by1) in &ranges {
             let band_len = (by1 - by0) * row_bytes;
-            let (band, tail) = rest.split_at_mut(band_len);
+            // Clamped so the split cannot panic. The strips exactly partition
+            // `out`, so this never truncates; saying it in code is what lets the
+            // compiler drop the panic path.
+            let (band, tail) = rest.split_at_mut(band_len.min(rest.len()));
             rest = tail;
             let encode_block = &encode_block;
             scope.spawn(move || {
                 with_quality(q, || {
-                    let mut scratch = [0u8; 16];
+                    // Straight into the band — see `encode_image_serial`.
+                    let mut slots = band.chunks_exact_mut(block_bytes);
                     for by in by0..by1 {
-                        let local = by - by0;
                         for bx in 0..blocks_x {
-                            let pixels = gather_block(rgba, w, h, bx, by);
-                            let slot = &mut scratch[..block_bytes];
-                            encode_block(pixels, slot);
-                            let oi = local * row_bytes + bx * block_bytes;
-                            band[oi..oi + block_bytes].copy_from_slice(slot);
+                            let Some(slot) = slots.next() else {
+                                return; // band sized by the caller; unreachable
+                            };
+                            encode_block(gather_block(rgba, w, h, bx, by), slot);
                         }
                     }
                 });

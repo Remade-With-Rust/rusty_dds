@@ -100,16 +100,29 @@ fn tile_rgba(
     let mut block_out = [0u8; 64];
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
+            // Checked accesses throughout. The payload length is validated
+            // above and the destination is sized from the same dimensions, so
+            // none of these can fail — but as INDEXES they each carried a panic
+            // path, and this is the reference decoder, where saying exactly
+            // what is assumed is worth more than terseness.
             let bi = (by * blocks_x + bx) * block_bytes;
-            decode_block(&data[bi..bi + block_bytes], &mut block_out, 16);
+            let Some(blk) = data.get(bi..bi + block_bytes) else {
+                break;
+            };
+            decode_block(blk, &mut block_out, 16);
             let px0 = bx * 4;
             let py0 = by * 4;
             let copy_w = 4.min(width as usize - px0);
             let copy_h = 4.min(height as usize - py0);
-            for row in 0..copy_h {
-                let src = row * 16;
+            let n = copy_w * 4;
+            // `chunks_exact` yields the block's four 16-byte rows and cannot
+            // panic, so only the destination needs checking.
+            for (row, src_row) in block_out.chunks_exact(16).take(copy_h).enumerate() {
                 let dst = ((py0 + row) * width as usize + px0) * 4;
-                out[dst..dst + copy_w * 4].copy_from_slice(&block_out[src..src + copy_w * 4]);
+                let (Some(d), Some(s)) = (out.get_mut(dst..dst + n), src_row.get(..n)) else {
+                    break;
+                };
+                d.copy_from_slice(s);
             }
         }
     }

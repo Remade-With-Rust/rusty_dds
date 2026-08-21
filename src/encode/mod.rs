@@ -392,12 +392,21 @@ fn encode_slice(
     match content {
         DecodeContent::Rgba8 => {
             let n = slice_payload_bytes(content, width, height)?;
-            out[..n].copy_from_slice(&rgba[..n]);
+            // Checked rather than indexed. Both slices are caller-supplied, so
+            // a short one used to PANIC out of a library entry point; it is an
+            // error now, and the panic paths go with it.
+            let (Some(dst), Some(src)) = (out.get_mut(..n), rgba.get(..n)) else {
+                return Err(Error::TruncatedData);
+            };
+            dst.copy_from_slice(src);
             Ok(())
         }
         DecodeContent::Bgra8 => {
             let n = slice_payload_bytes(content, width, height)?;
-            for (dst, src) in out[..n].chunks_exact_mut(4).zip(rgba[..n].chunks_exact(4)) {
+            let (Some(dst_all), Some(src_all)) = (out.get_mut(..n), rgba.get(..n)) else {
+                return Err(Error::TruncatedData);
+            };
+            for (dst, src) in dst_all.chunks_exact_mut(4).zip(src_all.chunks_exact(4)) {
                 dst[0] = src[2];
                 dst[1] = src[1];
                 dst[2] = src[0];

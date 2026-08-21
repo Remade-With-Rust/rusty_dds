@@ -942,15 +942,12 @@ fn decode_bc7_direct(
     blocks_y: usize,
 ) {
     let pitch = out_w * 4;
-    let mut scratch = [0u8; 64];
     for by in 0..blocks_y {
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
             let offset = (by * 4 * out_w + bx * 4) * 4;
             let (blk, dst) = (&data[bi..bi + 16], &mut out[offset..]);
-            if bc7_fast_block(blk, &mut scratch) {
-                blit_block_pitch(&scratch, dst, pitch);
-            } else {
+            if !bc7_fast_block(blk, dst, pitch) {
                 bcdec_rs::bc7(blk, dst, pitch);
             }
         }
@@ -970,7 +967,7 @@ fn decode_bc7_scratch(
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
             let blk = &data[bi..bi + 16];
-            if !bc7_fast_block(blk, &mut scratch) {
+            if !bc7_fast_block(blk, &mut scratch, 16) {
                 bcdec_rs::bc7(blk, &mut scratch, 16);
             }
             blit_rgba4(&scratch, out, out_w, out_h, bx * 4, by * 4);
@@ -1019,16 +1016,13 @@ fn decode_bc7_parallel(
             rest = tail;
             consumed_rows = by1 * 4;
             s.spawn(move || {
-                let mut scratch = [0u8; 64];
                 for by in by0..by1 {
                     let local_y = by - by0;
                     for bx in 0..blocks_x {
                         let bi = (by * blocks_x + bx) * 16;
                         let offset = (local_y * 4 * out_w + bx * 4) * 4;
                         let (blk, dst) = (&data[bi..bi + 16], &mut band[offset..]);
-                        if bc7_fast_block(blk, &mut scratch) {
-                            blit_block_pitch(&scratch, dst, pitch);
-                        } else {
+                        if !bc7_fast_block(blk, dst, pitch) {
                             bcdec_rs::bc7(blk, dst, pitch);
                         }
                     }
@@ -1052,19 +1046,7 @@ fn block_grid(width: u32, height: u32, block_bytes: usize) -> Result<(usize, usi
     Ok((blocks_x, blocks_y, expected))
 }
 
-/// Copy a decoded 4x4 RGBA block into a strided destination.
-///
-/// The bounds checks live HERE, four of them, instead of inside the mode
-/// decoders where there were twenty-two — the decoders now write a fixed
-/// 64-byte block and never see `pitch`.
 #[inline]
-fn blit_block_pitch(scratch: &[u8; 64], dst: &mut [u8], pitch: usize) {
-    for (row, chunk) in scratch.chunks_exact(16).enumerate() {
-        let o = row * pitch;
-        dst[o..o + 16].copy_from_slice(chunk);
-    }
-}
-
 fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px0: usize, py0: usize) {
     let copy_w = 4.min(out_w - px0);
     let copy_h = 4.min(out_h - py0);
@@ -1102,20 +1084,20 @@ fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px
 /// Returns `false` for the reserved encoding, which falls through to the
 /// general decoder to be zero-filled per spec.
 #[inline]
-pub(crate) fn bc7_fast_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+pub(crate) fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] == 0 {
         // Reserved: no mode bit set in the low byte.
         return false;
     }
     match blk[0].trailing_zeros() {
-        0 => bc7_mode0_block(blk, out),
-        1 => bc7_mode1_block(blk, out),
-        2 => bc7_mode2_block(blk, out),
-        3 => bc7_mode3_block(blk, out),
-        4 => bc7_mode4_block(blk, out),
-        5 => bc7_mode5_block(blk, out),
-        6 => bc7_mode6_block(blk, out),
-        7 => bc7_mode7_block(blk, out),
+        0 => bc7_mode0_block(blk, out, pitch),
+        1 => bc7_mode1_block(blk, out, pitch),
+        2 => bc7_mode2_block(blk, out, pitch),
+        3 => bc7_mode3_block(blk, out, pitch),
+        4 => bc7_mode4_block(blk, out, pitch),
+        5 => bc7_mode5_block(blk, out, pitch),
+        6 => bc7_mode6_block(blk, out, pitch),
+        7 => bc7_mode7_block(blk, out, pitch),
         _ => false,
     }
 }
@@ -1212,7 +1194,7 @@ fn bc7_p2_index_at(p: usize, fixup: usize, bits: u32) -> (u32, u32) {
 /// parallel.
 ///
 /// Returns `false` if the block is not mode 1.
-fn bc7_mode1_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0x3 != 0x2 {
         return false;
     }
@@ -1264,7 +1246,15 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
             let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 b0,
                 d0,
@@ -1272,7 +1262,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 d1,
                 weight_of(p) as i16,
                 weight_of(q) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1282,7 +1272,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
             let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
@@ -1298,7 +1288,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
 /// opaque alpha. Same argument as [`bc7_mode1_block`].
 ///
 /// Returns `false` if the block is not mode 3.
-fn bc7_mode3_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0xf != 0x8 {
         return false;
     }
@@ -1342,7 +1332,15 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
             let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 b0,
                 d0,
@@ -1350,7 +1348,7 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 d1,
                 weight_of(p) as i16,
                 weight_of(q) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1360,7 +1358,7 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
             let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
@@ -1381,7 +1379,7 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
 /// opaque.
 ///
 /// Returns `false` if the block is not mode 7.
-fn bc7_mode7_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] != 0x80 {
         return false;
     }
@@ -1430,7 +1428,15 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
             let (b1, d1) = bdp[((subsets >> q) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 b0,
                 d0,
@@ -1438,7 +1444,7 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 d1,
                 weight_of(p) as i16,
                 weight_of(q) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1448,7 +1454,7 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
             let (base, delta) = &bd[((subsets >> p) & 1) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
@@ -1494,7 +1500,7 @@ mod bc7_mode7_tests {
                 blk[0] = 0x80;
 
                 let mut ours = [0u8; 64];
-                assert!(bc7_mode7_block(&blk, &mut ours), "partition {partition}");
+                assert!(bc7_mode7_block(&blk, &mut ours, 16), "partition {partition}");
                 let mut theirs = [0u8; 64];
                 bcdec_rs::bc7(&blk, &mut theirs, 16);
                 assert_eq!(
@@ -1513,11 +1519,11 @@ mod bc7_mode7_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode7_block(&blk, &mut px), mode == 7, "vs mode {mode}");
+            assert_eq!(bc7_mode7_block(&blk, &mut px, 16), mode == 7, "vs mode {mode}");
         }
         // The reserved encoding must be declined too.
         let mut px = [0u8; 64];
-        assert!(!bc7_mode7_block(&[0u8; 16], &mut px));
+        assert!(!bc7_mode7_block(&[0u8; 16], &mut px, 16));
     }
 }
 
@@ -1544,7 +1550,7 @@ fn bc7_p1_index_at(p: usize, bits: u32) -> (u32, u32) {
 /// over, which was enough to eat the gain the independent index reads produced.
 ///
 /// Returns `false` if the block is not mode 4.
-fn bc7_mode4_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0x1f != 0x10 {
         return false;
     }
@@ -1629,7 +1635,15 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
             let (c1, a1) = weights(p + 1);
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2_split(
                 bp,
                 dp,
@@ -1638,7 +1652,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 (c0 as i16, c1 as i16),
                 (a0 as i16, a1 as i16),
                 map[3],
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1648,7 +1662,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let (wc, walpha) = weights(p);
             let (wc, walpha) = (wc as i32, walpha as i32);
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
             out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
             out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
@@ -1693,7 +1707,7 @@ mod bc7_mode4_tests {
 
                     let mut ours = [0u8; 64];
                     assert!(
-                        bc7_mode4_block(&raw, &mut ours),
+                        bc7_mode4_block(&raw, &mut ours, 16),
                         "rot {rotation} isb {isb} not recognised"
                     );
                     let mut theirs = [0u8; 64];
@@ -1719,7 +1733,7 @@ mod bc7_mode4_tests {
                     let mut px = [0u8; 64];
                     let expect = mode == 4;
                     assert_eq!(
-                        bc7_mode4_block(&blk, &mut px),
+                        bc7_mode4_block(&blk, &mut px, 16),
                         expect,
                         "mode {mode} rot {rot} isb {isb}"
                     );
@@ -1787,7 +1801,7 @@ fn bc7_p3_index_at(p: usize, anchors: [u8; 2], bits: u32) -> (u32, u32) {
 /// arithmetic, so the sixteen reads still become independent.
 ///
 /// Returns `false` if the block is not mode 0.
-fn bc7_mode0_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0x1 != 0x1 {
         return false;
     }
@@ -1838,7 +1852,15 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
             let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
             let q = p + 1;
             let (b1, d1) = bdp[((subsets >> (2 * q)) & 0x3) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 b0,
                 d0,
@@ -1846,7 +1868,7 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 d1,
                 weight_of(p) as i16,
                 weight_of(q) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1856,7 +1878,7 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
             let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
@@ -1872,7 +1894,7 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
 /// indices, opaque alpha.
 ///
 /// Returns `false` if the block is not mode 2.
-fn bc7_mode2_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     if blk[0] & 0x7 != 0x4 {
         return false;
     }
@@ -1919,7 +1941,15 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
             let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
             let q = p + 1;
             let (b1, d1) = bdp[((subsets >> (2 * q)) & 0x3) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 b0,
                 d0,
@@ -1927,7 +1957,7 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 d1,
                 weight_of(p) as i16,
                 weight_of(q) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -1937,7 +1967,7 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
             let (base, delta) = &bd[((subsets >> (2 * p)) & 0x3) as usize];
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o] = ((base[0] + weight * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + weight * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + weight * delta[2]) >> 6) as u8;
@@ -1987,9 +2017,9 @@ mod bc7_p3_tests {
 
                     let mut ours = [0u8; 64];
                     let claimed = if mode == 0 {
-                        bc7_mode0_block(&blk, &mut ours)
+                        bc7_mode0_block(&blk, &mut ours, 16)
                     } else {
-                        bc7_mode2_block(&blk, &mut ours)
+                        bc7_mode2_block(&blk, &mut ours, 16)
                     };
                     assert!(claimed, "mode {mode} partition {partition} not recognised");
 
@@ -2010,8 +2040,8 @@ mod bc7_p3_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode0_block(&blk, &mut px), mode == 0, "m0 vs {mode}");
-            assert_eq!(bc7_mode2_block(&blk, &mut px), mode == 2, "m2 vs {mode}");
+            assert_eq!(bc7_mode0_block(&blk, &mut px, 16), mode == 0, "m0 vs {mode}");
+            assert_eq!(bc7_mode2_block(&blk, &mut px, 16), mode == 2, "m2 vs {mode}");
         }
     }
 
@@ -2053,7 +2083,7 @@ mod bc7_p3_tests {
 /// this does.
 ///
 /// Returns `false` if the block is not mode 5.
-fn bc7_mode5_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // Five zero bits then a one; bits 6-7 are the rotation, so only the low six
     // bits identify the mode.
     if blk[0] & 0x3f != 0x20 {
@@ -2131,7 +2161,15 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
             let (c1, a1) = weights(p + 1);
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2_split(
                 bp,
                 dp,
@@ -2140,7 +2178,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 (c0 as i16, c1 as i16),
                 (a0 as i16, a1 as i16),
                 map[3],
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -2150,7 +2188,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
         for p in 0..16usize {
             let (wc, wa) = weights(p);
             let (wc, wa) = (wc as i32, wa as i32);
-            let o = p * 4;
+            let o = (p / 4) * pitch + (p % 4) * 4;
             out[o + map[0]] = ((base[0] + wc * delta[0]) >> 6) as u8;
             out[o + map[1]] = ((base[1] + wc * delta[1]) >> 6) as u8;
             out[o + map[2]] = ((base[2] + wc * delta[2]) >> 6) as u8;
@@ -2191,7 +2229,7 @@ mod bc7_mode5_tests {
                 raw[0] = 0x20 | (rotation << 6);
 
                 let mut ours = [0u8; 64];
-                assert!(bc7_mode5_block(&raw, &mut ours), "rot {rotation}");
+                assert!(bc7_mode5_block(&raw, &mut ours, 16), "rot {rotation}");
                 let mut theirs = [0u8; 64];
                 bcdec_rs::bc7(&raw, &mut theirs, 16);
                 assert_eq!(
@@ -2210,7 +2248,7 @@ mod bc7_mode5_tests {
                 blk[0] = (1u8 << mode) | (rot << 6);
                 let mut px = [0u8; 64];
                 assert_eq!(
-                    bc7_mode5_block(&blk, &mut px),
+                    bc7_mode5_block(&blk, &mut px, 16),
                     mode == 5,
                     "mode {mode} rot {rot}"
                 );
@@ -2257,9 +2295,9 @@ mod bc7_p2_tests {
 
                     let mut ours = [0u8; 64];
                     let claimed = if mode == 1 {
-                        bc7_mode1_block(&blk, &mut ours)
+                        bc7_mode1_block(&blk, &mut ours, 16)
                     } else {
-                        bc7_mode3_block(&blk, &mut ours)
+                        bc7_mode3_block(&blk, &mut ours, 16)
                     };
                     assert!(claimed, "mode {mode} partition {partition} not recognised");
 
@@ -2280,8 +2318,8 @@ mod bc7_p2_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode1_block(&blk, &mut px), mode == 1, "m1 vs {mode}");
-            assert_eq!(bc7_mode3_block(&blk, &mut px), mode == 3, "m3 vs {mode}");
+            assert_eq!(bc7_mode1_block(&blk, &mut px, 16), mode == 1, "m1 vs {mode}");
+            assert_eq!(bc7_mode3_block(&blk, &mut px, 16), mode == 3, "m3 vs {mode}");
         }
     }
 
@@ -2338,7 +2376,7 @@ const BC7_WEIGHTS4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51
 /// gain is real only once the surface fits in cache. That is not a small case:
 /// a full mip chain is mostly small surfaces, so a streamer decoding chains
 /// spends most of its decode time in exactly this range.
-fn bc7_mode6_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
+fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     // Mode is unary: `mode` zero bits then a one. Mode 6 is 0x40 exactly.
     if blk[0] != 0x40 {
         return false;
@@ -2420,7 +2458,15 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
     {
         let (bp, dp) = (crate::decode::simd::pack4(base), crate::decode::simd::pack4(delta));
         for i in (0..16usize).step_by(2) {
-            let o = i * 4;
+            let o = (i / 4) * pitch + (i % 4) * 4;
+            // `get_mut` rather than a panicking index: the same comparison,
+            // no panic landing pad, and nothing added to the hot path — unlike
+            // a block-buffer restructure, which removes the checks by paying a
+            // 64-byte copy per block. `false` already means "use the reference
+            // decoder", so the unreachable arm needs no new contract.
+            let Some(dst) = out.get_mut(o..o + 8) else {
+                return false;
+            };
             crate::decode::simd::write2(
                 bp,
                 dp,
@@ -2428,7 +2474,7 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
                 dp,
                 weight(i) as i16,
                 weight(i + 1) as i16,
-                &mut out[o..o + 8],
+                dst,
             );
         }
     }
@@ -2437,7 +2483,7 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8; 64]) -> bool {
     {
         for i in 0..16usize {
             let w = weight(i) as i32;
-            let o = i * 4;
+            let o = (i / 4) * pitch + (i % 4) * 4;
             out[o] = ((base[0] + w * delta[0]) >> 6) as u8;
             out[o + 1] = ((base[1] + w * delta[1]) >> 6) as u8;
             out[o + 2] = ((base[2] + w * delta[2]) >> 6) as u8;
@@ -2479,7 +2525,7 @@ mod bc7_mode6_tests {
             blk[0] = 0x40; // force mode 6
 
             let mut ours = [0u8; 64];
-            assert!(bc7_mode6_block(&blk, &mut ours), "case {case}: not recognised");
+            assert!(bc7_mode6_block(&blk, &mut ours, 16), "case {case}: not recognised");
 
             let mut theirs = [0u8; 64];
             bcdec_rs::bc7(&blk, &mut theirs, 16);
@@ -2500,14 +2546,14 @@ mod bc7_mode6_tests {
             blk[0] = 1 << mode;
             let mut px = [0u8; 64];
             assert_eq!(
-                bc7_mode6_block(&blk, &mut px),
+                bc7_mode6_block(&blk, &mut px, 16),
                 mode == 6,
                 "mode {mode} handled incorrectly"
             );
         }
         // The reserved encoding (no set bit in byte 0) must also be declined.
         let mut px = [0u8; 64];
-        assert!(!bc7_mode6_block(&[0u8; 16], &mut px));
+        assert!(!bc7_mode6_block(&[0u8; 16], &mut px, 16));
     }
 
     #[test]

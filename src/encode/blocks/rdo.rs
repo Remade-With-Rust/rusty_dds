@@ -116,7 +116,10 @@ pub(crate) fn encode_image_bc1_rdo(
         let mut rest = out;
         for &(by0, by1) in &strips {
             let band_len = (by1 - by0) * blocks_x * 8;
-            let (band, tail) = rest.split_at_mut(band_len);
+            // Clamped so the split cannot panic. The strips exactly partition
+            // `out`, so this never truncates; saying it in code is what lets the
+            // compiler drop the panic path.
+            let (band, tail) = rest.split_at_mut(band_len.min(rest.len()));
             rest = tail;
             scope.spawn(move || {
                 super::with_quality(q, || {
@@ -151,9 +154,20 @@ pub(crate) fn encode_image_bc1_rdo(
 
                         if base_err == 0 {
                             let oi = ((by - by0) * blocks_x + bx) * 8;
-                            band[oi..oi + 8].copy_from_slice(&base);
+                            // `get_mut` rather than a panicking index: `oi` is derived from
+                            // the loop counters and always inside `band`, but the compiler
+                            // cannot see that, so the index form left a bounds check per
+                            // block. The `else` arm is unreachable.
+                            let Some(slot) = band.get_mut(oi..oi + 8) else {
+                                continue;
+                            };
+                            slot.copy_from_slice(&base);
                             prev_block = base;
-                            cur_row[bx] = base;
+                            // `get_mut`: `bx` is below `blocks_x` and the row has exactly
+                            // that many entries, but the index form still checked.
+                            if let Some(slot) = cur_row.get_mut(bx) {
+                                *slot = base;
+                            }
                             let slot = (by * blocks_x + bx) % WINDOW;
                             recent_blocks[slot] = base;
                             recent_tables[slot] = u32::from_le_bytes([base[4], base[5], base[6], base[7]]);
@@ -178,8 +192,8 @@ pub(crate) fn encode_image_bc1_rdo(
                         // substitution can book phantom savings while destroying real
                         // ones (computer_key: payload GREW 5% before this correction).
                         let n0 = filled.min(WINDOW);
-                        let above: Option<&[u8; 8]> = if by > by0 { Some(&prev_row[bx]) } else { None };
-                        let mut base_score = score_bc1(&base, &recent_blocks[..n0]);
+                        let above: Option<&[u8; 8]> = if by > by0 { prev_row.get(bx) } else { None };
+                        let mut base_score = score_bc1(&base, &recent_blocks[..n0.min(WINDOW)]);
                         if let Some(ab) = above {
                             if ab == &base {
                                 base_score = SAVE_WHOLE;
@@ -232,7 +246,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 let table = recent_tables[k];
                                 let tb = filter_bit(table);
                                 let dup = (tried_bits & tb) != 0
-                                    && tried[..ntried].contains(&table);
+                                    && tried[..ntried.min(WINDOW)].contains(&table);
                                 if !dup {
                                     tried[ntried] = table;
                                     ntried += 1;
@@ -268,7 +282,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 let (c0, c1) = recent_eps[k];
                                 let eb = filter_bit((c0 as u32) | ((c1 as u32) << 16));
                                 let edup = (eps_bits & eb) != 0
-                                    && tried_eps[..neps].contains(&(c0, c1));
+                                    && tried_eps[..neps.min(WINDOW)].contains(&(c0, c1));
                                 if !edup {
                                     tried_eps[neps] = (c0, c1);
                                     neps += 1;
@@ -298,7 +312,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 // repeats the window held (about 6.7 of 16 on
                                 // this corpus). DICT_N of these run per block.
                                 if (tried_bits & filter_bit(table)) != 0
-                                    && tried[..ntried].contains(&table)
+                                    && tried[..ntried.min(WINDOW)].contains(&table)
                                 {
                                     continue; // already tried via the window
                                 }
@@ -331,9 +345,20 @@ pub(crate) fn encode_image_bc1_rdo(
                         let _ = best_class;
 
                         let oi = ((by - by0) * blocks_x + bx) * 8;
-                        band[oi..oi + 8].copy_from_slice(&best);
+                        // `get_mut` rather than a panicking index: `oi` is derived from
+                        // the loop counters and always inside `band`, but the compiler
+                        // cannot see that, so the index form left a bounds check per
+                        // block. The `else` arm is unreachable.
+                        let Some(slot) = band.get_mut(oi..oi + 8) else {
+                            continue;
+                        };
+                        slot.copy_from_slice(&best);
                         prev_block = best;
-                        cur_row[bx] = best;
+                        // `get_mut`: `bx` is below `blocks_x` and the row has exactly
+                        // that many entries, but the index form still checked.
+                        if let Some(slot) = cur_row.get_mut(bx) {
+                            *slot = best;
+                        }
                         let slot = (by * blocks_x + bx) % WINDOW;
                         recent_blocks[slot] = best;
                         recent_tables[slot] =
@@ -984,7 +1009,10 @@ pub(crate) fn encode_image_bc7_rdo(
         let mut rest = out;
         for &(by0, by1) in &strips {
             let band_len = (by1 - by0) * blocks_x * 16;
-            let (band, tail) = rest.split_at_mut(band_len);
+            // Clamped so the split cannot panic. The strips exactly partition
+            // `out`, so this never truncates; saying it in code is what lets the
+            // compiler drop the panic path.
+            let (band, tail) = rest.split_at_mut(band_len.min(rest.len()));
             rest = tail;
             scope.spawn(move || {
                 super::with_quality(q, || {
@@ -1013,9 +1041,20 @@ pub(crate) fn encode_image_bc7_rdo(
                         // not an emergent property of the acceptance math.
                         if base_err == 0 {
                             let oi = ((by - by0) * blocks_x + bx) * 16;
-                            band[oi..oi + 16].copy_from_slice(&base);
+                            // `get_mut` rather than a panicking index: `oi` is derived from
+                            // the loop counters and always inside `band`, but the compiler
+                            // cannot see that, so the index form left a bounds check per
+                            // block. The `else` arm is unreachable.
+                            let Some(slot) = band.get_mut(oi..oi + 16) else {
+                                continue;
+                            };
+                            slot.copy_from_slice(&base);
                             prev_block = base;
-                            cur_row[bx] = base;
+                            // `get_mut`: `bx` is below `blocks_x` and the row has exactly
+                            // that many entries, but the index form still checked.
+                            if let Some(slot) = cur_row.get_mut(bx) {
+                                *slot = base;
+                            }
                             let slot = (by * blocks_x + bx) % BC7_WINDOW;
                             recent[slot] = (base, base[0] & 0x7F == 0x40);
                             recent_m6[slot] = parse_mode6(&base);
@@ -1032,8 +1071,8 @@ pub(crate) fn encode_image_bc7_rdo(
 
                         let mut best = base;
                         let n0 = filled.min(BC7_WINDOW);
-                        let above: Option<&[u8; 16]> = if by > by0 { Some(&prev_row[bx]) } else { None };
-                        let mut base_score = score_bc7(&base, &recent[..n0]);
+                        let above: Option<&[u8; 16]> = if by > by0 { prev_row.get(bx) } else { None };
+                        let mut base_score = score_bc7(&base, &recent[..n0.min(WINDOW)]);
                         if let Some(ab) = above {
                             if ab == &base {
                                 base_score = SAVE_WHOLE16;
@@ -1153,9 +1192,20 @@ pub(crate) fn encode_image_bc7_rdo(
                         }
 
                         let oi = ((by - by0) * blocks_x + bx) * 16;
-                        band[oi..oi + 16].copy_from_slice(&best);
+                        // `get_mut` rather than a panicking index: `oi` is derived from
+                        // the loop counters and always inside `band`, but the compiler
+                        // cannot see that, so the index form left a bounds check per
+                        // block. The `else` arm is unreachable.
+                        let Some(slot) = band.get_mut(oi..oi + 16) else {
+                            continue;
+                        };
+                        slot.copy_from_slice(&best);
                         prev_block = best;
-                        cur_row[bx] = best;
+                        // `get_mut`: `bx` is below `blocks_x` and the row has exactly
+                        // that many entries, but the index form still checked.
+                        if let Some(slot) = cur_row.get_mut(bx) {
+                            *slot = best;
+                        }
                         let slot = (by * blocks_x + bx) % BC7_WINDOW;
                         recent[slot] = (best, best[0] & 0x7F == 0x40);
                         recent_m6[slot] = parse_mode6(&best);
@@ -1180,7 +1230,7 @@ fn bc7_block_sse(pixels: &[[u8; 4]; 16], block: &[u8; 16]) -> i64 {
     // faster than `bcdec_rs::bc7` and oracle-tested against it, and it declines
     // exactly one input — the reserved encoding — which falls through here just
     // as it does in `decode_bc7`. Byte-identical by construction.
-    if !crate::decode::bcn::bc7_fast_block(block, &mut dec) {
+    if !crate::decode::bcn::bc7_fast_block(block, &mut dec, 16) {
         bcdec_rs::bc7(block, &mut dec, 16);
     }
     let mut err = 0i64;
