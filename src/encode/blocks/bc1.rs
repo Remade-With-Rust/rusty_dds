@@ -375,28 +375,72 @@ pub(super) fn lattice_refine_bc1(
     // 4-color quantization wants the interpolants pulled toward the data
     // mass, and the seeds/LS systematically overshoot outward. Hill-climb
     // up to 3 rounds while improving.
+    //
+    // # Measured over the corpus (196_608 blocks, 191_847 lattice calls)
+    //
+    // ```text
+    // rounds            1.787 per call   (47% stop after one, 25% run all three)
+    // fits             10.718 per call
+    // accepts           1.018 per call   -> 9.5% of fits win
+    // c0 <= c1 exit         0            NEVER, in 191_847 calls
+    // zero-error exit       0            NEVER
+    // out-of-range skip     0.002        394 of 2_056_572 candidates
+    // cand == other skip    0.000        26 of 2_056_572
+    // ```
+    //
+    // Two of those shaped the code below. The 3-color exit never fires because
+    // `pack_bc1_scored_565` always emits the larger word first, so `best`
+    // cannot become 3-color once it is 4-color — the test is loop-INVARIANT
+    // and belongs above the loop, not inside it. And the range skip is so rare
+    // that the branch exists only for correctness; it is written as one
+    // unsigned compare rather than two signed ones.
+    //
+    // # A refuted prune, recorded with its number
+    //
+    // A per-candidate lower bound (a palette's reconstructions lie between its
+    // endpoints, so a sample outside that span contributes at least its
+    // distance squared) is exact and provably safe. It is also not worth it:
+    // instrumented over the same corpus it would have skipped **35_339 of
+    // 2_056_152 fits, 1.72%**, while costing two `from_565` expansions — about
+    // 35 instructions against a fit of roughly 208. Break-even needs ~17%, so
+    // it misses by a factor of ten. The lattice contracts from an already-good
+    // incumbent, which is exactly why a span-based bound almost never bites.
+
+    // Loop-invariant: see the measurement above.
+    let mut c0 = u16::from_le_bytes([best[0], best[1]]);
+    let mut c1 = u16::from_le_bytes([best[2], best[3]]);
+    if c0 <= c1 {
+        return; // 3-color/punch block: lattice targets 4-color mode only.
+    }
     for _round in 0..bc1_lattice_rounds() {
-        let c0 = u16::from_le_bytes([best[0], best[1]]);
-        let c1 = u16::from_le_bytes([best[2], best[3]]);
-        if c0 <= c1 {
-            return; // 3-color/punch block: lattice targets 4-color mode only.
-        }
         let prev = *best_err;
         // (endpoint base, other endpoint, contract direction)
-        for (base, other, d) in [(c0, c1, -1i32), (c1, c0, 1i32)] {
+        for (base, other, up) in [(c0, c1, false), (c1, c0, true)] {
             for (shift, maxv) in [(11u16, 31u16), (5, 63), (0, 31)] {
                 let cur = (base >> shift) & maxv;
-                let nv = cur as i32 + d;
-                if nv < 0 || nv > maxv as i32 {
+                // A contract move can only leave the field's range at the end
+                // it is moving toward, so ONE compare against that end decides
+                // it — no `nv` to form and no second bound to test.
+                if cur == if up { maxv } else { 0 } {
                     continue;
                 }
-                let cand = (base & !(maxv << shift)) | ((nv as u16) << shift);
+                // The field is known in range, so the move cannot carry or
+                // borrow into a neighbouring field: adding or subtracting the
+                // field's unit is the whole edit. That replaces a mask, a
+                // complement, a shift and an or with one add.
+                let step = 1u16 << shift;
+                let cand = if up { base + step } else { base - step };
                 if cand == other {
                     continue;
                 }
                 if let Some((blk, e)) = pack_bc1_scored_565(pixels, cand, other, psq, *best_err) {
                     *best = blk;
                     *best_err = e;
+                    // The accepted pair, without re-reading the block bytes.
+                    // `pack_bc1_scored_565` orders them larger-first.
+                    let (hi, lo) = if cand > other { (cand, other) } else { (other, cand) };
+                    c0 = hi;
+                    c1 = lo;
                     if e == 0 {
                         return;
                     }
