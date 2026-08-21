@@ -105,18 +105,17 @@ unsafe fn fit_indices_mode6_avx2_impl(
         let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
         let kv = _mm256_set1_epi32(k as i32);
 
+        // The permute that puts lanes back in pixel order is NOT done here.
+        // Everything downstream of it — the compare, both blends, and the
+        // running minima — is lane-wise, so a consistent permutation of all
+        // lanes commutes with the whole loop. Two permutes a pass become two at
+        // the end, and the error sum does not need one at all.
         let da = _mm256_sub_epi16(q0, pv);
         let db = _mm256_sub_epi16(q1, pv);
-        let cur_lo = _mm256_permutevar8x32_epi32(
-            _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db)),
-            perm,
-        );
+        let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
         let dc = _mm256_sub_epi16(q2, pv);
         let dd = _mm256_sub_epi16(q3, pv);
-        let cur_hi = _mm256_permutevar8x32_epi32(
-            _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd)),
-            perm,
-        );
+        let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
 
         let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
         let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
@@ -141,6 +140,10 @@ unsafe fn fit_indices_mode6_avx2_impl(
     )) as i64;
 
     // Indices are 0..=15, so neither `packs` saturates.
+    // Pixel order is restored ONCE, here, and only for the indices — the error
+    // sum above is order-independent so it never needs it.
+    let idx_lo = _mm256_permutevar8x32_epi32(idx_lo, perm);
+    let idx_hi = _mm256_permutevar8x32_epi32(idx_hi, perm);
     let i0 = _mm_packs_epi32(
         _mm256_castsi256_si128(idx_lo),
         _mm256_extracti128_si256(idx_lo, 1),
