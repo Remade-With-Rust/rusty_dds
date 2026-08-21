@@ -133,6 +133,11 @@ pub(crate) fn encode_image_bc1_rdo(
                 // The donor's 4-colour palette, built once on entry rather than by every
                 // block that tries it.
                 let mut recent_pal: [[[u8; 3]; 4]; WINDOW] = [[[0u8; 3]; 4]; WINDOW];
+                // The widened form the index fit broadcasts from, built once per
+                // ring-buffer update rather than on each of the ~14 fits a block
+                // that reuse it.
+                let mut recent_pal16: [super::bc1::Pal16; WINDOW] =
+                    [super::bc1::widen_pal(&[[0u8; 3]; 4]); WINDOW];
                 let mut filled = 0usize;
                 let mut prev_block = [0u8; 8];
 
@@ -161,6 +166,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 recent_eps[slot].0.max(recent_eps[slot].1),
                                 recent_eps[slot].0.min(recent_eps[slot].1),
                             );
+                            recent_pal16[slot] = super::bc1::widen_pal(&recent_pal[slot]);
                             filled += 1;
                             continue;
                         }
@@ -254,8 +260,8 @@ pub(crate) fn encode_image_bc1_rdo(
                                     neps += 1;
                                 }
                                 if c0 > c1 && lim > 0 && !edup {
-                                    if let Some((blk, err)) = super::bc1::pack_bc1_scored_with(
-                                        &pixels, c0, c1, &recent_pal[k], lim,
+                                    if let Some((blk, err)) = super::bc1::pack_bc1_scored_pre(
+                                        &pixels, c0, c1, &recent_pal[k], &recent_pal16[k], lim,
                                     ) {
                                         let j = err as f32 - lam * SAVE_PART;
                                         if j < best_j {
@@ -323,6 +329,7 @@ pub(crate) fn encode_image_bc1_rdo(
                             recent_eps[slot].0.max(recent_eps[slot].1),
                             recent_eps[slot].0.min(recent_eps[slot].1),
                         );
+                        recent_pal16[slot] = super::bc1::widen_pal(&recent_pal[slot]);
                         filled += 1;
                     }
                     std::mem::swap(&mut prev_row, &mut cur_row);

@@ -154,6 +154,46 @@ pub(super) fn bc1_palette_565(hi: u16, lo: u16) -> [[u8; 3]; 4] {
     [ca, cb, lerp_rgb::<2, 1>(ca, cb), lerp_rgb::<1, 2>(ca, cb)]
 }
 
+/// Per-block widened palette for [`pack_bc1_scored_pre`]. Empty without SIMD.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(super) type Pal16 = [i16; 16];
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+pub(super) type Pal16 = ();
+
+/// Widen a palette once, for reuse across many fits.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+pub(super) fn widen_pal(colors: &[[u8; 3]; 4]) -> Pal16 {
+    if simd::has_avx2() {
+        simd::bc1_widen_palette(colors)
+    } else {
+        [0i16; 16]
+    }
+}
+#[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+pub(super) fn widen_pal(_colors: &[[u8; 3]; 4]) -> Pal16 {}
+
+/// [`pack_bc1_scored_with`] using a palette widened once by the caller.
+///
+/// The RDO window reuses each cached palette about fourteen times a block, and
+/// the fit kernel used to re-widen it on every one of those calls.
+pub(super) fn pack_bc1_scored_pre(
+    pixels: &[[u8; 4]; 16],
+    hi: u16,
+    lo: u16,
+    colors: &[[u8; 3]; 4],
+    pal16: &Pal16,
+    err_limit: i32,
+) -> Option<([u8; 8], i32)> {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        let (table, err) = simd::bc1_fit_4color_pre_avx2(pixels, pal16, err_limit)?;
+        let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
+        return Some((v.to_le_bytes(), err));
+    }
+    let _ = pal16;
+    pack_bc1_scored_with(pixels, hi, lo, colors, err_limit)
+}
+
 pub(super) fn pack_bc1_scored_with(
     pixels: &[[u8; 4]; 16],
     hi: u16,

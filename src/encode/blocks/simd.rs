@@ -172,6 +172,55 @@ unsafe fn fit_indices_mode6_avx2_impl(
 /// early-abort check applied on the completed total (an aborted candidate
 /// could never win, so acceptance is unchanged).
 #[cfg(target_arch = "x86_64")]
+/// Widen a BC1 palette to the `[i16; 16]` form the index fit broadcasts from.
+///
+/// `colors` is `[[u8; 3]; 4]` — twelve bytes — so it cannot be loaded as a
+/// sixteen-byte vector directly; the entries are restrided to four bytes with a
+/// zero alpha, which is also what keeps the broadcast's fourth lane zero so the
+/// masked pixel alpha subtracts to nothing.
+///
+/// Callers holding a palette across many fits should widen ONCE via
+/// [`bc1_widen_palette`] and call [`bc1_fit_4color_pre_avx2`] — the RDO window
+/// reuses each palette about fourteen times a block, and re-widening it every
+/// time is the same pack/unpack round trip the mode-6 path already shed.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
+    use std::arch::x86_64::*;
+    let mut cb = [0u8; 16];
+    for k in 0..4usize {
+        cb[k * 4] = colors[k][0];
+        cb[k * 4 + 1] = colors[k][1];
+        cb[k * 4 + 2] = colors[k][2];
+    }
+    let mut c16 = [0i16; 16];
+    _mm256_storeu_si256(
+        c16.as_mut_ptr() as *mut __m256i,
+        _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr() as *const __m128i)),
+    );
+    c16
+}
+
+/// Widen a palette once, for reuse across fits.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_widen_palette(colors: &[[u8; 3]; 4]) -> [i16; 16] {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { widen_palette(colors) }
+}
+
+/// [`bc1_fit_4color_avx2`] with the palette already widened.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn bc1_fit_4color_pre_avx2(
+    pixels: &[[u8; 4]; 16],
+    c16: &[i16; 16],
+    err_limit: i32,
+) -> Option<(u32, i32)> {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
+    unsafe { bc1_fit_4color_pre_avx2_impl(pixels, c16, err_limit) }
+}
+
 pub(super) fn bc1_fit_4color_avx2(
     pixels: &[[u8; 4]; 16],
     colors: &[[u8; 3]; 4],
@@ -229,38 +278,27 @@ unsafe fn bc1_fit_4color_avx2_impl(
     colors: &[[u8; 3]; 4],
     err_limit: i32,
 ) -> Option<(u32, i32)> {
+    let c16 = widen_palette(colors);
+    bc1_fit_4color_pre_avx2_impl(pixels, &c16, err_limit)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn bc1_fit_4color_pre_avx2_impl(
+    pixels: &[[u8; 4]; 16],
+    c16: &[i16; 16],
+    err_limit: i32,
+) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
     let base = pixels.as_ptr() as *const u8;
     let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
     let keep = _mm256_set1_epi64x(
         u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
     );
-
     let mut best_lo = _mm256_set1_epi32(i32::MAX);
     let mut best_hi = _mm256_set1_epi32(i32::MAX);
     let mut idx_lo = _mm256_setzero_si256();
     let mut idx_hi = _mm256_setzero_si256();
-
-    // `u64::from_le_bytes([r,0,g,0,b,0,0,0])` is a byte-to-i16 widen written as
-    // bytes, and it emitted about nine scalar instructions per colour — the
-    // histogram showed twelve `movzbl`, nine `orl` and sixteen shift/or pairs
-    // across the unrolled loop. Widening all four up front leaves a broadcast.
-    //
-    // `colors` is `[[u8; 3]; 4]` — twelve bytes — so it cannot be loaded as a
-    // sixteen-byte vector directly; the entries are restrided to four bytes with
-    // a zero alpha, which is also what keeps `pv`'s fourth lane zero so the
-    // masked pixel alpha subtracts to nothing.
-    let mut cb = [0u8; 16];
-    for k in 0..4usize {
-        cb[k * 4] = colors[k][0];
-        cb[k * 4 + 1] = colors[k][1];
-        cb[k * 4 + 2] = colors[k][2];
-    }
-    let mut c16 = [0i16; 16];
-    _mm256_storeu_si256(
-        c16.as_mut_ptr() as *mut __m256i,
-        _mm256_cvtepu8_epi16(_mm_loadu_si128(cb.as_ptr() as *const __m128i)),
-    );
 
     for k in 0..4usize {
         let pv = _mm256_set1_epi64x(*(c16.as_ptr().add(k * 4) as *const i64));
