@@ -735,6 +735,7 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
 /// byte-to-float conversion is exact for `u8`, so hoisting it out of the loop
 /// cannot move a result either.
 #[cfg(target_arch = "x86_64")]
+#[cfg(test)]
 pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 4], [f32; 4]) {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
@@ -744,6 +745,7 @@ pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[cfg(test)]
 unsafe fn ls_accum_sse_impl(
     pxv: &[[f32; 8]; 16],
     uw: &[[f32; 8]; 16],
@@ -955,41 +957,6 @@ unsafe fn bc1_ls_solve_impl(
 ) -> ([u8; 4], [u8; 4]) {
     let (e0, e1) = solve_pair(b0, b1, a00, a01, a11, det);
     (round_pack(e0), round_pack(e1))
-}
-
-/// [`bc1_ls_solve`] that returns the endpoints already packed to 565.
-///
-/// BC1's caller immediately runs `to_565` on both results — 11 scalar
-/// instructions each, against a `refit_with_ls` body of only 88. Doing it on the
-/// rounded lanes costs about five vector instructions per endpoint and crosses
-/// no new boundary: this replaces the existing `bc1_ls_solve` call rather than
-/// adding one. BC7 keeps the byte-returning form, so it pays nothing.
-#[cfg(target_arch = "x86_64")]
-pub(super) fn bc1_ls_solve_565(
-    b0: [f32; 4],
-    b1: [f32; 4],
-    a00: f32,
-    a01: f32,
-    a11: f32,
-    det: f32,
-) -> (u16, u16) {
-    debug_assert!(has_avx2());
-    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
-    unsafe { bc1_ls_solve_565_impl(b0, b1, a00, a01, a11, det) }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn bc1_ls_solve_565_impl(
-    b0: [f32; 4],
-    b1: [f32; 4],
-    a00: f32,
-    a01: f32,
-    a11: f32,
-    det: f32,
-) -> (u16, u16) {
-    let (e0, e1) = solve_pair(b0, b1, a00, a01, a11, det);
-    (pack565(round_lanes(e0)), pack565(round_lanes(e1)))
 }
 
 /// `to_565` on four rounded lanes: shift each channel down, then weight and sum.
@@ -1486,6 +1453,86 @@ unsafe fn palette_fit_mode6_avx2_impl(
     let mut best_i = [0u8; 16];
     _mm_storeu_si128(best_i.as_mut_ptr() as *mut __m128i, _mm_packs_epi16(i0, i1));
     (best_i, err)
+}
+
+
+/// Accumulate the BC1 normal equations AND solve them, in one call.
+///
+/// `refit_with_ls` ran these back to back — the accumulator's two `[f32; 4]`
+/// results were stored, returned across a `#[target_feature]` boundary, and
+/// immediately loaded back as the solve's arguments. Fused, they stay in
+/// registers and one boundary disappears.
+///
+/// Written as a single body rather than two helpers on purpose: a
+/// `#[target_feature]` function cannot be force-inlined on stable, so factoring
+/// would reintroduce exactly the call this removes.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn ls_accum_solve_565(
+    pxv: &[[f32; 8]; 16],
+    uw: &[[f32; 8]; 16],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> (u16, u16) {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); both arrays
+    // are fixed-size and read with unaligned loads.
+    unsafe { ls_accum_solve_565_impl(pxv, uw, a00, a01, a11, det) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn ls_accum_solve_565_impl(
+    pxv: &[[f32; 8]; 16],
+    uw: &[[f32; 8]; 16],
+    a00: f32,
+    a01: f32,
+    a11: f32,
+    det: f32,
+) -> (u16, u16) {
+    use std::arch::x86_64::*;
+    // --- accumulate (see `ls_accum_sse` for why this is bit-identical) ---
+    let mut acc = _mm256_setzero_ps();
+    for i in 0..16usize {
+        let wv = _mm256_loadu_ps(uw.as_ptr().add(i) as *const f32);
+        let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
+    }
+    let v0 = _mm256_castps256_ps128(acc);
+    let v1 = _mm256_extractf128_ps(acc, 1);
+
+    // --- solve (see `bc1_ls_solve`) ---
+    let dv = _mm_set1_ps(det);
+    let e0 = _mm_div_ps(
+        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a11), v0), _mm_mul_ps(_mm_set1_ps(a01), v1)),
+        dv,
+    );
+    let e1 = _mm_div_ps(
+        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
+        dv,
+    );
+
+    // --- round and pack to 565 (see `round_pack` / `pack565`) ---
+    let half = _mm256_set1_pd(0.5);
+    let lo = _mm_setzero_ps();
+    let hi = _mm_set1_ps(255.0);
+    let r0 = _mm256_cvttpd_epi32(_mm256_add_pd(
+        _mm256_cvtps_pd(_mm_min_ps(_mm_max_ps(e0, lo), hi)),
+        half,
+    ));
+    let r1 = _mm256_cvttpd_epi32(_mm256_add_pd(
+        _mm256_cvtps_pd(_mm_min_ps(_mm_max_ps(e1, lo), hi)),
+        half,
+    ));
+    let sh = _mm_setr_epi32(3, 2, 3, 0);
+    let wt = _mm_setr_epi32(2048, 32, 1, 0);
+    let p565 = |v: __m128i| {
+        let w = _mm_mullo_epi32(_mm_srlv_epi32(v, sh), wt);
+        let h = _mm_hadd_epi32(w, w);
+        _mm_cvtsi128_si32(_mm_hadd_epi32(h, h)) as u16
+    };
+    (p565(r0), p565(r1))
 }
 
 #[cfg(test)]

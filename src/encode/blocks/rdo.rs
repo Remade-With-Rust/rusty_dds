@@ -582,11 +582,11 @@ fn refit_with_ls(
     // mode matches it.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let done = if simd::has_avx2() {
-        let (v0, v1) = simd::ls_accum_sse(pxv, &ls.uw);
-        // The solve returns the endpoints already packed to 565 — `to_565` used
-        // to run twice here, 11 scalar instructions each against a body of 88.
-        let (q0, q1) = simd::bc1_ls_solve_565(v0, v1, a00, a01, a11, det);
-        qq = Some((q0, q1));
+        // Accumulate, solve and pack to 565 in ONE call: the accumulator's two
+        // [f32; 4] results used to be stored, returned across a
+        // `#[target_feature]` boundary and immediately loaded back as the
+        // solve's arguments.
+        qq = Some(simd::ls_accum_solve_565(pxv, &ls.uw, a00, a01, a11, det));
         true
     } else {
         false
