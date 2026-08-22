@@ -3781,7 +3781,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty_alloc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
@@ -3789,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_alloc-api"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "rusty_alloc",
 ]
