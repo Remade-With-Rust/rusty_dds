@@ -61,7 +61,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
 impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Decode one HDR subresource (BC6H) to tightly packed RGBA `f32`
     /// (`A = 1.0`). Volumes decode every depth slice, stacked. LDR content
-    /// stays on [`Dds::decode_rgba8`]; each API fails closed on the other's
+    /// stays on [`DdsBase::decode_rgba8`](crate::DdsBase::decode_rgba8); each API fails closed on the other's
     /// formats.
     pub fn decode_rgba_f32(&self, id: SubresourceId) -> Result<ImageRgbaF32, Error> {
         let kind = self.hdr_decode_content()?;

@@ -68,7 +68,7 @@ impl CubemapFace {
     }
 }
 
-/// Identifies one mip / layer / face subresource inside [`Dds::data`].
+/// Identifies one mip / layer / face subresource inside [`DdsBase::data`](crate::DdsBase::data).
 ///
 /// - `mip` — mip level (0 = largest)
 /// - `layer` — array layer, or cube index for cubemaps
@@ -179,7 +179,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         Ok((width, height, depth))
     }
 
-    /// Byte range of one subresource inside [`Dds::data`].
+    /// Byte range of one subresource inside [`DdsBase::data`](crate::DdsBase::data).
     pub fn subresource_range(&self, id: SubresourceId) -> Result<Range<usize>, Error> {
         let (offset, size) = self.subresource_offset_and_size(id)?;
         let start = offset as usize;

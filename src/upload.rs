@@ -50,7 +50,7 @@ pub struct UploadPlan {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
-    /// Byte offset into [`Dds::data`] for [`UploadPath::Compressed`].
+    /// Byte offset into [`DdsBase::data`](crate::DdsBase::data) for [`UploadPath::Compressed`].
     /// For [`UploadPath::DecodedRgba8`], always `0` (buffer is the decode output).
     pub data_offset: usize,
     /// Byte length of the upload region.

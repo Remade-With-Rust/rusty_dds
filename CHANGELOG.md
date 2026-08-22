@@ -3,6 +3,148 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.8.0 - 2026-08-22
+
+**The encoder-parity release.** At 0.7.0, DirectXTex was still faster on four
+BC1 albedo cases per core — the last places it beat us on the corpus. All four
+are now wins, and the board reads **24 ahead / 0 behind** on encode speed with
+quality unchanged. Every change in this release is **byte-identical**: no
+decoded pixel and no encoded payload moves, and the frozen-payload-hash gate
+fails the build if one does.
+
+### The four BC1 losses, closed
+
+Per-core, serial, against the same DirectXTex build. Ratio below 1 means
+rusty_dds is faster; the dB column is our PSNR minus theirs, so all four were
+already *higher quality* while losing on speed.
+
+| case | 0.7.0 | 0.8.0 | quality |
+|---|---:|---:|---:|
+| `Bricks097_Color` BC1 | 1.501 | **0.880** | +0.62 dB |
+| `Metal063_Color` BC1 | 1.656 | **0.762** | +1.30 dB |
+| `Rock064_Color` BC1 | 1.590 | **0.718** | +1.28 dB |
+| `Wood095_Color` BC1 | 1.438 | **0.780** | +1.29 dB |
+
+| board (24 cases) | 0.7.0 | 0.8.0 |
+|---|---|---|
+| Encode speed, per core | 20 ahead / 4 behind | **24 ahead / 0 behind** |
+| Encode quality (PSNR) | 22 higher / 1 tie / 1 lower | 22 higher / 1 tie / 1 lower |
+
+```sh
+cargo run --release --example harvest_corpus_vs_dxtex
+```
+
+### How: the BC1 fit stopped recomputing what it already knew
+
+Expanding the squared error gives `sum p^2 - 2*dot(p,q) + sum q^2`. The first
+term is a property of the PIXEL — identical for all four palette entries — so
+it cannot influence which entry is nearest. Pulling it out of the inner loop
+deletes every `vpsubw` and leaves a bare inner product, which `vpmaddwd`
+computes natively; it is added back once at the end, so the error returned is
+still the true SSE. Folding `4*sum(q^2) + k` into one broadcast then lets a
+single `vpminsd` carry the error *and* its index, retiring the `cmpgt`-and-blend
+pair (`vpblendvb` is two uops on Intel where `min` is one).
+
+`sum p^2` is a property of the BLOCK, so it is computed once per block rather
+than on each of the ~11 fits. That also retired the alpha mask: the palette's
+every entry is `[R,G,B,0]` by construction, so the alpha term is multiplied by
+zero, and the sum of squares was the only place pixel alpha could reach the
+result.
+
+### The lattice, measured for the first time
+
+Instrumented over 196 608 blocks: **10.7 fits per call, 9.5% of them accepted**,
+1.79 rounds. Two counters read *zero* across 191 847 calls — the 3-color exit
+and the zero-error exit — and the range skip fired on 0.02% of candidates. The
+3-color test turned out to be loop-INVARIANT (`pack_bc1_scored_565` always emits
+the larger word first), so it moved above the loop; the range skip became one
+compare against the end the move travels toward; and with the field known in
+range, a contract move cannot carry, so adding the field's unit *is* the whole
+edit.
+
+### Bounds checks: four hot functions to zero
+
+Panic landing pads are attributed to std's `Index` impl, which hides the caller,
+so these were found by decoding the `core::panic::Location` structs the panic
+calls reference.
+
+| function | 0.7.0 | 0.8.0 |
+|---|---:|---:|
+| `decode::bcn::bc7_fast_block` | 29 | **0** |
+| `encode_bc7_mode6_scored` | 16 | **0** |
+| `decode::reference::reference_slice` | 8 | **0** |
+| `encode::encode_slice` | 7 | **0** |
+
+Five distinct causes, each needing its own fix: indices provably in range but
+not provably so to the compiler (masked); an array with three slots indexed by a
+two-bit field (`pack_bd3`, now four); a `pub(crate)` function taking a slice
+where an array would do; range slices with runtime bounds (now `take`/`skip`/
+`get`/`chunks_exact_mut`, which cannot panic); and — the one that was a real
+bug — `encode_slice`'s RGBA/BGRA passthrough indexing caller-supplied buffers
+with no length check, so a short buffer **panicked out of a library entry
+point**. That returns `Error::TruncatedData` now.
+
+Measured worth on BC7 encode: **-5.4%** on the corpus. Note the static
+instruction count went *up* over that change (3819 -> 4041) because retiring the
+panic paths let LLVM inline harder — a bounds check is a compare and a branch
+inside a hot loop, which instruction counting cannot see.
+
+### Scalar fallbacks were being inlined into hot bodies, crate-wide
+
+A dispatch shaped `if has_avx2() { return vector } scalar...` makes LLVM
+interleave the fallback into the hot body on machines that never execute it.
+Found by asking of every emitted symbol: *does this contain any vector
+instruction at all?*
+
+- `encode_bc1_bytes` measured 95 `cmpb`, 85 `movzbl` and 91 `cmov` in its own
+  body and **not one vector instruction** — `channel_minmax_rgb`'s scalar arm,
+  inlined whole.
+- Two fallbacks carried `#[inline]`, which replicates a never-executed arm into
+  *every* call site.
+- `pack_alpha_indices` had **no dispatch at all**: a 677-instruction scalar
+  double loop doing exactly what `alpha_select_avx2` does, and what its own
+  signed twin already routed to. It was simply never wired up.
+
+`has_avx2` itself was a `OnceLock<bool>` — acquire-ordered, with a slow path
+LLVM cannot prove unreachable, so every dispatch carried a call site for
+`OnceLock::initialize`; 82 of them across the binary. A relaxed byte is
+sufficient: the value is a property of the CPU, so every racing thread computes
+the same answer.
+
+### New vector kernels, each with an oracle
+
+Sixteen 3-bit alpha indices packed by weighted accumulation (`maddubs` then
+`madd`); the alpha channel gathered with one `pshufb` per row; the fixed-index
+alpha SSE; and the sixteen-sample min/max, which existed as a scalar chain in
+**six** places. Each is oracle-tested over 60 000 random cases against the
+scalar form it replaces, including the extremes where a saturating fold would
+show.
+
+### Also
+
+- Every alpha palette entry weights its endpoints with a pair summing to 65536,
+  so `W_hi*max + W_lo*min` is `65536*min + W_hi*(max-min)` — **one multiply per
+  entry instead of two**, in all four builders, exact including for negative
+  operands.
+- The BC1 PCA-axis third seed and the BC4/BC5 signed window sweep both default
+  **off**: each was an ungated expensive search with a negligible payoff, and
+  the tuning constants record what they cost and bought.
+- `EXP5` was sized for 64 entries when a five-bit index reaches 32; the pair is
+  128 -> 96 bytes, in tables whose whole justification is L1 residency.
+
+### Simulator
+
+- New `mission` scenario: a six-leg gameplay loop (hangar, launch, cruise, jump
+  and approach, on foot, return) rather than a single synthetic camera path.
+- **The pack is faulted into the page cache before anything is timed.** A run
+  streams the pack ~9 times over and lasts ~1.5 s, so on a cold cache the first
+  run of a session paid disk latency the rest did not — a ~30% outlier that read
+  like start-up, with the cache filling afterwards so later runs looked like
+  drift. The null bands went from +/-321% to +/-13.7% (parse) and +/-868% to
+  +/-21.7% (frame max); before the fix the board could resolve nothing but peak
+  working set, and after it resolves everything.
+- rusty_alloc 1.0.1.
+
 ## 0.7.0 - 2026-08-19
 
 **The performance release.** 0.3.20 is the last version on crates.io; everything

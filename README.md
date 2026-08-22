@@ -13,14 +13,17 @@
 > asset pipelines that need DDS without a C/C++ DirectXTex stack. Container
 > lineage: MIT [ddsfile](https://github.com/PistonDevelopers/ddsfile).
 
-> **Status — 0.3 / pre-1.0. Runtime campaign complete (2026-08); encoder campaign complete (2026-08).**
+> **Status — 0.8 / pre-1.0. Runtime campaign complete (2026-08); encoder campaign complete (2026-08).**
 > LDR decode/encode matrix green (BC1–BC5 U/S, BC7, RGBA/BGRA ×
-> 2D/mips/array/cube/NPOT/volume). Encoder rebuilt for Pareto wins: **89 of 102
-> corpus cases higher PSNR, 0 regressed, ~1.17× less CPU** than 0.1.2, plus
-> opt-in RDO for smaller shipped payloads. **0.3 adds a zero-copy parse
-> ([`DdsView`](#streaming-zero-copy-and-your-threads)) and decode into caller
-> memory and caller threads** — measured against Microsoft DirectXTex in a
-> streaming simulator. Features: `decode` + `encode` (default on).
+> 2D/mips/array/cube/NPOT/volume). **0.8 closes the last four cases where
+> DirectXTex was faster per core** — all of them BC1 albedo, all of them already
+> higher quality — taking the encode-speed board to **24 ahead / 0 behind** with
+> quality unchanged. It also takes bounds checks to **zero** in the four hottest
+> block functions, and every change in the release is **byte-identical**: no
+> decoded pixel and no encoded payload moves, enforced by a frozen-hash gate.
+> 0.3 added a zero-copy parse ([`DdsView`](#streaming-zero-copy-and-your-threads))
+> and decode into caller memory and caller threads — measured against Microsoft
+> DirectXTex in a streaming simulator. Features: `decode` + `encode` (default on).
 > BC6H: decode + UF16 mode-11 encode shipped (SF16 encode deferred). Catalog: [docs/formats.md](docs/formats.md).
 
 ---
@@ -33,20 +36,36 @@
 
 | Board (24 cases) | rusty_dds vs DirectXTex | Artifact |
 |---|---|---|
-| **Encode quality (PSNR)** | **22 higher / 2 tie / 0 lower** (±0.25 dB) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
-| **Encode speed** | **24 ahead / 0 behind** | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode quality (PSNR)** | **22 higher / 1 tie / 1 lower** (±0.25 dB) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode speed (per core)** | **24 ahead / 0 behind** — was 20/4 at 0.7.0 | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
 | **Decode speed** | **24 ahead / 0 behind** | [decode-vs-baselines](docs/artifacts/decode-vs-baselines.md) |
 | Synthetic C×X quality grid (54 cases) | **19 higher / 18 tie / 17 DirectXTex-higher** | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
 
-All four rows re-measured at 0.7.0 against the same DirectXTex build. Two changed:
-encode speed was **21 ahead / 3 behind** — the three signed cases that trailed at
-~1.10× are now ahead — and the synthetic grid row previously read *"0
-DirectXTex-higher cases"*, which its own linked artifact never supported. That grid
-is 54 synthetic content×context cases, and **DirectXTex is genuinely higher on 17
-of them** — mostly BC2 and volume-texture BC1/BC2/BC3, where it holds a few tenths
-of a dB. It is stated plainly here rather than aggregated away. rusty_dds improved
-on that grid over the encoder campaign (12 → 19 higher, absorbing ties), but it
-does not sweep it.
+**0.8.0 closed the last four losses.** At 0.7.0 the per-core encode board read
+*20 ahead / 4 behind*, and the four behind were all BC1 albedo — cases where
+rusty_dds was **already higher quality** and simply slower:
+
+| case | 0.7.0 | 0.8.0 | quality |
+|---|---:|---:|---:|
+| `Bricks097_Color` BC1 | 1.501 | **0.880** | +0.62 dB |
+| `Metal063_Color` BC1 | 1.656 | **0.762** | +1.30 dB |
+| `Rock064_Color` BC1 | 1.590 | **0.718** | +1.28 dB |
+| `Wood095_Color` BC1 | 1.438 | **0.780** | +1.29 dB |
+
+Ratio below 1 means rusty_dds is faster. Byte-identical throughout — the payload
+hashes are frozen and the build fails if one moves.
+
+The one quality loss on that board, named: **`Wood095_NormalGL` BC5S at
+−0.51 dB.** It is the price of defaulting the BC4/BC5 signed window sweep off,
+which cost 3–5× the encode time for 0.05–0.61 dB on maps we already led. That
+trade is recorded in `BC45_SIGNED_WINDOW`, and `RUSTY_DDS_BC45S_WINDOW=1` buys
+it back under the `tuning` feature.
+
+The synthetic grid row is stated plainly rather than aggregated away: it is 54
+synthetic content×context cases, and **DirectXTex is genuinely higher on 17 of
+them** — mostly BC2 and volume-texture BC1/BC2/BC3, where it holds a few tenths
+of a dB. rusty_dds improved on that grid over the encoder campaign (12 → 19
+higher, absorbing ties), but it does not sweep it.
 
 Notes on those numbers (2026-08 encoder campaign):
 
