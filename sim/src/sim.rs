@@ -85,6 +85,10 @@ pub struct Sim {
 impl Sim {
     pub fn new(cfg: &SimConfig) -> SimResult<Sim> {
         let pack = Pack::load(&cfg.pack_dir)?;
+        // Before anything is timed — see `Pack::warm`. Every measurement path
+        // builds a `Sim`, so warming here covers `run`, `bench`, `view` and the
+        // cockpit's panes without each having to remember.
+        pack.warm();
         let boxed = provider_for(&cfg.arm, &cfg.peer)?;
         let provider_name = boxed.name();
         let provider: Arc<dyn TextureProvider> = Arc::from(boxed);

@@ -49,6 +49,45 @@ impl Pack {
         self.dir.join(&t.file)
     }
 
+    /// Read every payload once so the OS page cache holds the pack before any
+    /// timed work begins. Returns the bytes faulted in.
+    ///
+    /// This is not an optimisation — it removes a measurement artifact. A run
+    /// streams the pack several times over, so on a cold cache the first run of
+    /// a session pays disk latency the rest do not, and it lands as a ~30%
+    /// outlier that reads like process start-up. Worse, the cache fills as the
+    /// session proceeds, so later runs get progressively faster and the whole
+    /// series looks like thermal drift in the wrong direction.
+    ///
+    /// Neither artifact survives warming: measured on `mission`/high192 the
+    /// first-run excess falls from +28.7% to +2.4%, and the null bands tighten
+    /// from +/-321% to +/-35% (parse), +/-715% to +/-36% (p99.9) and +/-868% to
+    /// +/-32% (frame max). It also skewed the ARMS against each other, which is
+    /// the part that could have produced a wrong conclusion: `rusty` measured
+    /// 37% slower than `rusty+ra` cold, and 8.5% warm.
+    ///
+    /// Errors are swallowed on purpose. A file that cannot be pre-read will be
+    /// opened again by the run itself and fail there, with a better message;
+    /// warming must never be the thing that breaks a run.
+    pub fn warm(&self) -> u64 {
+        use std::io::Read;
+        let mut buf = vec![0u8; 1 << 20];
+        let mut total = 0u64;
+        for t in &self.textures {
+            let Ok(mut f) = std::fs::File::open(self.path(t)) else {
+                continue;
+            };
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => total += n as u64,
+                    Err(_) => break,
+                }
+            }
+        }
+        total
+    }
+
     pub fn mips_per_texture(&self) -> Vec<u32> {
         self.textures.iter().map(|t| t.mips).collect()
     }
