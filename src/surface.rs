@@ -205,6 +205,50 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         })
     }
 
+    /// Byte ranges of EVERY mip of one physical slice, in ONE chain walk.
+    ///
+    /// The per-call form re-walks the chain from the top for each level
+    /// (`mip_offset_and_size_in_chain` is O(levels)), which makes a
+    /// level-by-level consumer O(levels²) per slice — the encoder's mip
+    /// driver was exactly that consumer.
+    pub(crate) fn subresource_chain_ranges(
+        &self,
+        layer: u32,
+        face: u32,
+    ) -> Result<Vec<Range<usize>>, Error> {
+        let levels = self.get_num_mipmap_levels();
+        let id0 = SubresourceId::new(0, layer, face);
+        self.validate_subresource_id(id0)?;
+        let physical = self.physical_slice_index(id0)?;
+        let array_stride = self.get_array_stride()?;
+        let base = physical
+            .checked_mul(array_stride)
+            .ok_or(Error::OutOfBounds)?;
+        let mut current = self
+            .get_main_texture_size()
+            .ok_or(Error::UnsupportedFormat)?;
+        let min_size = self.get_min_mipmap_size_in_bytes();
+        let mut offset = base;
+        let data_len = self.data.as_ref().len();
+        let mut out = Vec::with_capacity(levels as usize);
+        for _ in 0..levels {
+            let start = offset as usize;
+            let end = start
+                .checked_add(current as usize)
+                .ok_or(Error::OutOfBounds)?;
+            if end > data_len {
+                return Err(Error::TruncatedData);
+            }
+            out.push(start..end);
+            offset = offset.checked_add(current).ok_or(Error::OutOfBounds)?;
+            current /= 4;
+            if current < min_size {
+                current = min_size;
+            }
+        }
+        Ok(out)
+    }
+
     fn subresource_offset_and_size(&self, id: SubresourceId) -> Result<(u32, u32), Error> {
         self.validate_subresource_id(id)?;
 

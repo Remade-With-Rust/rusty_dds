@@ -1,6 +1,6 @@
 [package]
 name = "rusty_dds"
-version = "0.8.0"
+version = "0.9.0"
 authors = [
     "Mike Dilger <mike@optcomp.nz>",
     "Remade With Rust / Mata Network",
@@ -30,6 +30,23 @@ exclude = [
     "bench/preserved/*",
     "docs/artifacts/*.json",
     "target/*",
+    # Internal campaign planning: refutation ledgers, session coordination
+    # notes and measurement archaeology. Useful in the repo, noise in a
+    # published package.
+    "docs/plans/*",
+    # Campaign instruments, not user-facing examples. They exist to A/B one
+    # kernel against its predecessor and several depend on fixtures or a
+    # baseline binary that is not part of the package. `probe_rdo_exact` stays:
+    # it is a declared target and a documented reproduction step.
+    "examples/probe_6hbytes.rs",
+    "examples/probe_bc123_dec.rs",
+    "examples/probe_bc45_dec.rs",
+    "examples/probe_bc6h_dec.rs",
+    "examples/probe_encbytes.rs",
+    "examples/probe_idx_spread.rs",
+    "examples/probe_npot_dec.rs",
+    "examples/probe_rdo_bytes.rs",
+    "examples/probe_snorm_bytes.rs",
 ]
 
 [package.metadata.docs.rs]
@@ -153,3 +170,11 @@ required-features = ["decode", "encode"]
 [[test]]
 name = "encode_matrix"
 required-features = ["encode", "decode"]
+
+[[test]]
+name = "encode_determinism"
+required-features = ["encode"]
+
+[[test]]
+name = "parser_robustness"
+required-features = ["decode"]

@@ -35,10 +35,12 @@ pub fn decode_bc6h_into(
     // *and* fold into the RGBA widen, so the two tail passes become one.
     let mut scratch = [0u16; 4 * 4 * 3];
     let mut fscratch = [0f32; 4 * 4 * 3];
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 16;
-            let blk = &data[bi..bi + 16];
+    // `chunks_exact` instead of `data[bi..bi + 16]`: the slice index carried a
+    // bounds check and a panic path on every 4x4 block, and the iterator form
+    // is checked once. `validate` already proved `data` holds
+    // `blocks_x * blocks_y` whole blocks, so `take` never cuts short.
+    for (by, brow) in data.chunks_exact(16 * blocks_x).take(blocks_y).enumerate() {
+        for (bx, blk) in brow.chunks_exact(16).enumerate() {
             if !bc6h_mode11_half(blk, &mut scratch, signed) {
                 // The general decoder writes interleaved with a pitch of 12;
                 // transpose it so everything downstream sees one layout. Only
@@ -322,6 +324,14 @@ pub fn decode_bc6h(
     signed: bool,
 ) -> Result<Vec<f32>, Error> {
     let (_, _, w, h) = validate(data, width, height)?;
+    // The zero-fill LOOKS like pure tax — `decode_bc6h_into` overwrites every
+    // element — and an uninitialised-buffer form (`with_capacity` + `set_len`)
+    // was built and MEASURED: no change (3.4-4.6 ns/px both ways, interleaved
+    // A/B at 1024²/1023²). Under the system allocator a fresh 16 MiB vec is
+    // dominated by first-touch page faults, which the decode's own writes pay
+    // either way; the memset rides the same fault-warmed pages almost free.
+    // Re-evaluate under `rusty_alloc` (segments recycle, faults vanish, the
+    // memset becomes the dominant term) before spending `unsafe` here.
     let mut out = vec![
         0f32;
         w.checked_mul(h)

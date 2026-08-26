@@ -16,7 +16,6 @@ use crate::error::Error;
 use crate::format::DxgiFormat;
 use crate::header::Caps2;
 use crate::header10::{AlphaMode, D3D10ResourceDimension};
-use crate::surface::SubresourceId;
 use crate::{Dds, NewDxgiParams};
 
 /// Rate-distortion optimization strength for the BC1 and BC7 encoders.
@@ -249,6 +248,16 @@ impl Dds {
             .saturating_mul(4);
         let physical = dds.physical_slice_count();
 
+        // Mip 0 encodes straight from the caller's bytes — the owned buffer
+        // only exists once downsampling begins, so a no-mip encode (the common
+        // case) copies nothing. Levels below ping-pong two recycled buffers:
+        // level sizes only shrink, so nothing reallocates after the first
+        // level — and the pair is hoisted ABOVE the physical-slice loop, so a
+        // cubemap's six faces (or an array's N layers) share one warm pair
+        // instead of allocating and faulting a fresh pair per face.
+        let mut cur_buf: Vec<u8> = Vec::new();
+        let mut next_buf: Vec<u8> = Vec::new();
+
         for phys in 0..physical {
             let src0 = &pixels[phys as usize * layer_pixels..(phys as usize + 1) * layer_pixels];
             let (layer, face) = if layout.is_cubemap {
@@ -257,26 +266,40 @@ impl Dds {
                 (phys, 0)
             };
 
-            let mut mip_rgba = src0.to_vec();
             let mut mw = layout.width;
             let mut mh = layout.height;
             let mut md = layout.depth;
 
+            // One chain walk for every level's byte range — `surface_mut` per
+            // level re-walks the chain from the top, O(levels²) per slice.
+            let ranges = dds.subresource_chain_ranges(layer, face)?;
+
+            // REFUTED (2026-08-26): overlapping each level's encode with the
+            // NEXT level's downsample on a scope thread (both only read `cur`,
+            // writes disjoint, byte-identical by construction) measured 0.50x
+            // — TWICE as slow on a 2048² Rgba8 chain. Per-level spawn/join
+            // latency on a loaded Windows box plus two memory-bound passes
+            // contending for bandwidth; same law as banding the downsample
+            // itself. The serial fence stays.
             for mip in 0..layout.mipmap_levels {
-                let id = SubresourceId::new(mip, layer, face);
-                let surf = dds.surface_mut(id)?;
+                let range = ranges
+                    .get(mip as usize)
+                    .ok_or(Error::OutOfBounds)?
+                    .clone();
+                let cur: &[u8] = if mip == 0 { src0 } else { &cur_buf };
                 encode_surface(
                     layout.content,
                     layout.quality,
                     layout.rdo,
-                    &mip_rgba,
+                    cur,
                     mw,
                     mh,
                     md,
-                    surf.data,
+                    &mut dds.data[range],
                 )?;
                 if mip + 1 < layout.mipmap_levels {
-                    mip_rgba = mips::downsample_rgba8(&mip_rgba, mw, mh, md)?;
+                    mips::downsample_rgba8_into(cur, mw, mh, md, &mut next_buf)?;
+                    std::mem::swap(&mut cur_buf, &mut next_buf);
                     mw = (mw / 2).max(1);
                     mh = (mh / 2).max(1);
                     md = (md / 2).max(1);
@@ -406,6 +429,13 @@ fn encode_slice(
             let (Some(dst_all), Some(src_all)) = (out.get_mut(..n), rgba.get(..n)) else {
                 return Err(Error::TruncatedData);
             };
+            // The same self-inverse R↔B permutation the decoder's BGRA path
+            // takes — one shared `pshufb` kernel serves both directions. The
+            // scalar loop stays as the non-SSSE3 fallback and oracle.
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            if crate::swizzle::swap_rb(src_all, dst_all) {
+                return Ok(());
+            }
             for (dst, src) in dst_all.chunks_exact_mut(4).zip(src_all.chunks_exact(4)) {
                 dst[0] = src[2];
                 dst[1] = src[1];
@@ -485,8 +515,8 @@ fn encode_bc5_surface(
     signed: bool,
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let flat = blocks::channel_span(rgba, width, height, 0) <= 2
-        && blocks::channel_span(rgba, width, height, 1) <= 2;
+    let (span_r, span_g) = blocks::channel_span2(rgba, width, height);
+    let flat = span_r <= 2 && span_g <= 2;
     if flat {
         blocks::encode_image(
             rgba,

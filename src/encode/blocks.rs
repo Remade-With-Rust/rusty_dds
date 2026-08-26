@@ -53,6 +53,22 @@ pub(crate) fn round_clamp_u8(x: f32) -> u8 {
     (x.clamp(0.0, 255.0) as f64 + 0.5) as u8
 }
 
+/// `x.round().clamp(-127.0, 127.0) as i32`, without the libm call.
+///
+/// The signed sibling of [`round_clamp_u8`]: the symmetric clamp means the
+/// non-negativity argument no longer applies, so restore the sign instead.
+/// Round-half-away-from-zero is `trunc(|x| + 0.5)` with the sign put back,
+/// and `as` on a float truncates toward zero, which does both at once on
+/// `x + copysign(0.5, x)`. The add is again done in f64, where widening any
+/// f32 is exact: for `|x| >= 2^-30` the sum is exact outright, and below
+/// that it can only round onto `±0.5` or a same-side neighbour, which
+/// truncates to the correct 0 either way.
+#[inline]
+pub(crate) fn round_clamp_snorm(x: f32) -> i32 {
+    let y = x.clamp(-127.0, 127.0) as f64;
+    (y + 0.5f64.copysign(y)) as i32
+}
+
 /// Encode effort vs speed. Default [`EncodeQuality::Quality`] is the corpus bake-off path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -205,6 +221,31 @@ fn encode_image_parallel(
     });
 }
 
+/// Reinterpret a gathered 64-byte row buffer as sixteen RGBA pixels.
+///
+/// `[[u8; 4]; 16]` and `[u8; 64]` have identical size, alignment (1) and layout
+/// — arrays are laid out contiguously with no padding — so with `simd` on this
+/// is a free transmute. Without `simd` the crate is `forbid(unsafe_code)`
+/// (lib.rs pins the claim), so the same reinterpretation is spelled as sixteen
+/// 4-byte copies, which LLVM folds back into a plain move.
+#[cfg(feature = "simd")]
+#[inline]
+fn flat_to_pixels(flat: [u8; 64]) -> [[u8; 4]; 16] {
+    // SAFETY: size, alignment and layout equality argued above; every byte is
+    // initialised by the caller's row copies.
+    unsafe { std::mem::transmute::<[u8; 64], [[u8; 4]; 16]>(flat) }
+}
+
+#[cfg(not(feature = "simd"))]
+#[inline]
+fn flat_to_pixels(flat: [u8; 64]) -> [[u8; 4]; 16] {
+    let mut pixels = [[0u8; 4]; 16];
+    for (dst, src) in pixels.iter_mut().zip(flat.chunks_exact(4)) {
+        dst.copy_from_slice(src);
+    }
+    pixels
+}
+
 #[inline]
 fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 4]; 16] {
     let x0 = bx * 4;
@@ -223,10 +264,7 @@ fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 
             let src = ((y0 + row) * w + x0) * 4;
             flat[row * 16..row * 16 + 16].copy_from_slice(&rgba[src..src + 16]);
         }
-        // SAFETY: `[[u8; 4]; 16]` and `[u8; 64]` have identical size, alignment
-        // (1) and layout — arrays are laid out contiguously with no padding — so
-        // this is a pure reinterpretation of initialised bytes.
-        return unsafe { std::mem::transmute::<[u8; 64], [[u8; 4]; 16]>(flat) };
+        return flat_to_pixels(flat);
     }
     let mut pixels = [[0u8, 0, 0, 255]; 16];
     for row in 0..4 {
@@ -250,6 +288,15 @@ fn gather_block(rgba: &[u8], w: usize, h: usize, bx: usize, by: usize) -> [[u8; 
 pub fn channel_span(rgba: &[u8], width: u32, height: u32, channel: usize) -> u8 {
     let w = width as usize;
     let h = height as usize;
+    // One SSE2 pass, no shuffles — see `simd::channel_spans_sse2`. The scalar
+    // walk below stays as the non-x86 / `simd`-off path and the oracle; a
+    // too-short `rgba` also falls through to it so the panic semantics are
+    // unchanged.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if channel < 4 && rgba.len() >= w * h * 4 {
+        let (lo, hi) = simd::channel_spans_sse2(rgba, w * h)[channel];
+        return hi.saturating_sub(lo);
+    }
     let mut lo = 255u8;
     let mut hi = 0u8;
     for y in 0..h {
@@ -261,6 +308,31 @@ pub fn channel_span(rgba: &[u8], width: u32, height: u32, channel: usize) -> u8 
         }
     }
     hi.saturating_sub(lo)
+}
+
+/// Both BC5 channel spans in ONE surface pass.
+///
+/// The two-call form walked the whole surface twice on exactly the content the
+/// flat gate exists to catch (channel 0 flat, so the `&&` reached channel 1) —
+/// normal maps, BC5's main cargo. The vector pass computes all four channels
+/// in the same walk, so the second traversal is free.
+pub fn channel_span2(rgba: &[u8], width: u32, height: u32) -> (u8, u8) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    {
+        let w = width as usize;
+        let h = height as usize;
+        if rgba.len() >= w * h * 4 {
+            let s = simd::channel_spans_sse2(rgba, w * h);
+            return (
+                s[0].1.saturating_sub(s[0].0),
+                s[1].1.saturating_sub(s[1].0),
+            );
+        }
+    }
+    (
+        channel_span(rgba, width, height, 0),
+        channel_span(rgba, width, height, 1),
+    )
 }
 
 // ---------------------------------------------------------------------------

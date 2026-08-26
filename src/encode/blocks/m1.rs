@@ -333,8 +333,8 @@ fn ls_endpoints(
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
     for c in 0..3 {
-        e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 255.0) as u8;
-        e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 255.0) as u8;
+        e0[c] = super::round_clamp_u8((a11 * b0[c] - a01 * b1[c]) / det);
+        e1[c] = super::round_clamp_u8((a00 * b1[c] - a01 * b0[c]) / det);
     }
     Some((e0, e1))
 }

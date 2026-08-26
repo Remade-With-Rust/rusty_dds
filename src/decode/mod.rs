@@ -9,6 +9,10 @@
 
 mod bc6h;
 pub(crate) mod bcn;
+#[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod interp_pack;
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+pub(crate) mod neon;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 pub(crate) mod simd;
 mod uncompressed;

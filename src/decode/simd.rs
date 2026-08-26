@@ -27,37 +27,22 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_and_si128, _mm_cvtsi64_si128, _mm_loadl_epi64,
+    __m128i, _mm_add_epi16, _mm_and_si128, _mm_cvtsi64_si128, _mm_loadl_epi64, _mm_setr_epi16,
+    _mm_setr_epi8, _mm_srli_epi16,
     _mm_or_si128, _mm_set1_epi32, _mm_set_epi32, _mm_unpacklo_epi64, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
     _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
-    _mm_set_epi64x as _set64, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
+    _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
     _mm_unpacklo_epi16, _mm_unpacklo_epi8,
 };
 
-/// Pack four per-channel values into one register-ready `i64` of four `i16`
-/// lanes, in RGBA order.
-#[inline(always)]
-pub(super) fn pack4(v: [i32; 4]) -> i64 {
-    ((v[0] as u16 as u64)
-        | ((v[1] as u16 as u64) << 16)
-        | ((v[2] as u16 as u64) << 32)
-        | ((v[3] as u16 as u64) << 48)) as i64
-}
-
-/// Pack three per-channel values plus an opaque alpha, for the modes that do
-/// not carry one.
-#[inline(always)]
-pub(super) fn pack3_opaque_base(v: [i32; 3]) -> i64 {
-    // Alpha is written as a constant 255, which after `>> 6` means a base of
-    // `255 << 6` with a zero delta.
-    pack4([v[0], v[1], v[2], 255 << 6])
-}
-
-/// [`pack3_opaque_base`]'s delta twin: alpha must not move with the weight.
-#[inline(always)]
-pub(super) fn pack3_opaque_delta(v: [i32; 3]) -> i64 {
-    pack4([v[0], v[1], v[2], 0])
-}
+// The register pre-packing (`pack4`, `pack_bd3`, `pack_bd4`, ...) and the
+// 16-bit-lane safety argument moved to `super::interp_pack`, shared with the
+// aarch64 NEON mirror (`decode::neon`) so the layout has one definition.
+pub(super) use super::interp_pack::{pack4, pack_bd3, pack_bd4};
+// The opaque-alpha packers have no production caller on this side — `bcn`
+// reaches them through `pack_bd3` — but the oracle below spells them out.
+#[cfg(test)]
+pub(super) use super::interp_pack::{pack3_opaque_base, pack3_opaque_delta};
 
 /// Interpolate **two adjacent pixels** and write eight RGBA bytes.
 ///
@@ -83,33 +68,6 @@ pub(super) fn write2(b0: i64, d0: i64, b1: i64, d1: i64, w0: i16, w1: i16, dst: 
         let packed = _mm_packus_epi16(v, v);
         _mm_storel_epi64(dst.as_mut_ptr() as *mut __m128i, packed);
     }
-}
-
-/// Pre-pack the base/delta pairs of an opaque-alpha mode into register form.
-#[inline(always)]
-pub(super) fn pack_bd3(bd: &[([i32; 3], [i32; 3])], pairs: usize) -> [(i64, i64); 4] {
-    // FOUR slots for three subsets. Callers index this with a two-bit field
-    // (`(subsets >> 2 * p) & 0x3`), and although a three-subset partition never
-    // names subset 3, nothing tells the compiler that — so a three-slot array
-    // left a live bounds check on every lookup. The fourth slot is never read;
-    // it exists so the mask itself proves the index.
-    let mut out = [(0i64, 0i64); 4];
-    for (k, slot) in out.iter_mut().enumerate().take(pairs) {
-        slot.0 = pack3_opaque_base(bd[k].0);
-        slot.1 = pack3_opaque_delta(bd[k].1);
-    }
-    out
-}
-
-/// [`pack_bd3`] for the modes that carry alpha.
-#[inline(always)]
-pub(super) fn pack_bd4(bd: &[([i32; 4], [i32; 4])], pairs: usize) -> [(i64, i64); 2] {
-    let mut out = [(0i64, 0i64); 2];
-    for (k, slot) in out.iter_mut().enumerate().take(pairs) {
-        slot.0 = pack4(bd[k].0);
-        slot.1 = pack4(bd[k].1);
-    }
-    out
 }
 
 /// Interpolate two adjacent pixels where **colour and alpha take different
@@ -189,45 +147,149 @@ fn probe(cache: &std::sync::atomic::AtomicU8, detect: impl FnOnce() -> bool) -> 
 pub(super) fn has_ssse3() -> bool {
     static OK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     probe(&OK, || {
+        // SSE4.1 joined the requirement with the in-register palette build
+        // (`bc4_palette_xmm` uses `pmulld`/`pblendw`).
+        //
+        // BMI2 and the fast-`pdep` CPUID probe LEFT it (inline-exe §5.2k.2):
+        // the index unpack in `bc5_gather_ssse3` no longer uses `pdep`, so
+        // there is nothing left to microcode. That admits AMD Zen 1 and
+        // Zen 2 — which this gate previously excluded outright, sending them
+        // down the scalar block path for every BC4 and BC5 surface.
         std::arch::is_x86_feature_detected!("ssse3")
-            && std::arch::is_x86_feature_detected!("bmi2")
-            && has_fast_pdep()
+            && std::arch::is_x86_feature_detected!("sse4.1")
     })
 }
 
-/// Is `pdep` a real instruction on this CPU, or microcode?
+// RETIRED 2026-08-26 (inline-exe §5.2k.2): `has_fast_pdep`.
+//
+// It existed because BMI2 being *present* was not the question: on AMD Zen 1
+// and Zen 2 `pdep`/`pext` are microcoded at roughly 18 cycles latency and
+// 1/18 throughput, against 3 cycles on Intel Haswell-and-later and Zen
+// 3-and-later, and the BC5 kernel issued four per block against a block
+// budget near 100 cycles. So the probe read CPUID for the vendor string and
+// family (Zen 1/2 are 0x17, Zen 3 is 0x19) and excluded those parts — which
+// meant they decoded every BC4 and BC5 surface on the SCALAR path, forfeiting
+// the whole vector win rather than a fraction of it.
+//
+// The cure was not a better probe but removing the instruction: the index
+// unpack is now `pshufb` + `mullo` + `srli` (see `bc5_gather_ssse3`), so no
+// `pdep` is issued on any CPU and there is nothing left to detect. A
+// microarchitecture-specific CPUID hazard is a maintenance liability with a
+// shelf life — prefer deleting the dependency to modelling the hardware.
+
+
+/// Sixteen 3-bit indices, one per byte, entirely in registers — and WITHOUT
+/// `pdep` (inline-exe §5.2k.2).
 ///
-/// BMI2 being *present* is not the question. On AMD Zen 1 and Zen 2 `pdep` and
-/// `pext` are microcoded at roughly **18 cycles** latency and 1/18 throughput,
-/// against 3 cycles on Intel Haswell-and-later and AMD Zen 3-and-later. The BC5
-/// kernel issues four of them per block against a block budget near 100 cycles,
-/// so enabling this path on Zen 1/2 would be a large *regression* on hardware
-/// that advertises the feature.
+/// Writing the indices to a `[u8; 16]` and loading it back is the classic
+/// store-forwarding stall — sixteen narrow stores feeding one wide load —
+/// and it ate most of the gather win when measured that way. The previous
+/// form used `pdep` with mask `0x0707..07`, which is the perfect instruction
+/// for this on Intel and Zen 3+ — and MICROCODED at ~18 cycles on Zen 1 and
+/// Zen 2, so [`has_ssse3`] had to exclude those parts entirely and they
+/// decoded every BC4/BC5 surface on the scalar path (which the D8 probe
+/// measures at ~6.3x slower for BC4, ~3.6x for BC5). Needing only SSSE3
+/// retires that whole CPUID hazard — and it is the same rewrite the NEON
+/// port needs, ARM having no `pdep` either.
 ///
-/// Zen 3 is family 0x19; Zen 1 and Zen 2 are 0x17. Anything not AMD is fine.
-fn has_fast_pdep() -> bool {
-    // `__cpuid` is safe on x86_64: leaves 0 and 1 are architecturally defined
-    // and supported everywhere, and it touches no memory.
-    let (vendor, family) = {
-        let v = core::arch::x86_64::__cpuid(0);
-        let f = core::arch::x86_64::__cpuid(1);
-        ((v.ebx, v.edx, v.ecx), f.eax)
-    };
-    // "AuthenticAMD" as three little-endian dwords.
-    let is_amd = vendor == (0x6874_7541, 0x6974_6e65, 0x444d_4163);
-    if !is_amd {
-        return true;
-    }
-    let base = (family >> 8) & 0xf;
-    let display = if base == 0xf {
-        base + ((family >> 20) & 0xff)
-    } else {
-        base
-    };
-    display >= 0x19
+/// # The extract
+///
+/// Per sixteen-bit lane: `pshufb` gathers the source byte (or two) its field
+/// spans, then `mullo_epi16` by `2 ^ (13 - off)` lands that field at bits
+/// `[13, 16)` — the multiply truncates everything at bit 16 and above, and
+/// the shift discards everything below 13 — so one uniform `srli_epi16(13)`
+/// both extracts and masks it. SSE2 has no per-lane variable shift; this is
+/// the way around that, and it needs no mask constant.
+///
+/// Field `p` lives at bit `3p`, so within its group of eight it starts at
+/// byte `(3p)/8` with offset `(3p)%8` — bytes `[0,0,0,1,1,1,2,2]`, offsets
+/// `[0,3,6,1,4,7,2,5]`. Only offsets 6 and 7 (lanes 2 and 5) reach into a
+/// second byte; every other field ends at bit 8 or below and fits in one.
+///
+/// Those single-byte lanes therefore select `-1`, so `pshufb` writes a zero
+/// instead of a byte nobody reads. That is deliberate: it keeps EVERY
+/// selector entry pointing at a real index byte (`0..=5`), so the constants
+/// carry no implication that the source extends past the forty-eight bits
+/// that exist. The arithmetic would survive junk there — its contribution
+/// lands at bit 16 and `mullo` truncates it — but a selector reading byte 6
+/// invites the next person to widen this into a memory load that runs off
+/// the end of the payload.
+///
+/// Proven equal to `(w >> 3p) & 7` by `idx_spread_matches_scalar`.
+#[target_feature(enable = "ssse3")]
+unsafe fn idx_spread_ssse3(w: u64) -> __m128i {
+    let sel_lo = _mm_setr_epi8(0, -1, 0, -1, 0, 1, 1, -1, 1, -1, 1, 2, 2, -1, 2, -1);
+    let sel_hi = _mm_setr_epi8(3, -1, 3, -1, 3, 4, 4, -1, 4, -1, 4, 5, 5, -1, 5, -1);
+    let mult = _mm_setr_epi16(8192, 1024, 128, 4096, 512, 64, 2048, 256);
+    let src = _mm_cvtsi64_si128(w as i64);
+    let lo = _mm_srli_epi16(_mm_mullo_epi16(_mm_shuffle_epi8(src, sel_lo), mult), 13);
+    let hi = _mm_srli_epi16(_mm_mullo_epi16(_mm_shuffle_epi8(src, sel_hi), mult), 13);
+    // Values are 0..=7, so `packus` never saturates.
+    _mm_packus_epi16(lo, hi)
 }
 
-/// Gather both channels of a BC5 block and write all four RGBA rows.
+/// Build the eight-entry BC4 palette directly in the low eight bytes of an
+/// `__m128i` — no scalar pack tree and no `movq` handoff (inline-exe D1).
+///
+/// The BC5 block is LATENCY bound (see `bc5_block_rgba`): one ~25-cycle
+/// serial chain, of which the scalar palette build plus the register
+/// transfer measured ~32%. This shortens the chain instead of thinning it —
+/// the file's three recorded throughput refutations all failed that test.
+///
+/// Lane recipe: entry `k` is `(W[k] * delta + (e0 << 16) + 32768) >> 16`,
+/// with `W[0] = 0` yielding exactly `e0` and `W[1] = 65536` exactly `e1`
+/// (the `+32768` floors away under the shift for every delta), so all eight
+/// entries share one formula; the four-interpolant arm then overwrites lanes
+/// 6 and 7 with its constants via `pblendw`. Bytes are taken by `pshufb`
+/// truncation, which is saturation-free and sign-agnostic — signed palettes
+/// wrap to their two's-complement bytes exactly as the scalar `as u8` does.
+/// Nothing here can overflow an i32 lane: `|W * delta| <= 65536 * 255` and
+/// `e0 << 16` add to well under 2^31, and every final value is in
+/// `-127 ..= 255`, inside `packs_epi32`'s exact range.
+///
+/// Proven equal to [`crate::decode::bcn::bc4_palette_packed`] over the
+/// EXHAUSTIVE domain — all 65 536 endpoint pairs, both signs — by
+/// `bc4_palette_xmm_matches_scalar_exhaustively`.
+#[target_feature(enable = "ssse3,sse4.1")]
+unsafe fn bc4_palette_xmm(a0: u8, a1: u8, is_signed: bool) -> __m128i {
+    // Only the names this kernel adds; `_mm_setr_epi8`/`_mm_setr_epi16` come
+    // from the module import. Re-importing them here shadowed it, and the
+    // unused-import lint resolved that shadowing differently on 1.73 (the
+    // declared MSRV) than on stable — six warnings on one, zero on the other.
+    use core::arch::x86_64::{
+        _mm_add_epi32, _mm_blend_epi16, _mm_mullo_epi32, _mm_packs_epi32, _mm_setr_epi32,
+        _mm_srai_epi32,
+    };
+    let (e0, e1) = if is_signed {
+        ((a0 as i8 as i32).max(-127), (a1 as i8 as i32).max(-127))
+    } else {
+        (a0 as i32, a1 as i32)
+    };
+    let dv = _mm_set1_epi32(e1 - e0);
+    let add = _mm_set1_epi32((e0 << 16) + 32768);
+    let take = _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+    let entries = |w: __m128i| _mm_srai_epi32(_mm_add_epi32(_mm_mullo_epi32(dv, w), add), 16);
+    if e0 > e1 {
+        let lo = entries(_mm_setr_epi32(0, 65536, 9363, 18724));
+        let hi = entries(_mm_setr_epi32(28086, 37450, 46812, 56173));
+        _mm_shuffle_epi8(_mm_packs_epi32(lo, hi), take)
+    } else {
+        let lo = entries(_mm_setr_epi32(0, 65536, 13107, 26215));
+        // Lanes 6 and 7 are the mode's constants, not interpolants; the two
+        // zero weights below are placeholders the blend overwrites.
+        let hi = entries(_mm_setr_epi32(39321, 52429, 0, 0));
+        let tail = if is_signed {
+            _mm_setr_epi16(0, 0, 0, 0, 0, 0, -127, 127)
+        } else {
+            _mm_setr_epi16(0, 0, 0, 0, 0, 0, 0, 255)
+        };
+        let v = _mm_blend_epi16(_mm_packs_epi32(lo, hi), tail, 0b1100_0000);
+        _mm_shuffle_epi8(v, take)
+    }
+}
+
+/// Gather both channels of a BC5 block and write all four RGBA rows, building
+/// the palettes in-register on the way.
 ///
 /// The measured cost in BC5 was the **table lookup**, not the index arithmetic:
 /// with the lookup stubbed out the block runs at ~655 Mpx/s against ~371 with it,
@@ -235,14 +297,23 @@ fn has_fast_pdep() -> bool {
 /// sixteen-entry byte gather in one instruction, which is exactly the shape of an
 /// eight-entry palette lookup done sixteen times.
 ///
-/// Returns `false` when SSSE3 is absent, so the caller keeps its scalar path.
+/// Endpoints arrive as raw block bytes and the palettes are built HERE, by
+/// [`bc4_palette_xmm`] — the caller no longer runs the scalar build at all on
+/// this path (D1: that build fed a pack tree and a `movq`, ~32% of the
+/// latency chain). `green` is `None` for BC4, which expands with a zero
+/// second channel.
+///
+/// Returns `false` when the ISA gate fails, so the caller keeps its scalar path.
 ///
 /// `out` must span the four block rows, i.e. at least `3 * pitch + 16` bytes.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn bc5_gather(
-    pr: u64,
-    pg: u64,
+    r0: u8,
+    r1: u8,
+    green: Option<(u8, u8)>,
     ir: u64,
     ig: u64,
+    is_signed: bool,
     out: &mut [u8],
     pitch: usize,
 ) -> bool {
@@ -250,46 +321,37 @@ pub(super) fn bc5_gather(
         return false;
     }
     debug_assert!(out.len() >= 3 * pitch + 16);
-    // SAFETY: guarded by the `has_ssse3` check above, so every intrinsic used is
-    // available. The four stores write sixteen bytes at `0, pitch, 2*pitch,
-    // 3*pitch`, all within the `3 * pitch + 16` the caller guarantees; the loads
-    // read eight bytes from `[u8; 8]` palettes and sixteen from local arrays.
-    // Nothing is aligned-assuming and no pointer escapes.
-    unsafe { bc5_gather_ssse3(pr, pg, ir, ig, out.as_mut_ptr(), pitch) }
+    // SAFETY: guarded by the `has_ssse3` check above (which asserts SSSE3 and
+    // SSE4.1), so every intrinsic used is available. The four stores
+    // write sixteen bytes at `0, pitch, 2*pitch, 3*pitch`, all within the
+    // `3 * pitch + 16` the caller guarantees; nothing is aligned-assuming and
+    // no pointer escapes.
+    unsafe { bc5_gather_ssse3(r0, r1, green, ir, ig, is_signed, out.as_mut_ptr(), pitch) }
     true
 }
 
-#[target_feature(enable = "ssse3,bmi2")]
+#[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "ssse3,sse4.1")]
 unsafe fn bc5_gather_ssse3(
-    pr: u64,
-    pg: u64,
+    r0: u8,
+    r1: u8,
+    green: Option<(u8, u8)>,
     ir: u64,
     ig: u64,
+    is_signed: bool,
     dst: *mut u8,
     pitch: usize,
 ) {
-    // Sixteen 3-bit indices per channel, one byte each. These extractions are
-    // already independent — the index arithmetic measured at only ~10% of the
-    // call — so they stay scalar rather than fighting a 3-bit field unpack in
-    // vector form.
-    // Sixteen 3-bit indices per channel, one per byte, built entirely in
-    // registers. Writing them to a `[u8; 16]` and loading it back is the classic
-    // store-forwarding stall — sixteen narrow stores feeding one wide load —
-    // and it ate most of the gather win when measured that way.
-    //
-    // `pdep` with mask 0x0707..07 deposits each 3-bit group into its own byte,
-    // which is exactly the unpack needed, at two instructions per eight pixels.
-    const SPREAD: u64 = 0x0707_0707_0707_0707;
-    let idx_vec = |w: u64| {
-        _set64(
-            core::arch::x86_64::_pdep_u64(w >> 24, SPREAD) as i64,
-            core::arch::x86_64::_pdep_u64(w, SPREAD) as i64,
-        )
-    };
+    // Sixteen 3-bit indices to sixteen bytes — see `idx_spread_ssse3`.
+    let idx_vec = |w: u64| idx_spread_ssse3(w);
 
-    // `movq` from a register, not a load from a stack array — see the caller.
-    let pal_r = core::arch::x86_64::_mm_cvtsi64_si128(pr as i64);
-    let pal_g = core::arch::x86_64::_mm_cvtsi64_si128(pg as i64);
+    // Palettes built in-register — see `bc4_palette_xmm`. Same feature set,
+    // so both builds inline into this chain; no scalar pack tree, no `movq`.
+    let pal_r = bc4_palette_xmm(r0, r1, is_signed);
+    let pal_g = match green {
+        Some((g0, g1)) => bc4_palette_xmm(g0, g1, is_signed),
+        None => core::arch::x86_64::_mm_setzero_si128(),
+    };
     let rv = _mm_shuffle_epi8(pal_r, idx_vec(ir));
     let gv = _mm_shuffle_epi8(pal_g, idx_vec(ig));
 
@@ -358,33 +420,10 @@ pub(super) fn has_pshufb() -> bool {
     probe(&OK, || std::arch::is_x86_feature_detected!("ssse3"))
 }
 
-/// `pshufb` selectors for four BC1 pixels, indexed by the byte holding their
-/// four 2-bit indices.
-///
-/// A BC1 palette is four RGBA entries — exactly sixteen bytes, exactly one
-/// register — so one `pshufb` produces four whole pixels. All that is needed is
-/// the byte selector, and there are only 256 of them: `SEL[b][4k + c]` is
-/// `4 * ((b >> 2k) & 3) + c`. 4 KiB, L1-resident, built at compile time.
-const fn build_bc1_sel() -> [[u8; 16]; 256] {
-    let mut t = [[0u8; 16]; 256];
-    let mut b = 0usize;
-    while b < 256 {
-        let mut k = 0usize;
-        while k < 4 {
-            let e = ((b >> (2 * k)) & 3) as u8;
-            let mut c = 0usize;
-            while c < 4 {
-                t[b][k * 4 + c] = e * 4 + c as u8;
-                c += 1;
-            }
-            k += 1;
-        }
-        b += 1;
-    }
-    t
-}
-
-pub(crate) static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
+// The `pshufb` selector table for four BC1 pixels lives in `crate::simd_tables`
+// (shared with the encoder's fixed-table BC1 SSE kernel, which must build
+// without the `decode` feature).
+pub(crate) use crate::simd_tables::BC1_SEL;
 
 /// Decode a whole BC1 surface, four pixels per `pshufb`.
 ///
@@ -415,17 +454,18 @@ pub(crate) static BC1_SEL: [[u8; 16]; 256] = build_bc1_sel();
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn bc1_blocks_ssse3(
     data: &[u8],
-    blocks_x: usize,
-    blocks_y: usize,
+    grid_x: usize,
+    run_x: usize,
+    run_y: usize,
     out: &mut [u8],
     out_w: usize,
 ) {
     let pitch = out_w * 4;
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 8;
+    for by in 0..run_y {
+        for bx in 0..run_x {
+            let bi = (by * grid_x + bx) * 8;
             let blk = core::slice::from_raw_parts(src.add(bi), 8);
             let pal = super::bcn::bc1_palette(blk, false);
             // Four u32 in registers straight into one xmm: no stack round trip.
@@ -510,8 +550,9 @@ static BC3_SEL: [[u8; 8]; 64] = build_bc3_sel();
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn bc2_blocks_ssse3(
     data: &[u8],
-    blocks_x: usize,
-    blocks_y: usize,
+    grid_x: usize,
+    run_x: usize,
+    run_y: usize,
     out: &mut [u8],
     out_w: usize,
 ) {
@@ -519,9 +560,9 @@ pub(super) unsafe fn bc2_blocks_ssse3(
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();
     let keep = _mm_set1_epi32(RGB_MASK);
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 16;
+    for by in 0..run_y {
+        for bx in 0..run_x {
+            let bi = (by * grid_x + bx) * 16;
             let blk = core::slice::from_raw_parts(src.add(bi), 16);
             // `true`: BC2 colour blocks are always four-colour, whatever the
             // endpoint order.
@@ -553,6 +594,59 @@ pub(super) unsafe fn bc2_blocks_ssse3(
     }
 }
 
+/// Build the eight-entry BC3 alpha palette directly in the low eight bytes
+/// of an `__m128i` — the D1 recipe carried to the DIVISION-form palette
+/// (inline-exe D3; the build ceiling-probes at ~22% of BC3 decode).
+///
+/// This is NOT the refuted scalar `base + k*delta` rewrite recorded on
+/// `bc3_alpha_palette_packed` — that one serialised six scalar entries
+/// behind computing `delta`; here all eight lanes issue together and the
+/// exact division becomes ONE `pmulhi_epu16` against a reciprocal:
+///
+/// * entry k is `(WA[k]*a0 + WB[k]*a1 + 1) / 7` (or `/ 5`), and
+///   `WA = 7, WB = 0` / `WA = 0, WB = 7` reproduce `a0` and `a1` exactly
+///   through the same formula — `(7*a0 + 1) / 7 == a0` — so lanes 0 and 1
+///   need no special casing;
+/// * `N * 9363 >> 16` equals `N / 7` exactly for `N < 1872` (numerators
+///   reach 1786), and `N * 13108 >> 16` equals `N / 5` exactly for
+///   `N < 3276` (numerators reach 1276);
+/// * the four-interpolant arm's constant lane 6 falls out of the formula
+///   (`N = 1` divides to 0) and lane 7 is one `insert_epi16`.
+///
+/// Everything is SSE2 except the caller's `pshufb`, so the surface kernel's
+/// SSSE3 gate is unchanged. Proven equal to the scalar build over the
+/// EXHAUSTIVE domain — all 65 536 endpoint pairs — by
+/// `bc3_alpha_xmm_matches_scalar_exhaustively`.
+#[target_feature(enable = "ssse3")]
+unsafe fn bc3_alpha_xmm(a0: u8, a1: u8) -> __m128i {
+    // As `bc4_palette_xmm`: only the names not already imported at module
+    // scope, so nothing is shadowed and the MSRV and stable lints agree.
+    use core::arch::x86_64::{_mm_insert_epi16, _mm_mulhi_epu16};
+    let a0v = _mm_set1_epi16(a0 as i16);
+    let a1v = _mm_set1_epi16(a1 as i16);
+    let take = _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14, -1, -1, -1, -1, -1, -1, -1, -1);
+    let numer = |wa: __m128i, wb: __m128i| {
+        _mm_add_epi16(
+            _mm_add_epi16(_mm_mullo_epi16(wa, a0v), _mm_mullo_epi16(wb, a1v)),
+            _mm_set1_epi16(1),
+        )
+    };
+    if a0 > a1 {
+        let n = numer(
+            _mm_setr_epi16(7, 0, 6, 5, 4, 3, 2, 1),
+            _mm_setr_epi16(0, 7, 1, 2, 3, 4, 5, 6),
+        );
+        _mm_shuffle_epi8(_mm_mulhi_epu16(n, _mm_set1_epi16(9363)), take)
+    } else {
+        let n = numer(
+            _mm_setr_epi16(5, 0, 4, 3, 2, 1, 0, 0),
+            _mm_setr_epi16(0, 5, 1, 2, 3, 4, 0, 0),
+        );
+        let e = _mm_mulhi_epu16(n, _mm_set1_epi16(13108));
+        _mm_shuffle_epi8(_mm_insert_epi16(e, 255, 7), take)
+    }
+}
+
 /// Decode a whole BC3 surface: BC1 colour, with an interpolated alpha block
 /// gathered by a second `pshufb` and folded in before the store.
 ///
@@ -567,8 +661,9 @@ pub(super) unsafe fn bc2_blocks_ssse3(
 #[target_feature(enable = "ssse3")]
 pub(super) unsafe fn bc3_blocks_ssse3(
     data: &[u8],
-    blocks_x: usize,
-    blocks_y: usize,
+    grid_x: usize,
+    run_x: usize,
+    run_y: usize,
     out: &mut [u8],
     out_w: usize,
 ) {
@@ -576,15 +671,16 @@ pub(super) unsafe fn bc3_blocks_ssse3(
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();
     let keep = _mm_set1_epi32(RGB_MASK);
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 16;
+    for by in 0..run_y {
+        for bx in 0..run_x {
+            let bi = (by * grid_x + bx) * 16;
             let blk = core::slice::from_raw_parts(src.add(bi), 16);
             let pal = super::bcn::bc1_palette(&blk[8..16], true);
             let p = _mm_set_epi32(pal[3] as i32, pal[2] as i32, pal[1] as i32, pal[0] as i32);
             let cidx = u32::from_le_bytes([blk[12], blk[13], blk[14], blk[15]]);
-            // One `movq` from a GPR, not a spilled array.
-            let apal = _mm_cvtsi64_si128(super::bcn::bc3_alpha_palette_packed(blk[0], blk[1]) as i64);
+            // Alpha palette built in-register — see `bc3_alpha_xmm`. Same
+            // feature set, so it inlines here; no scalar build, no `movq`.
+            let apal = bc3_alpha_xmm(blk[0], blk[1]);
             let aidx = u64::from_le_bytes([
                 blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7],
             ]) >> 16;
@@ -725,11 +821,12 @@ unsafe fn bc6h_interp_avx2_impl(
 /// enough for `blocks_x * blocks_y` sixteen-byte blocks, and an `out` long
 /// enough for `blocks_y * 4` rows of `out_w` pixels — the aligned case its
 /// caller validates.
-#[target_feature(enable = "ssse3,bmi2")]
+#[target_feature(enable = "ssse3,sse4.1")]
 pub(super) unsafe fn bc5_blocks_ssse3(
     data: &[u8],
-    blocks_x: usize,
-    blocks_y: usize,
+    grid_x: usize,
+    run_x: usize,
+    run_y: usize,
     out: &mut [u8],
     out_w: usize,
     is_signed: bool,
@@ -737,16 +834,23 @@ pub(super) unsafe fn bc5_blocks_ssse3(
     let pitch = out_w * 4;
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 16;
+    for by in 0..run_y {
+        for bx in 0..run_x {
+            let bi = (by * grid_x + bx) * 16;
             let blk = core::slice::from_raw_parts(src.add(bi), 16);
-            let pr = super::bcn::bc4_palette_packed(blk[0], blk[1], is_signed);
-            let pg = super::bcn::bc4_palette_packed(blk[8], blk[9], is_signed);
             let ir = super::bcn::bc4_indices(&blk[..8]);
             let ig = super::bcn::bc4_indices(&blk[8..16]);
             let o = (by * 4 * out_w + bx * 4) * 4;
-            bc5_gather_ssse3(pr, pg, ir, ig, dst.add(o), pitch);
+            bc5_gather_ssse3(
+                blk[0],
+                blk[1],
+                Some((blk[8], blk[9])),
+                ir,
+                ig,
+                is_signed,
+                dst.add(o),
+                pitch,
+            );
         }
     }
 }
@@ -760,11 +864,12 @@ pub(super) unsafe fn bc5_blocks_ssse3(
 /// # Safety
 ///
 /// As [`bc5_blocks_ssse3`], with eight-byte blocks.
-#[target_feature(enable = "ssse3,bmi2")]
+#[target_feature(enable = "ssse3,sse4.1")]
 pub(super) unsafe fn bc4_blocks_ssse3(
     data: &[u8],
-    blocks_x: usize,
-    blocks_y: usize,
+    grid_x: usize,
+    run_x: usize,
+    run_y: usize,
     out: &mut [u8],
     out_w: usize,
     is_signed: bool,
@@ -772,14 +877,13 @@ pub(super) unsafe fn bc4_blocks_ssse3(
     let pitch = out_w * 4;
     let src = data.as_ptr();
     let dst = out.as_mut_ptr();
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let bi = (by * blocks_x + bx) * 8;
+    for by in 0..run_y {
+        for bx in 0..run_x {
+            let bi = (by * grid_x + bx) * 8;
             let blk = core::slice::from_raw_parts(src.add(bi), 8);
-            let pr = super::bcn::bc4_palette_packed(blk[0], blk[1], is_signed);
             let ir = super::bcn::bc4_indices(blk);
             let o = (by * 4 * out_w + bx * 4) * 4;
-            bc5_gather_ssse3(pr, 0, ir, 0, dst.add(o), pitch);
+            bc5_gather_ssse3(blk[0], blk[1], None, ir, 0, is_signed, dst.add(o), pitch);
         }
     }
 }
@@ -857,9 +961,206 @@ unsafe fn bc6h_planar_to_rgba_f16c(src: &[u16; 48], dst: *mut f32, pitch: usize)
     }
 }
 
+// REFUTED (2026-08-26): a whole-surface `#[target_feature(avx2,f16c)]` BC6H
+// loop — `bc6h_blocks_avx2`, one dispatch per surface with all three kernels
+// inlined into it, mirroring the BC1-BC5 surface loops — was built, verified
+// byte-identical, and MEASURED SLOWER: 2.05 -> 2.9-4.5 ns/px at 1024²,
+// interleaved ABBA against a HEAD-worktree baseline, replicated across seven
+// rounds and two orderings, with the call boundaries confirmed gone in the
+// generated code. Outlining the transpose again recovered only part of it,
+// and even the "obviously free" probes-only variant inherited damage — the
+// merged/refactored loop compiled to 2462 lines against the incumbent's
+// 1280, with thirteen bounds-check panic paths against four and both interp
+// flavours inlined into one stack-heavy frame. This loop's codegen is
+// precariously tuned; the 26.7%-of-BC1 boundary law does NOT transfer:
+// kernels this heavy use the per-block call boundaries as register and
+// scheduling barriers. Everything reverted to the shape that measures
+// fastest — the one below and in `bc6h.rs`. Two laws worth the dig:
+// (1) returning an 88-byte tuple from a non-inlined helper cost more per
+// block than all three call boundaries combined; (2) the episode left
+// `bc6h_interp_avx2` with its first direct oracle
+// (`mode11_interp_vector_matches_scalar`), closing a §4.5 gap.
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-register palette build must equal the scalar
+    /// `bc4_palette_packed` over the EXHAUSTIVE domain — all 65 536 endpoint
+    /// pairs, both signs, both mode arms and every saturating clamp. Proof by
+    /// exhaustion, not sampling: the whole input domain is two bytes.
+    #[test]
+    fn bc4_palette_xmm_matches_scalar_exhaustively() {
+        if !has_ssse3() {
+            eprintln!("SSSE3/SSE4.1/BMI2 gate not passed; skipping");
+            return;
+        }
+        for a0 in 0..=255u8 {
+            for a1 in 0..=255u8 {
+                for signed in [false, true] {
+                    let want = super::super::bcn::bc4_palette_packed(a0, a1, signed);
+                    // SAFETY: the gate above asserts SSSE3 and SSE4.1.
+                    let got = unsafe {
+                        let v = bc4_palette_xmm(a0, a1, signed);
+                        let mut out = [0u8; 16];
+                        _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, v);
+                        u64::from_le_bytes(out[..8].try_into().unwrap())
+                    };
+                    assert_eq!(
+                        got, want,
+                        "a0={a0} a1={a1} signed={signed}: {got:#018x} != {want:#018x}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `pdep`-free index unpack must equal the field extraction it
+    /// replaces — byte `p` is `(w >> 3p) & 7` — for every bit pattern shape
+    /// that matters (inline-exe §5.2k.2).
+    ///
+    /// The domain is 2^48, so this is structured plus random rather than
+    /// exhaustive: each index in isolation at its maximum (which walks a
+    /// `7` across all sixteen fields, covering every byte boundary the
+    /// two-byte lanes straddle), all-zero, all-ones, and 200k random words.
+    #[test]
+    fn idx_spread_matches_scalar() {
+        if !has_ssse3() {
+            eprintln!("SSSE3/SSE4.1 gate not passed; skipping");
+            return;
+        }
+        let check = |w: u64| {
+            // SAFETY: SSSE3 checked above.
+            let got = unsafe {
+                let v = idx_spread_ssse3(w);
+                let mut out = [0u8; 16];
+                _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, v);
+                out
+            };
+            let mut want = [0u8; 16];
+            for (p, slot) in want.iter_mut().enumerate() {
+                *slot = ((w >> (3 * p)) & 7) as u8;
+            }
+            assert_eq!(got, want, "w = {w:#014x}");
+        };
+        check(0);
+        check(0x0000_FFFF_FFFF_FFFF);
+        // One field at a time, every value, at every position.
+        for p in 0..16u32 {
+            for v in 0..8u64 {
+                check(v << (3 * p));
+                // ...and against an all-ones background, so a lane that
+                // wrongly picks up a neighbour's bits cannot hide.
+                check((0x0000_FFFF_FFFF_FFFFu64 & !(7 << (3 * p))) | (v << (3 * p)));
+            }
+        }
+        let mut state = 0x52c2_9e37_79b9u64 | 1;
+        for _ in 0..200_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            check(state & 0x0000_FFFF_FFFF_FFFF);
+        }
+    }
+
+    /// The in-register BC3 alpha palette must equal the scalar division-form
+    /// build over the EXHAUSTIVE domain — all 65 536 endpoint pairs, both
+    /// mode arms, every reciprocal-rounding edge. Proof by exhaustion: the
+    /// whole input domain is two bytes.
+    #[test]
+    fn bc3_alpha_xmm_matches_scalar_exhaustively() {
+        if !has_pshufb() {
+            eprintln!("SSSE3 not available; skipping");
+            return;
+        }
+        for a0 in 0..=255u8 {
+            for a1 in 0..=255u8 {
+                let want = super::super::bcn::bc3_alpha_palette_packed(a0, a1);
+                // SAFETY: SSSE3 checked above.
+                let got = unsafe {
+                    let v = bc3_alpha_xmm(a0, a1);
+                    let mut out = [0u8; 16];
+                    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, v);
+                    u64::from_le_bytes(out[..8].try_into().unwrap())
+                };
+                assert_eq!(got, want, "a0={a0} a1={a1}: {got:#018x} != {want:#018x}");
+            }
+        }
+    }
+
+    /// The AVX2 mode-11 interpolator against the scalar expression it
+    /// replaces, DIRECTLY — §4.5 oracle debt: until now `bc6h_interp_avx2`
+    /// was covered only end-to-end through whichever path the dispatch
+    /// happened to take. Inputs are generated exactly as `bc6h_mode11_half`
+    /// derives them — 10-bit endpoints through the saturating unquantize,
+    /// weights from the W4 table — including both saturation extremes, where
+    /// `base` hits its range limits and `packus` would show any lane error.
+    #[test]
+    fn mode11_interp_vector_matches_scalar() {
+        if !has_avx2() {
+            eprintln!("AVX2 not available; skipping");
+            return;
+        }
+        const W4: [i32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
+        let uq = |v: i32| {
+            if v == 0 {
+                0
+            } else if v == 1023 {
+                0xFFFF
+            } else {
+                ((v << 16) + 0x8000) >> 10
+            }
+        };
+        let mut state = 0x6bc6_d155_a7c4_2026u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let (e0, e1): ([i32; 3], [i32; 3]) = match case {
+                0 => ([0; 3], [0; 3]),
+                1 => ([1023; 3], [1023; 3]),
+                2 => ([0; 3], [1023; 3]),
+                3 => ([1023; 3], [0; 3]),
+                _ => {
+                    let r = next();
+                    let s = next();
+                    (
+                        [
+                            (r & 0x3ff) as i32,
+                            ((r >> 10) & 0x3ff) as i32,
+                            ((r >> 20) & 0x3ff) as i32,
+                        ],
+                        [
+                            (s & 0x3ff) as i32,
+                            ((s >> 10) & 0x3ff) as i32,
+                            ((s >> 20) & 0x3ff) as i32,
+                        ],
+                    )
+                }
+            };
+            let a = [uq(e0[0]), uq(e0[1]), uq(e0[2])];
+            let c = [uq(e1[0]), uq(e1[1]), uq(e1[2])];
+            let base = [a[0] * 64 + 32, a[1] * 64 + 32, a[2] * 64 + 32];
+            let delta = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let mut w = [0i32; 16];
+            for wp in w.iter_mut() {
+                *wp = W4[(next() & 0xf) as usize];
+            }
+            let mut fast = [0u16; 48];
+            assert!(bc6h_interp_avx2(&base, &delta, &w, &mut fast));
+            let mut slow = [0u16; 48];
+            for (p, &wp) in w.iter().enumerate() {
+                for ch in 0..3 {
+                    let v = (base[ch] + wp * delta[ch]) >> 6;
+                    slow[ch * 16 + p] = ((v * 31) >> 6) as u16;
+                }
+            }
+            assert_eq!(fast, slow, "case {case}: e0={e0:?} e1={e1:?} w={w:?}");
+        }
+    }
 
     /// The vector path must agree with the scalar expression it replaces across
     /// the whole endpoint and weight domain, including the endpoints where a
@@ -966,7 +1267,7 @@ mod tests {
             }
             let out_w = BX * 4;
             let mut got = vec![0u8; out_w * BY * 4 * 4];
-            unsafe { bc1_blocks_ssse3(&data, BX, BY, &mut got, out_w) };
+            unsafe { bc1_blocks_ssse3(&data, BX, BX, BY, &mut got, out_w) };
 
             let mut want = vec![0u8; out_w * BY * 4 * 4];
             let pitch = out_w * 4;
@@ -1038,9 +1339,9 @@ mod tests {
                 let mut got = vec![0u8; len];
                 unsafe {
                     if which == 0 {
-                        bc2_blocks_ssse3(&data, BX, BY, &mut got, out_w)
+                        bc2_blocks_ssse3(&data, BX, BX, BY, &mut got, out_w)
                     } else {
-                        bc3_blocks_ssse3(&data, BX, BY, &mut got, out_w)
+                        bc3_blocks_ssse3(&data, BX, BX, BY, &mut got, out_w)
                     }
                 }
                 let mut want = vec![0u8; len];
@@ -1116,9 +1417,9 @@ mod tests {
                     let mut got = vec![0u8; len];
                     unsafe {
                         if is_bc5 {
-                            bc5_blocks_ssse3(&data, BX, BY, &mut got, out_w, is_signed)
+                            bc5_blocks_ssse3(&data, BX, BX, BY, &mut got, out_w, is_signed)
                         } else {
-                            bc4_blocks_ssse3(&data, BX, BY, &mut got, out_w, is_signed)
+                            bc4_blocks_ssse3(&data, BX, BX, BY, &mut got, out_w, is_signed)
                         }
                     }
                     let mut want = vec![0u8; len];

@@ -594,10 +594,7 @@ pub(super) fn ls_alpha_endpoints_u(samples: &[u8; 16], block: &[u8; 8]) -> Optio
     }
     let e0 = (sx * sw2 - sxw * sw) / det;
     let e1 = (n * sxw - sw * sx) / det;
-    Some((
-        e0.round().clamp(0.0, 255.0) as u8,
-        e1.round().clamp(0.0, 255.0) as u8,
-    ))
+    Some((super::round_clamp_u8(e0), super::round_clamp_u8(e1)))
 }
 
 /// Integer UNORM→SNORM matching `round(((u/255)*2-1)*127)` clamped to [-127,127].
@@ -995,10 +992,7 @@ pub(super) fn ls_alpha_endpoints_s(vals: &[i32; 16], block: &[u8; 8]) -> Option<
     }
     let e0 = (sx * sw2 - sxw * sw) / det;
     let e1 = (n * sxw - sw * sx) / det;
-    Some((
-        e0.round().clamp(-127.0, 127.0) as i32,
-        e1.round().clamp(-127.0, 127.0) as i32,
-    ))
+    Some((super::round_clamp_snorm(e0), super::round_clamp_snorm(e1)))
 }
 
 pub(super) fn alpha_sse_u(samples: &[u8; 16], block: &[u8; 8]) -> i32 {

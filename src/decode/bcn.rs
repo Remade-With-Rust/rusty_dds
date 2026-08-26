@@ -8,6 +8,16 @@
 
 use crate::error::Error;
 
+// One name for the BC7 two-pixel interpolation kernels, resolved per
+// architecture: SSE2 on x86-64, NEON on aarch64 (inline-exe §5.3 stage 1 —
+// the same `write2`/`write2_split` pair serves all eight BC7 modes). The
+// packing layout both mirrors consume is defined once, in
+// `decode::interp_pack`.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use crate::decode::simd as interp;
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
+use crate::decode::neon as interp;
+
 /// Parallelize BC7 only when enough work amortizes `thread::scope` spawn cost.
 /// 32×32 (64 blocks) is too small — spawn overhead dominated (~10–20× slower).
 /// 256×256 = 4096 blocks is a practical floor for strip workers.
@@ -77,20 +87,21 @@ pub fn decode_bc1_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> 
     // it. The validation below is the same as `decode_rgba_blocks_into`'s, and
     // anything it does not cover falls through to that shared path.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
-        let (blocks_x, blocks_y, expected) = block_grid(width, height, 8)?;
-        if data.len() < expected {
-            return Err(Error::TruncatedData);
-        }
-        let out_w = width as usize;
-        check_out_len(out, out_w, height as usize)?;
-        // SAFETY: SSSE3 is checked above. `block_grid` bounds the block count to
-        // `expected <= data.len()`, `check_out_len` bounds `out`, and the shape
-        // is exactly `decode_rgba_blocks_into`'s aligned case.
-        unsafe {
-            crate::decode::simd::bc1_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
-        }
-        return Ok(());
+    if crate::decode::simd::has_pshufb() {
+        return decode_surface_peeled(
+            data,
+            width,
+            height,
+            8,
+            out,
+            |d, grid_x, run_x, run_y, o, ow| {
+                // SAFETY: SSSE3 checked above; `decode_surface_peeled` bounds
+                // `data` and `out` and hands the kernel only whole blocks
+                // that land inside `out`.
+                unsafe { crate::decode::simd::bc1_blocks_ssse3(d, grid_x, run_x, run_y, o, ow) }
+            },
+            |block, dst, pitch| bc1_color_block(block, dst, pitch, false),
+        );
     }
     decode_rgba_blocks_into(data, width, height, 8, out, |block, dst, pitch| {
         bc1_color_block(block, dst, pitch, false);
@@ -106,19 +117,19 @@ pub fn decode_bc2(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 pub fn decode_bc2_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
     // Dispatched once per surface, not once per block — see `decode_bc1_into`.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
-        let (blocks_x, blocks_y, expected) = block_grid(width, height, 16)?;
-        if data.len() < expected {
-            return Err(Error::TruncatedData);
-        }
-        let out_w = width as usize;
-        check_out_len(out, out_w, height as usize)?;
-        // SAFETY: SSSE3 checked above; `block_grid` and `check_out_len` bound
-        // the input and output exactly as the aligned path below does.
-        unsafe {
-            crate::decode::simd::bc2_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
-        }
-        return Ok(());
+    if crate::decode::simd::has_pshufb() {
+        return decode_surface_peeled(
+            data,
+            width,
+            height,
+            16,
+            out,
+            |d, grid_x, run_x, run_y, o, ow| {
+                // SAFETY: as `decode_bc1_into`.
+                unsafe { crate::decode::simd::bc2_blocks_ssse3(d, grid_x, run_x, run_y, o, ow) }
+            },
+            bc2_block_rgba,
+        );
     }
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
         bc2_block_rgba(block, dst, pitch);
@@ -134,19 +145,19 @@ pub fn decode_bc3(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error
 pub fn decode_bc3_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> Result<(), Error> {
     // Dispatched once per surface, not once per block — see `decode_bc1_into`.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if width % 4 == 0 && height % 4 == 0 && crate::decode::simd::has_pshufb() {
-        let (blocks_x, blocks_y, expected) = block_grid(width, height, 16)?;
-        if data.len() < expected {
-            return Err(Error::TruncatedData);
-        }
-        let out_w = width as usize;
-        check_out_len(out, out_w, height as usize)?;
-        // SAFETY: SSSE3 checked above; `block_grid` and `check_out_len` bound
-        // the input and output exactly as the aligned path below does.
-        unsafe {
-            crate::decode::simd::bc3_blocks_ssse3(data, blocks_x, blocks_y, out, out_w);
-        }
-        return Ok(());
+    if crate::decode::simd::has_pshufb() {
+        return decode_surface_peeled(
+            data,
+            width,
+            height,
+            16,
+            out,
+            |d, grid_x, run_x, run_y, o, ow| {
+                // SAFETY: as `decode_bc1_into`.
+                unsafe { crate::decode::simd::bc3_blocks_ssse3(d, grid_x, run_x, run_y, o, ow) }
+            },
+            bc3_block_rgba,
+        );
     }
     decode_rgba_blocks_into(data, width, height, 16, out, |block, dst, pitch| {
         bc3_block_rgba(block, dst, pitch);
@@ -171,6 +182,29 @@ pub fn decode_bc4_into(
     is_signed: bool,
     out: &mut [u8],
 ) -> Result<(), Error> {
+    // One feature check per surface, not per block — see `decode_bc1_into`.
+    // No alignment gate: the kernel runs over the whole blocks and only a
+    // partial edge column/row is peeled (D8).
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::decode::simd::has_ssse3() {
+        return decode_surface_peeled(
+            data,
+            width,
+            height,
+            8,
+            out,
+            |d, grid_x, run_x, run_y, o, ow| {
+                // SAFETY: SSSE3 and fast `pdep` checked above; the helper
+                // bounds `data`/`out` and passes only whole blocks.
+                unsafe {
+                    crate::decode::simd::bc4_blocks_ssse3(
+                        d, grid_x, run_x, run_y, o, ow, is_signed,
+                    )
+                }
+            },
+            |block, dst, pitch| bc4_block_rgba(block, dst, pitch, is_signed),
+        );
+    }
     let (blocks_x, blocks_y, expected) = block_grid(width, height, 8)?;
     if data.len() < expected {
         return Err(Error::TruncatedData);
@@ -179,20 +213,6 @@ pub fn decode_bc4_into(
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
     let aligned = width % 4 == 0 && height % 4 == 0;
-    // One feature check per surface, not per block — see `decode_bc1_into`. The
-    // gather itself is unchanged; only where it is dispatched from has moved.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if aligned && crate::decode::simd::has_ssse3() {
-        // SAFETY: SSSE3 and fast `pdep` checked above; `block_grid` and
-        // `check_out_len` bound input and output; `aligned` is the shape the
-        // loop below would take.
-        unsafe {
-            crate::decode::simd::bc4_blocks_ssse3(
-                data, blocks_x, blocks_y, out, out_w, is_signed,
-            );
-        }
-        return Ok(());
-    }
     let pitch = out_w * 4;
     let mut scratch = [0u8; 64];
 
@@ -231,6 +251,29 @@ pub fn decode_bc5_into(
     is_signed: bool,
     out: &mut [u8],
 ) -> Result<(), Error> {
+    // One feature check per surface, not per block — see `decode_bc1_into`.
+    // No alignment gate: the kernel runs over the whole blocks and only a
+    // partial edge column/row is peeled (D8).
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if crate::decode::simd::has_ssse3() {
+        return decode_surface_peeled(
+            data,
+            width,
+            height,
+            16,
+            out,
+            |d, grid_x, run_x, run_y, o, ow| {
+                // SAFETY: SSSE3 and fast `pdep` checked above; the helper
+                // bounds `data`/`out` and passes only whole blocks.
+                unsafe {
+                    crate::decode::simd::bc5_blocks_ssse3(
+                        d, grid_x, run_x, run_y, o, ow, is_signed,
+                    )
+                }
+            },
+            |block, dst, pitch| bc5_block_rgba(block, dst, pitch, is_signed),
+        );
+    }
     let (blocks_x, blocks_y, expected) = block_grid(width, height, 16)?;
     if data.len() < expected {
         return Err(Error::TruncatedData);
@@ -239,20 +282,6 @@ pub fn decode_bc5_into(
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
     let aligned = width % 4 == 0 && height % 4 == 0;
-    // One feature check per surface, not per block — see `decode_bc1_into`. The
-    // gather itself is unchanged; only where it is dispatched from has moved.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if aligned && crate::decode::simd::has_ssse3() {
-        // SAFETY: SSSE3 and fast `pdep` checked above; `block_grid` and
-        // `check_out_len` bound input and output; `aligned` is the shape the
-        // loop below would take.
-        unsafe {
-            crate::decode::simd::bc5_blocks_ssse3(
-                data, blocks_x, blocks_y, out, out_w, is_signed,
-            );
-        }
-        return Ok(());
-    }
     let pitch = out_w * 4;
     let mut scratch = [0u8; 64];
 
@@ -287,17 +316,22 @@ pub fn decode_bc7_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> 
     let out_h = height as usize;
     check_out_len(out, out_w, out_h)?;
 
-    let aligned = width % 4 == 0 && height % 4 == 0;
-    let parallel = aligned
-        && blocks_y >= 2
-        && blocks_x.saturating_mul(blocks_y) >= BC7_PARALLEL_MIN_BLOCKS;
+    // NPOT surfaces used to lose BOTH fast paths here: `aligned` gated the
+    // direct write AND was a term in `parallel`, so one odd row or column
+    // dropped the crate's most expensive format onto serial scratch-and-blit
+    // — two multipliers compounding. But the direct write only needs WHOLE
+    // BLOCKS, not aligned dimensions; only the partial last column/row is
+    // unsafe. `decode_bc7_rows` peels those, so both arms serve any size and
+    // the parallel gate is about work, not shape. (Same class as the BC1-BC5
+    // dispatch gate and the mip filter's even-dimension gate — a gate that
+    // states a DIFFERENT requirement than the one the kernel has.)
+    let parallel =
+        blocks_y >= 2 && blocks_x.saturating_mul(blocks_y) >= BC7_PARALLEL_MIN_BLOCKS;
 
     if parallel {
-        decode_bc7_parallel(data, out, out_w, blocks_x, blocks_y);
-    } else if aligned {
-        decode_bc7_direct(data, out, out_w, blocks_x, blocks_y);
+        decode_bc7_parallel(data, out, out_w, out_h, blocks_x, blocks_y);
     } else {
-        decode_bc7_scratch(data, out, out_w, out_h, blocks_x, blocks_y);
+        decode_bc7_rows(data, out, out_w, out_h, blocks_x, 0, blocks_y);
     }
     Ok(())
 }
@@ -550,19 +584,20 @@ pub(super) fn bc4_indices(blk: &[u8]) -> u64 {
 /// the two.
 #[inline]
 fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
-    let pal_packed = bc4_palette_packed(blk[0], blk[1], is_signed);
-    let pal = pal_packed.to_le_bytes();
     let idx = bc4_indices(blk);
 
     // BC4 is BC5 with a zero second channel: the same gather, with an all-zero
     // green palette and a zero index word, yields (v, 0, 0, 255) per pixel.
-    // Reuses the kernel and its oracle rather than duplicating them.
+    // Reuses the kernel and its oracle rather than duplicating them. The
+    // vector path builds its palette in-register (D1), so the scalar build
+    // below now runs only on the fallback.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if out.len() >= 3 * pitch + 16
-        && crate::decode::simd::bc5_gather(pal_packed, 0, idx, 0, out, pitch)
+        && crate::decode::simd::bc5_gather(blk[0], blk[1], None, idx, 0, is_signed, out, pitch)
     {
         return;
     }
+    let pal = bc4_palette_packed(blk[0], blk[1], is_signed).to_le_bytes();
     // A whole block row per store: one slice range-check instead of four. See
     // `bc5_block_rgba` — this was worth +32% there.
     for row in 0..4usize {
@@ -602,20 +637,30 @@ fn bc4_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
 // follows it, worth maybe six cycles of the twenty-five. Measure the chain, not
 // the operation count.
 fn bc5_block_rgba(blk: &[u8], out: &mut [u8], pitch: usize, is_signed: bool) {
-    let pr_packed = bc4_palette_packed(blk[0], blk[1], is_signed);
-    let pg_packed = bc4_palette_packed(blk[8], blk[9], is_signed);
     let ir = bc4_indices(&blk[..8]);
     let ig = bc4_indices(&blk[8..16]);
 
     // One `pshufb` per channel replaces thirty-two dependent byte loads. Needs
     // SSSE3, so it is detected and the scalar path below stays as the twin.
+    // The vector path builds both palettes in-register (D1), so the scalar
+    // builds below now run only on the fallback.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     if out.len() >= 3 * pitch + 16
-        && crate::decode::simd::bc5_gather(pr_packed, pg_packed, ir, ig, out, pitch)
+        && crate::decode::simd::bc5_gather(
+            blk[0],
+            blk[1],
+            Some((blk[8], blk[9])),
+            ir,
+            ig,
+            is_signed,
+            out,
+            pitch,
+        )
     {
         return;
     }
-    let (pr, pg) = (pr_packed.to_le_bytes(), pg_packed.to_le_bytes());
+    let pr = bc4_palette_packed(blk[0], blk[1], is_signed).to_le_bytes();
+    let pg = bc4_palette_packed(blk[8], blk[9], is_signed).to_le_bytes();
     // A whole block row per store. Four separate four-byte `copy_from_slice`
     // calls carry four slice range-checks; building the row and writing it once
     // carries one, and the row is contiguous in the destination by construction.
@@ -896,6 +941,284 @@ mod bc23_tests {
     }
 }
 
+/// Decode a whole surface with a vector surface kernel, peeling ONLY the
+/// blocks that kernel cannot safely write (inline-exe D8).
+///
+/// # The gate this replaces
+///
+/// The surface kernels store a whole 4x4 block per iteration — sixteen bytes
+/// per row — so they are safe wherever a whole block lands inside `out`. That
+/// is every block EXCEPT the last column when `width % 4 != 0` (its store
+/// would run into the next row) and the last row when `height % 4 != 0` (its
+/// rows do not exist). The dispatch used to refuse the ENTIRE surface if
+/// either held, which put every NPOT surface — and the bottom mips of every
+/// chain, where a dimension falls below 4 — on the per-block scalar path.
+///
+/// Measured cost of that over-strict gate, same pixel count both ways
+/// (1024² against 1023²): **BC1 3.30x, BC4 5.85x, BC5 3.99x, BC3 2.74x,
+/// BC2 2.73x**. A height that is not a multiple of four can only affect the
+/// last block row, yet `1020x1023` — width perfectly aligned — paid the same
+/// penalty as the fully unaligned case.
+///
+/// `kernel` receives `(data, grid_x, run_x, run_y, out, out_w)`: `grid_x` is
+/// the block-grid stride in `data`, which the peel does NOT change, while
+/// `run_x`/`run_y` bound the sub-rectangle it may write. `decode_block`
+/// decodes one block into a 64-byte scratch at pitch 16 for the peeled
+/// edges, exactly as the scalar path does.
+fn decode_surface_peeled(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    block_bytes: usize,
+    out: &mut [u8],
+    kernel: impl FnOnce(&[u8], usize, usize, usize, &mut [u8], usize),
+    decode_block: impl Fn(&[u8], &mut [u8], usize),
+) -> Result<(), Error> {
+    let (blocks_x, blocks_y, expected) = block_grid(width, height, block_bytes)?;
+    if data.len() < expected {
+        return Err(Error::TruncatedData);
+    }
+    let out_w = width as usize;
+    let out_h = height as usize;
+    check_out_len(out, out_w, out_h)?;
+
+    // Whole blocks only: drop the last column / row exactly when it is partial.
+    let run_x = if width % 4 == 0 { blocks_x } else { blocks_x - 1 };
+    let run_y = if height % 4 == 0 { blocks_y } else { blocks_y - 1 };
+    if run_x > 0 && run_y > 0 {
+        kernel(data, blocks_x, run_x, run_y, out, out_w);
+    }
+
+    let mut scratch = [0u8; 64];
+    let edge = |bx: usize, by: usize, out: &mut [u8], scratch: &mut [u8; 64]| {
+        let bi = (by * blocks_x + bx) * block_bytes;
+        decode_block(&data[bi..bi + block_bytes], scratch, 16);
+        blit_rgba4(scratch, out, out_w, out_h, bx * 4, by * 4);
+    };
+    // The partial right column, above the bottom row.
+    for by in 0..run_y {
+        for bx in run_x..blocks_x {
+            edge(bx, by, out, &mut scratch);
+        }
+    }
+    // The partial bottom row, full width.
+    for by in run_y..blocks_y {
+        for bx in 0..blocks_x {
+            edge(bx, by, out, &mut scratch);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod npot_peel_tests {
+    use super::*;
+
+    /// BC7 NPOT A/B: one odd row used to cost BOTH the direct write and the
+    /// thread-parallel path. 1024² (aligned, fast before and after — the
+    /// NEUTRALITY arm) against 1023² and 1020x1023 (width aligned, one odd
+    /// row — the case that paid in full).
+    /// Run with: `cargo test --release probe_bc7_npot -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn probe_bc7_npot() {
+        let mut state = 0xb17_9e37_79b9_7f4au64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        use std::hint::black_box;
+        let best = |f: &mut dyn FnMut() -> u64| {
+            let mut best = u64::MAX;
+            for _ in 0..9 {
+                let t = std::time::Instant::now();
+                let sink = black_box(f());
+                let dt = t.elapsed().as_nanos() as u64;
+                assert_ne!(sink, u64::MAX);
+                best = best.min(dt);
+            }
+            best
+        };
+        for (w, h) in [(1024u32, 1024u32), (1023, 1023), (1020, 1023)] {
+            let bx = w.div_ceil(4) as usize;
+            let by = h.div_ceil(4) as usize;
+            let mut data = vec![0u8; bx * by * 16];
+            for c in data.chunks_exact_mut(8) {
+                c.copy_from_slice(&next().to_le_bytes());
+            }
+            let px = (w as usize) * (h as usize) * 4;
+            let mut out = vec![0u8; px];
+            // Shipping path (peeled dispatch).
+            let ship = best(&mut |
+| {
+                decode_bc7_into(black_box(&data), w, h, &mut out).unwrap();
+                out[123] as u64 + 1
+            });
+            // The pre-peel behaviour for this shape: NPOT went to serial
+            // scratch; aligned went to the direct/parallel path, which the
+            // shipping arm still is — so for 1024² the two arms are the same
+            // code and the ratio is the neutrality check.
+            // NEUTRALITY (aligned only): both arms SERIAL and single-band, so
+            // they differ in the walker alone — the band split is unchanged by
+            // this brick, and comparing a serial replica against the parallel
+            // dispatch would measure thread count, not the peel.
+            if w % 4 == 0 && h % 4 == 0 {
+                let pre = best(&mut || {
+                    decode_bc7_band_prepeel(black_box(&data), &mut out, w as usize, bx, 0, by);
+                    out[123] as u64 + 1
+                });
+                let peeled = best(&mut || {
+                    decode_bc7_rows(
+                        black_box(&data),
+                        &mut out,
+                        w as usize,
+                        h as usize,
+                        bx,
+                        0,
+                        by,
+                    );
+                    out[123] as u64 + 1
+                });
+                eprintln!(
+                    "bc7 {w}x{h} NEUTRALITY (serial walker, aligned): pre-peel {:.3} ns/px, peeled {:.3} ns/px, ratio {:.2}x",
+                    pre as f64 / ((w as f64) * (h as f64)),
+                    peeled as f64 / ((w as f64) * (h as f64)),
+                    pre as f64 / peeled as f64,
+                );
+            }
+            let old = if w % 4 == 0 && h % 4 == 0 {
+                // Headline for the aligned row is the dispatch against itself
+                // (unchanged path); the neutrality line above is the real gate.
+                ship
+            } else {
+                best(&mut |
+| {
+                    decode_bc7_scratch(
+                        black_box(&data),
+                        &mut out,
+                        w as usize,
+                        h as usize,
+                        bx,
+                        by,
+                    );
+                    out[123] as u64 + 1
+                })
+            };
+            let n = (w as f64) * (h as f64);
+            eprintln!(
+                "bc7 {w}x{h}: pre-peel {:.3} ns/px, shipping {:.3} ns/px, ratio {:.2}x",
+                old as f64 / n,
+                ship as f64 / n,
+                old as f64 / ship as f64,
+            );
+        }
+    }
+
+    /// The peeled surface path must produce EXACTLY what the all-scalar block
+    /// path produces, for every combination of partial edges.
+    ///
+    /// This is the standing gate on D8: the dispatch no longer refuses NPOT
+    /// surfaces, so the vector kernel now runs on block grids whose last
+    /// column and/or row is partial. Every `(width % 4, height % 4)` pair is
+    /// covered, plus surfaces smaller than one block (where `run_x`/`run_y`
+    /// go to zero and everything must be peeled).
+    #[test]
+    fn peeled_surface_matches_scalar_for_every_edge_shape() {
+        let mut state = 0xd8_9e37_79b9_7f4au64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Every residue pair, plus sub-block and single-block sizes.
+        let mut dims: Vec<(u32, u32)> = Vec::new();
+        for wm in 0..4u32 {
+            for hm in 0..4u32 {
+                dims.push((8 + wm, 8 + hm));
+            }
+        }
+        dims.extend([(1, 1), (2, 3), (3, 2), (4, 4), (5, 5), (7, 1), (1, 7), (13, 9)]);
+
+        // BC7 arm: it does not route through `decode_rgba_blocks_into`, so its
+        // reference is `decode_bc7_scratch` — the clamping all-scratch walker,
+        // valid at every size. Sizes big enough to cross the parallel gate are
+        // added separately below, since the band split is where a partial last
+        // block row can reach a worker.
+        let mut bc7_dims = dims.clone();
+        bc7_dims.extend([(256, 256), (257, 256), (256, 257), (259, 261), (512, 130)]);
+        for (w, h) in bc7_dims {
+            let bx = w.div_ceil(4) as usize;
+            let by = h.div_ceil(4) as usize;
+            let px = (w as usize) * (h as usize) * 4;
+            let mut data = vec![0u8; bx * by * 16];
+            for c in data.chunks_exact_mut(8) {
+                c.copy_from_slice(&next().to_le_bytes());
+            }
+            let mut got = vec![0u8; px];
+            decode_bc7_into(&data, w, h, &mut got).unwrap();
+            let mut want = vec![0u8; px];
+            decode_bc7_scratch(&data, &mut want, w as usize, h as usize, bx, by);
+            assert_eq!(got, want, "bc7 {w}x{h}");
+        }
+
+        for (w, h) in dims {
+            let bx = w.div_ceil(4) as usize;
+            let by = h.div_ceil(4) as usize;
+            let px = (w as usize) * (h as usize) * 4;
+            for (bb, tag) in [(8usize, "bc1"), (16, "bc2"), (16, "bc3"), (8, "bc4"), (16, "bc5")] {
+                let mut data = vec![0u8; bx * by * bb];
+                for c in data.chunks_exact_mut(8) {
+                    c.copy_from_slice(&next().to_le_bytes());
+                }
+                for signed in [false, true] {
+                    if signed && !tag.starts_with("bc4") && !tag.starts_with("bc5") {
+                        continue;
+                    }
+                    let mut got = vec![0u8; px];
+                    let mut want = vec![0u8; px];
+                    match tag {
+                        "bc1" => {
+                            decode_bc1_into(&data, w, h, &mut got).unwrap();
+                            decode_rgba_blocks_into(&data, w, h, 8, &mut want, |b, d, p| {
+                                bc1_color_block(b, d, p, false)
+                            })
+                            .unwrap();
+                        }
+                        "bc2" => {
+                            decode_bc2_into(&data, w, h, &mut got).unwrap();
+                            decode_rgba_blocks_into(&data, w, h, 16, &mut want, bc2_block_rgba)
+                                .unwrap();
+                        }
+                        "bc3" => {
+                            decode_bc3_into(&data, w, h, &mut got).unwrap();
+                            decode_rgba_blocks_into(&data, w, h, 16, &mut want, bc3_block_rgba)
+                                .unwrap();
+                        }
+                        "bc4" => {
+                            decode_bc4_into(&data, w, h, signed, &mut got).unwrap();
+                            decode_rgba_blocks_into(&data, w, h, 8, &mut want, |b, d, p| {
+                                bc4_block_rgba(b, d, p, signed)
+                            })
+                            .unwrap();
+                        }
+                        _ => {
+                            decode_bc5_into(&data, w, h, signed, &mut got).unwrap();
+                            decode_rgba_blocks_into(&data, w, h, 16, &mut want, |b, d, p| {
+                                bc5_block_rgba(b, d, p, signed)
+                            })
+                            .unwrap();
+                        }
+                    }
+                    assert_eq!(got, want, "{tag} {w}x{h} signed={signed}");
+                }
+            }
+        }
+    }
+}
+
 fn decode_rgba_blocks_into(
     data: &[u8],
     width: u32,
@@ -934,19 +1257,85 @@ fn decode_rgba_blocks_into(
     Ok(())
 }
 
-fn decode_bc7_direct(
+/// Decode block rows `by0..by1` into `band`, whose first row is output row
+/// `by0 * 4` and which is `band_h` rows tall.
+///
+/// Blocks whose four columns AND four rows lie wholly inside the surface are
+/// written STRAIGHT to the output pitch — the fast path that used to require
+/// aligned dimensions. Only the partial last column/row go through the
+/// 64-byte scratch and the clamping blit, so an NPOT surface pays the slow
+/// path for its edge alone instead of for every block.
+///
+/// The interior loop is peeled rather than branched so an aligned surface
+/// executes exactly what `decode_bc7_direct` used to: `full_bx == blocks_x`
+/// leaves the edge loop empty and `rows_here` is always 4.
+fn decode_bc7_rows(
     data: &[u8],
-    out: &mut [u8],
+    band: &mut [u8],
     out_w: usize,
+    band_h: usize,
     blocks_x: usize,
-    blocks_y: usize,
+    by0: usize,
+    by1: usize,
 ) {
     let pitch = out_w * 4;
-    for by in 0..blocks_y {
+    // Block columns whose four pixels all lie inside the surface.
+    let full_bx = out_w / 4;
+    let mut scratch = [0u8; 64];
+    let edge = |blk: &[u8], scratch: &mut [u8; 64], band: &mut [u8], x: usize, y: usize| {
+        if !bc7_fast_block(blk, scratch, 16) {
+            bcdec_rs::bc7(blk, scratch, 16);
+        }
+        blit_rgba4(scratch, band, out_w, band_h, x, y);
+    };
+    for by in by0..by1 {
+        let local_y = (by - by0) * 4;
+        // 4, or fewer when the surface ends mid-block.
+        let rows_here = band_h.saturating_sub(local_y).min(4);
+        if rows_here == 4 {
+            for bx in 0..full_bx {
+                let bi = (by * blocks_x + bx) * 16;
+                let offset = (local_y * out_w + bx * 4) * 4;
+                let (blk, dst) = (&data[bi..bi + 16], &mut band[offset..]);
+                if !bc7_fast_block(blk, dst, pitch) {
+                    bcdec_rs::bc7(blk, dst, pitch);
+                }
+            }
+        } else {
+            for bx in 0..full_bx {
+                let bi = (by * blocks_x + bx) * 16;
+                edge(&data[bi..bi + 16], &mut scratch, band, bx * 4, local_y);
+            }
+        }
+        for bx in full_bx..blocks_x {
+            let bi = (by * blocks_x + bx) * 16;
+            edge(&data[bi..bi + 16], &mut scratch, band, bx * 4, local_y);
+        }
+    }
+}
+
+/// The PRE-PEEL aligned band loop, verbatim, kept test-only.
+///
+/// The neutrality arm: the peel must cost nothing on aligned surfaces, which
+/// is where the existing population lives. Structurally it adds one row-level
+/// branch and a `full_bx` compare per band; this measures that claim instead
+/// of asserting it.
+#[cfg(test)]
+fn decode_bc7_band_prepeel(
+    data: &[u8],
+    band: &mut [u8],
+    out_w: usize,
+    blocks_x: usize,
+    by0: usize,
+    by1: usize,
+) {
+    let pitch = out_w * 4;
+    for by in by0..by1 {
+        let local_y = by - by0;
         for bx in 0..blocks_x {
             let bi = (by * blocks_x + bx) * 16;
-            let offset = (by * 4 * out_w + bx * 4) * 4;
-            let (blk, dst) = (&data[bi..bi + 16], &mut out[offset..]);
+            let offset = (local_y * 4 * out_w + bx * 4) * 4;
+            let (blk, dst) = (&data[bi..bi + 16], &mut band[offset..]);
             if !bc7_fast_block(blk, dst, pitch) {
                 bcdec_rs::bc7(blk, dst, pitch);
             }
@@ -954,6 +1343,15 @@ fn decode_bc7_direct(
     }
 }
 
+/// The all-scratch BC7 walker — every block decoded into a 64-byte scratch and
+/// blitted with clamping, which is correct for ANY dimensions.
+///
+/// Kept as the byte-identity ORACLE for [`decode_bc7_rows`]'s peel. It was the
+/// shipping path for NPOT surfaces before the peel; production no longer calls
+/// it, but it is the only reference that covers aligned and unaligned sizes
+/// with one implementation, so the peel is proved against it over the whole
+/// size sweep rather than half of it.
+#[cfg(test)]
 fn decode_bc7_scratch(
     data: &[u8],
     out: &mut [u8],
@@ -979,11 +1377,11 @@ fn decode_bc7_parallel(
     data: &[u8],
     out: &mut [u8],
     out_w: usize,
+    out_h: usize,
     blocks_x: usize,
     blocks_y: usize,
 ) {
     let pitch = out_w * 4;
-    let strip_bytes = 4 * pitch;
     // `available_parallelism` is a syscall; it cannot usefully change within a
     // process, and this used to run on every decode call.
     static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -1007,26 +1405,16 @@ fn decode_bc7_parallel(
 
     std::thread::scope(|s| {
         let mut rest = out;
-        let mut consumed_rows = 0usize;
         for &(by0, by1) in &ranges {
+            // The last band is short when the surface ends mid-block; every
+            // band is a whole number of output ROWS, so the split is exact.
             let row0 = by0 * 4;
-            debug_assert_eq!(row0, consumed_rows);
-            let strip_len = (by1 - by0) * strip_bytes;
-            let (band, tail) = rest.split_at_mut(strip_len);
+            let row1 = (by1 * 4).min(out_h);
+            let band_h = row1 - row0;
+            let (band, tail) = rest.split_at_mut(band_h * pitch);
             rest = tail;
-            consumed_rows = by1 * 4;
             s.spawn(move || {
-                for by in by0..by1 {
-                    let local_y = by - by0;
-                    for bx in 0..blocks_x {
-                        let bi = (by * blocks_x + bx) * 16;
-                        let offset = (local_y * 4 * out_w + bx * 4) * 4;
-                        let (blk, dst) = (&data[bi..bi + 16], &mut band[offset..]);
-                        if !bc7_fast_block(blk, dst, pitch) {
-                            bcdec_rs::bc7(blk, dst, pitch);
-                        }
-                    }
-                }
+                decode_bc7_rows(data, band, out_w, band_h, blocks_x, by0, by1);
             });
         }
         debug_assert!(rest.is_empty());
@@ -1239,9 +1627,9 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let bdp = crate::decode::simd::pack_bd3(&bd, 2);
+        let bdp = interp::pack_bd3(&bd, 2);
         for p in (0..16usize).step_by(2) {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
@@ -1255,7 +1643,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 b0,
                 d0,
                 b1,
@@ -1267,7 +1655,7 @@ fn bc7_mode1_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
@@ -1325,9 +1713,9 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let bdp = crate::decode::simd::pack_bd3(&bd, 2);
+        let bdp = interp::pack_bd3(&bd, 2);
         for p in (0..16usize).step_by(2) {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
@@ -1341,7 +1729,7 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 b0,
                 d0,
                 b1,
@@ -1353,7 +1741,7 @@ fn bc7_mode3_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
@@ -1421,9 +1809,9 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let bdp = crate::decode::simd::pack_bd4(&bd, 2);
+        let bdp = interp::pack_bd4(&bd, 2);
         for p in (0..16usize).step_by(2) {
             let (b0, d0) = bdp[((subsets >> p) & 1) as usize];
             let q = p + 1;
@@ -1437,7 +1825,7 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 b0,
                 d0,
                 b1,
@@ -1449,7 +1837,7 @@ fn bc7_mode7_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
@@ -1617,7 +2005,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     };
 
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         let (mut bo, mut dobj) = ([0i32; 4], [0i32; 4]);
         for k in 0..4 {
@@ -1629,8 +2017,8 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             dobj[map[k] & 3] = delta[k];
         }
         let (bp, dp) = (
-            crate::decode::simd::pack4(bo),
-            crate::decode::simd::pack4(dobj),
+            interp::pack4(bo),
+            interp::pack4(dobj),
         );
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
@@ -1644,7 +2032,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2_split(
+            interp::write2_split(
                 bp,
                 dp,
                 bp,
@@ -1657,7 +2045,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let (wc, walpha) = weights(p);
@@ -1845,9 +2233,9 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let bdp = crate::decode::simd::pack_bd3(&bd, 3);
+        let bdp = interp::pack_bd3(&bd, 3);
         for p in (0..16usize).step_by(2) {
             let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
             let q = p + 1;
@@ -1861,7 +2249,7 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 b0,
                 d0,
                 b1,
@@ -1873,7 +2261,7 @@ fn bc7_mode0_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
@@ -1934,9 +2322,9 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
     };
 
     // Two pixels per store; `p` is even, so both lie in one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let bdp = crate::decode::simd::pack_bd3(&bd, 3);
+        let bdp = interp::pack_bd3(&bd, 3);
         for p in (0..16usize).step_by(2) {
             let (b0, d0) = bdp[((subsets >> (2 * p)) & 0x3) as usize];
             let q = p + 1;
@@ -1950,7 +2338,7 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 b0,
                 d0,
                 b1,
@@ -1962,7 +2350,7 @@ fn bc7_mode2_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let weight = weight_of(p) as i32;
@@ -2141,7 +2529,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         )
     };
 
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         // Permute base/delta into output order so the rotation is resolved
         // before the vector op, leaving only the alpha lane to name.
@@ -2155,8 +2543,8 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             dobj[map[k] & 3] = delta[k];
         }
         let (bp, dp) = (
-            crate::decode::simd::pack4(bo),
-            crate::decode::simd::pack4(dobj),
+            interp::pack4(bo),
+            interp::pack4(dobj),
         );
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
@@ -2170,7 +2558,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2_split(
+            interp::write2_split(
                 bp,
                 dp,
                 bp,
@@ -2183,7 +2571,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for p in 0..16usize {
             let (wc, wa) = weights(p);
@@ -2454,9 +2842,9 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 
     // Two pixels per store: sixteen-bit lanes hold eight channels, and `i` is
     // even so pixels `i` and `i + 1` are always adjacent within one block row.
-    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        let (bp, dp) = (crate::decode::simd::pack4(base), crate::decode::simd::pack4(delta));
+        let (bp, dp) = (interp::pack4(base), interp::pack4(delta));
         for i in (0..16usize).step_by(2) {
             let o = (i / 4) * pitch + (i % 4) * 4;
             // `get_mut` rather than a panicking index: the same comparison,
@@ -2467,7 +2855,7 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            crate::decode::simd::write2(
+            interp::write2(
                 bp,
                 dp,
                 bp,
@@ -2479,7 +2867,7 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
         }
     }
 
-    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    #[cfg(not(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64"))))]
     {
         for i in 0..16usize {
             let w = weight(i) as i32;

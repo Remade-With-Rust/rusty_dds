@@ -269,6 +269,13 @@ const HIST_BUCKETS: usize = 600;
 /// 1 ns .. ~1 s, log-spaced.
 const HIST_LO_MS: f64 = 1e-6;
 const HIST_HI_MS: f64 = 1e3;
+/// `ln(HIST_HI_MS / HIST_LO_MS)`, hoisted: `bucket` runs once per recorded
+/// sample, and recomputing this constant `ln` per sample was half the
+/// transcendental work of every `record`. Derived, not transcribed, and the
+/// division in `bucket` stays a division, so each sample's arithmetic is
+/// bit-identical to the un-hoisted spelling (`bucket_matches_unhoisted`).
+static LN_HIST_RATIO: std::sync::LazyLock<f64> =
+    std::sync::LazyLock::new(|| (HIST_HI_MS / HIST_LO_MS).ln());
 
 impl Default for LogHistogram {
     fn default() -> Self {
@@ -290,13 +297,13 @@ impl LogHistogram {
         if ms <= HIST_LO_MS || ms.is_nan() {
             return 0;
         }
-        let t = (ms / HIST_LO_MS).ln() / (HIST_HI_MS / HIST_LO_MS).ln();
+        let t = (ms / HIST_LO_MS).ln() / *LN_HIST_RATIO;
         ((t * HIST_BUCKETS as f64) as usize).min(HIST_BUCKETS - 1)
     }
 
     fn bucket_value(i: usize) -> f64 {
         let t = (i as f64 + 0.5) / HIST_BUCKETS as f64;
-        HIST_LO_MS * (t * (HIST_HI_MS / HIST_LO_MS).ln()).exp()
+        HIST_LO_MS * (t * *LN_HIST_RATIO).exp()
     }
 
     pub fn record(&mut self, ms: f64) {
@@ -352,5 +359,27 @@ mod hist_tests {
         assert!((h.percentile(50.0) - 5.0).abs() / 5.0 < 0.03, "{}", h.percentile(50.0));
         assert!((h.percentile(99.0) - 9.9).abs() / 9.9 < 0.03, "{}", h.percentile(99.0));
         assert_eq!(h.len(), 1000);
+    }
+
+    /// Hoisting `ln(HI/LO)` must not move a single bucket boundary: every
+    /// sample lands in the same bucket the un-hoisted spelling put it in.
+    #[test]
+    fn bucket_matches_unhoisted() {
+        let unhoisted = |ms: f64| -> usize {
+            if ms <= HIST_LO_MS || ms.is_nan() {
+                return 0;
+            }
+            let t = (ms / HIST_LO_MS).ln() / (HIST_HI_MS / HIST_LO_MS).ln();
+            ((t * HIST_BUCKETS as f64) as usize).min(HIST_BUCKETS - 1)
+        };
+        // Log-spaced sweep across the whole range at ~40 probes per bucket,
+        // plus the edges and specials.
+        for i in 0..=24_000u32 {
+            let ms = HIST_LO_MS * (HIST_HI_MS / HIST_LO_MS).powf(i as f64 / 24_000.0);
+            assert_eq!(LogHistogram::bucket(ms), unhoisted(ms), "ms = {ms:?}");
+        }
+        for ms in [0.0, -1.0, HIST_LO_MS, HIST_HI_MS, 2e3, f64::NAN, f64::INFINITY] {
+            assert_eq!(LogHistogram::bucket(ms), unhoisted(ms), "ms = {ms:?}");
+        }
     }
 }

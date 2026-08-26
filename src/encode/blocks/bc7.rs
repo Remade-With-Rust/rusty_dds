@@ -151,17 +151,35 @@ impl ColorSeeds {
     /// something asks for it.
     ///
     /// It is by far the most expensive of the three — 525 instructions against
-    /// 51 and 23 — and both consumers sit behind an early-out that usually
-    /// fires first. Mode 5 abandons the block when its alpha half alone already
-    /// reaches the incumbent, which happens on **89%** of blocks, and mode 4
-    /// abandons after its colour search on **69%**; neither reaches this seed on
-    /// those blocks. Building it eagerly paid for it every time regardless.
+    /// 51 and 23 — so it is built lazily rather than with the other two.
+    ///
+    /// # What the early-outs actually protect (measured 2026-08-26)
+    ///
+    /// An earlier version of this comment claimed the mode-5 (89%) and mode-4
+    /// (69%) early-outs keep this seed off most blocks. **They do not, and a
+    /// counter probe says so: 1.165 builds PER BLOCK** on alpha-structured
+    /// content (`reach::bc7_seed_reach`). Two reasons, both structural:
+    ///
+    /// - **Mode 4 reaches its colour search — and so this seed — BEFORE its
+    ///   early-out.** Its 69% saves the *alpha* search, never the seed. Only
+    ///   mode 5, which searches alpha first, is protected at all.
+    /// - **Every rotation builds a seed set of its own** (the rotated pixels
+    ///   are different pixels), so the `OnceCell` dedupes rotation 0 only.
+    ///
+    /// The lazy build is still right — it keeps the seed off blocks that skip
+    /// modes 4/5 entirely — but its cost model is "about once per block that
+    /// has alpha structure", not "rarely". That is what justified giving it a
+    /// vector twin (`simd::pca_extremes_avx2`, 1.52x, byte-identical).
     ///
     /// `OnceCell` rather than `OnceLock`: a seed set is a local, never shared
     /// across threads, so there is nothing to synchronise and no atomic to pay
     /// for. Caching still matters because modes 4 and 5 share one seed set at
     /// rotation 0, which is the whole reason this struct exists.
     fn pca(&self, pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+        #[cfg(test)]
+        if self.pca.get().is_none() {
+            probe_counters::PCA_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         *self.pca.get_or_init(|| pca_extremes_rgb(pixels))
     }
 }
@@ -556,6 +574,8 @@ pub(super) fn palette_mode5_color(q0: [u8; 3], q1: [u8; 3]) -> [[u8; 3]; 4] {
 /// LS endpoints for the 2-bit color indices (same normal equations as the
 /// mode-6 refine, W2 weights, RGB only).
 pub(super) fn ls_endpoints_mode5(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 3], [u8; 3])> {
+    #[cfg(test)]
+    probe_counters::LS_MODE5.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     const WF: [f32; 4] = [0.0, 21.0 / 64.0, 43.0 / 64.0, 1.0];
     let mut a00 = 0f32;
     let mut a01 = 0f32;
@@ -868,6 +888,8 @@ pub(super) fn bc7_mode6_seeds_extra(
     if span <= 16 {
         return;
     }
+    #[cfg(test)]
+    probe_counters::SEEDS_EXTRA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mx, mn) = ex;
     let mut mean = [0u32; 4];
     for p in pixels {
@@ -881,6 +903,8 @@ pub(super) fn bc7_mode6_seeds_extra(
 
     // Farthest-pair only on busy blocks (O(16^2)).
     if span > 48 {
+        #[cfg(test)]
+        probe_counters::FARTHEST_PAIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut best_d = -1i32;
         let mut pa = pixels[0];
         let mut pb = pixels[0];
@@ -1637,6 +1661,15 @@ pub(super) fn extrema_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
     if simd::has_avx2() {
         return simd::extrema_rgba_avx2(pixels);
     }
+    extrema_rgba_scalar(pixels)
+}
+
+/// The scalar arm of [`extrema_rgba`], kept OUT of line for the same reason as
+/// [`extrema_opaque_scalar`]: inlined at the dispatch it interleaves a fallback
+/// no AVX2 machine executes with the hot path.
+#[cold]
+#[inline(never)]
+fn extrema_rgba_scalar(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
     let mut min_l = i32::MAX;
     let mut max_l = i32::MIN;
     let mut min_p = [0u8; 4];
@@ -1653,4 +1686,88 @@ pub(super) fn extrema_rgba(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
         }
     }
     (max_p, min_p)
+}
+
+/// Reachability counters — `#[cfg(test)]` only, zero shipping cost.
+///
+/// The campaign's own rule: answer "is this site hot?" with a COUNT before
+/// spending anything on a kernel. Every candidate in the BC7 seed area sits
+/// behind an early-out or a span gate, so its instruction cost is meaningless
+/// without its fire rate.
+#[cfg(test)]
+pub(super) mod probe_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(crate) static PCA_BUILDS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static SEEDS_EXTRA: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static FARTHEST_PAIR: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static LS_MODE5: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn reset() {
+        for c in [&PCA_BUILDS, &SEEDS_EXTRA, &FARTHEST_PAIR, &LS_MODE5] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn read() -> (u64, u64, u64, u64) {
+        (
+            PCA_BUILDS.load(Ordering::Relaxed),
+            SEEDS_EXTRA.load(Ordering::Relaxed),
+            FARTHEST_PAIR.load(Ordering::Relaxed),
+            LS_MODE5.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[cfg(test)]
+mod reach {
+    /// Per-block fire rates for every gated site in the BC7 seed area, on a
+    /// realistic alpha-structured surface. Deterministic (counts, not times),
+    /// so it needs no pinning and cannot be poisoned by box load.
+    ///
+    /// Run with: `cargo test --release bc7_seed_reach -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bc7_seed_reach() {
+        use crate::{DecodeContent, Dds, EncodeLayout};
+        const W: u32 = 512;
+        const H: u32 = 512;
+        let mut state = 0x51ee_d105_c0de_1234u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Structured content: smooth gradients, a couple of hard edges, and a
+        // varying alpha plane — the shape modes 4/5 exist for.
+        let mut px = vec![0u8; (W * H * 4) as usize];
+        for y in 0..H as usize {
+            for x in 0..W as usize {
+                let i = (y * W as usize + x) * 4;
+                let edge = if (x / 37 + y / 53) % 3 == 0 { 90 } else { 0 };
+                let n = (next() % 11) as i32 - 5;
+                px[i] = ((x as i32 / 2 + edge + n).clamp(0, 255)) as u8;
+                px[i + 1] = ((y as i32 / 2 + n).clamp(0, 255)) as u8;
+                px[i + 2] = (((x + y) as i32 / 4 + edge - n).clamp(0, 255)) as u8;
+                px[i + 3] = ((x as i32 * y as i32 / 512 + n).clamp(0, 255)) as u8;
+            }
+        }
+        super::probe_counters::reset();
+        let layout = EncodeLayout::flat_2d(DecodeContent::Bc7, W, H);
+        let _ = Dds::encode_from_rgba8(&px, layout).unwrap();
+        let (pca, extra, far, ls) = super::probe_counters::read();
+        let blocks = ((W / 4) * (H / 4)) as f64;
+        eprintln!(
+            "BC7 seed reach over {blocks} blocks:\n  \
+             pca_extremes_rgb builds : {pca:>7}  ({:.1}% of blocks)\n  \
+             seeds_extra (span>16)   : {extra:>7}  ({:.1}% of blocks)\n  \
+             farthest_pair (span>48) : {far:>7}  ({:.1}% of blocks)\n  \
+             ls_endpoints_mode5      : {ls:>7}  ({:.2} per block)",
+            pca as f64 / blocks * 100.0,
+            extra as f64 / blocks * 100.0,
+            far as f64 / blocks * 100.0,
+            ls as f64 / blocks,
+        );
+    }
 }

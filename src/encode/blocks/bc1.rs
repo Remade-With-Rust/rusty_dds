@@ -228,6 +228,7 @@ pub(super) fn pack_bc1_scored_565(
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
+    let _ = psq; // consumed by the vector arm only
     pack_bc1_scored_565_cold(pixels, hi, lo, err_limit)
 }
 
@@ -306,6 +307,7 @@ pub(super) fn pal16_from_565(hi: u16, lo: u16) -> Pal16 {
 /// Kept OUT of line: the fallback arm of an AVX2 dispatch, never executed
 /// on a machine with AVX2, but inlined at the dispatch it lands in the hot
 /// body and interleaves with the code that does run.
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 #[cold]
 #[inline(never)]
 fn pal16_from_565_scalar(hi: u16, lo: u16) -> Pal16 {
@@ -333,7 +335,7 @@ pub(super) fn pack_bc1_scored_pre(
         let v = (hi as u64) | ((lo as u64) << 16) | ((table as u64) << 32);
         return Some((v.to_le_bytes(), err));
     }
-    let _ = pal16;
+    let _ = (pal16, psq); // consumed by the vector arm only
     pack_bc1_scored_with(pixels, hi, lo, colors, err_limit)
 }
 
@@ -416,11 +418,22 @@ pub(super) fn lattice_refine_bc1(
     // incumbent, which is exactly why a span-based bound almost never bites.
 
     // Loop-invariant: see the measurement above.
-    let mut c0 = u16::from_le_bytes([best[0], best[1]]);
-    let mut c1 = u16::from_le_bytes([best[2], best[3]]);
+    let c0 = u16::from_le_bytes([best[0], best[1]]);
+    let c1 = u16::from_le_bytes([best[2], best[3]]);
     if c0 <= c1 {
         return; // 3-color/punch block: lattice targets 4-color mode only.
     }
+    // REFUTED (2026-08-26): batching the round's candidates into ONE
+    // `#[target_feature]` crossing — candidate list frozen per round, the
+    // strict-`<` acceptance chain replayed inside the kernel, pixels widened
+    // once — measured byte-identical and DEAD FLAT (1.00x, best-of-15, 4096
+    // seeded gradient blocks; a v1 that called the fit per candidate through a
+    // non-inlined internal `#[target_feature]` call was 0.85x). Mechanism:
+    // this fit core is ~109 instructions — heavy enough to amortize its own
+    // call boundary — and the dispatch flag is one relaxed byte, so there was
+    // nothing left to win. The 26.7%-boundary law is for LIGHT kernels; do not
+    // re-attempt without a per-fit cost model saying otherwise.
+    let (mut c0, mut c1) = (c0, c1);
     for _round in 0..bc1_lattice_rounds() {
         let prev = *best_err;
         // (endpoint base, other endpoint, contract direction)
@@ -556,6 +569,24 @@ fn pack_bc1_scored_cold(
 /// Principal-axis extremes: project RGB onto the covariance principal axis
 /// (3 power iterations) and return the two extreme PIXELS along it.
 pub(super) fn pca_extremes_rgb(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+    // 525 instructions scalar — the most expensive of the three BC7 colour
+    // seeds by an order of magnitude, and a reachability probe puts it at
+    // **1.165 builds per block** on alpha-structured content, not the
+    // 11-31% the `ColorSeeds::pca` comment's early-out model implies (mode 4
+    // reaches its colour search, and so this seed, BEFORE its early-out; and
+    // each rotation builds a seed set of its own).
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if simd::has_avx2() {
+        return simd::pca_extremes_avx2(pixels);
+    }
+    pca_extremes_rgb_scalar(pixels)
+}
+
+/// The scalar arm of [`pca_extremes_rgb`], kept OUT of line — and the vector
+/// twin's oracle.
+#[cold]
+#[inline(never)]
+pub(super) fn pca_extremes_rgb_scalar(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
     let mut mean = [0f32; 3];
     for p in pixels {
         for c in 0..3 {

@@ -150,6 +150,45 @@ twin it replaces.
 DEC_FMT=bc1 cargo run --release --example probe_dec --manifest-path sim/Cargo.toml
 ```
 
+**Non-power-of-two surfaces — the 0.9.0 headline.** The surface-kernel dispatch
+required `width % 4 == 0 && height % 4 == 0`, but the kernels only ever needed
+*whole blocks*; a partial last column or row is the sole unsafe part. Every NPOT
+surface therefore ran fully scalar, and `1020×1023` — width perfectly aligned,
+one odd row — paid the same penalty as the fully unaligned case. The dispatch
+now peels: the kernel runs the interior, the edge blocks go scalar. **NPOT is at
+parity with aligned.** Ratios are the penalty the old gate imposed, same pixel
+count (1024² vs 1023² / 1020×1023), interleaved ABBA, byte-identical:
+
+| Format | penalty removed |
+|---|---|
+| BC1 | **3.3–3.5×** |
+| BC2 | **3.8–4.0×** |
+| BC3 | **2.9–3.1×** |
+| BC4 | **6.3–6.5×** |
+| BC5 | **3.1–3.6×** |
+| BC7 | **2.4–3.1×** (it lost the direct write *and* thread parallelism) |
+
+**Block-decode kernels, further.** The BC4/BC5 and BC3 palettes are now built in
+registers inside the gather kernel rather than scalar beside it, and the BC4/BC5
+index unpack no longer uses `pdep`:
+
+| Change | Result |
+|---|---|
+| BC4/BC5 palette in-register | BC5 **1.65×** (0.84 → 0.51 ns/px), BC4 1.35–1.5× |
+| BC3 alpha palette in-register (`pmulhi` reciprocals) | BC3 **1.4×** (1.21 → 0.82 ns/px) |
+| `pdep` → `pshufb` index unpack | BC4 1.17×, and **AMD Zen 1/Zen 2 stop being excluded** from the BC4/BC5 kernels entirely (their microcoded `pdep` had forced those parts to the scalar path) |
+
+**Encode-side plumbing.** Byte-identical throughout; the mip chain was the seam:
+
+| Change | Result |
+|---|---|
+| Mip chain: encode from source + recycled ping-pong buffers | **3.05×** on a 1024²×11-level chain |
+| Mip box filter, vectorised (SSSE3, AVX2 twin) | **12.4×**; the even-dimension gate it shipped behind was over-strict, worth a further **29×** on NPOT levels |
+| Volume (2×2×2) and 1×N chain-tail filters | **36×** / **10.7×** — neither had a kernel before |
+| BGRA8 ↔ RGBA8 swizzle (`pshufb`, shared by decode and encode) | **3.14×** |
+| BC4/BC5 surface span pre-pass (one pass, all four channels) | **2.35×**, ~4.7× on BC5 flat content |
+| BC7 PCA colour seed, vectorised | **1.52×** |
+
 **Rate-distortion optimization** (opt-in, `λ=0` is byte-identical — verified by payload
 hash on all 102 cases). Rate is *measured*: payloads deflated at level 8, the same channel
 a zip-based game archive uses.
@@ -233,9 +272,9 @@ Where each number came from, including the ones that went against us:
 ## Install
 
 ```toml
-rusty_dds = "0.3"
+rusty_dds = "0.9"
 # decode-only, zero unsafe (e.g. WASM loaders):
-# rusty_dds = { version = "0.3", default-features = false, features = ["decode"] }
+# rusty_dds = { version = "0.9", default-features = false, features = ["decode"] }
 ```
 
 | Feature | Default | Provides |
@@ -373,8 +412,19 @@ Formats: [docs/formats.md](docs/formats.md).
 
 | Platform | Status |
 |---|---|
-| Windows / macOS / Linux | ✅ |
+| Windows / macOS / Linux (x86-64) | ✅ SSE2 / SSSE3 / AVX2, runtime-detected |
+| aarch64 (Apple silicon, ARM servers) | ✅ builds and passes; NEON block-decode kernels — see the caveat below |
 | Web (WASM) | 🎯 decode-only feature graph (no C deps) |
+
+**aarch64 in 0.9.0, stated precisely.** Before this release the crate did **not
+compile** for aarch64 with default features — five `cfg` attributes were missing,
+so the scalar fallback everything depended on had never once been built. That is
+fixed, and `cargo check --tests --lib --target aarch64-unknown-linux-gnu` is now
+part of the release gate across all six feature combinations. NEON kernels for
+the BC7 interpolation path have landed and their scalar-oracle tests **execute**
+— 26/26 decode tests pass under `qemu-aarch64`, including all eight BC7 mode
+oracles. **Emulation proves correctness, not speed: no timing has been taken on
+real ARM silicon, and this release claims none.**
 
 ## Remade With Rust
 

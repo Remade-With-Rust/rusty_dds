@@ -3,6 +3,95 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## 0.9.0 - 2026-08-26
+
+**The gates release.** Every change is **byte-identical** — no decoded pixel and
+no encoded payload moves, proved end-to-end by the streaming simulator cooking a
+193-texture pack to the same hash (`be7f3c412709e605`) as 0.8.0 across eight
+interleaved runs, and per-kernel by scalar oracles over 60k+ random cases each.
+
+The theme was not new kernels. It was **fast-path gates that stated a stricter
+requirement than the kernel actually had** — four independent instances, in
+decode and encode, written by different authors at different times. Each cost
+2.4–6.5× on the population it excluded, and each passed every correctness gate,
+because a gate that is too strict is never *wrong*, only expensive.
+
+### Fixed — the crate did not build on aarch64
+
+With default features, `cargo check --target aarch64-unknown-linux-gnu` failed
+with six hard errors: five `cfg` attributes were missing on x86-only items, so
+the non-x86 scalar fallback the whole design rested on had **never been
+compiled**. Two further configurations were also broken: `encode` without `simd`
+violated the crate's own `forbid(unsafe_code)` (an unconditional `transmute`),
+and `encode,simd` without `decode` referenced a table across a feature boundary.
+
+The documented "`simd` off ⇒ zero `unsafe`" contract is therefore true and
+compiler-enforced for the first time. The release gate is now a ten-configuration
+matrix **including `--tests`**, which is what caught two integration tests that
+had no `required-features` and could never have compiled in any reduced
+configuration.
+
+### Non-power-of-two surfaces reach the kernels
+
+`w % 4 == 0 && h % 4 == 0` gated the BC1–BC5 surface kernels and, for BC7, *both*
+the direct write and the thread-parallel path. The kernels need whole blocks, not
+aligned dimensions. Now peeled — kernel over the interior, scalar for the edge:
+
+| Format | penalty the gate had imposed |
+|---|---|
+| BC1 | 3.3–3.5× | 
+| BC2 | 3.8–4.0× |
+| BC3 | 2.9–3.1× |
+| BC4 | 6.3–6.5× |
+| BC5 | 3.1–3.6× |
+| BC7 | 2.4–3.1× |
+
+`1020×1023` — width perfectly aligned, one odd row — had been paying the full
+unaligned penalty.
+
+### Decode kernels
+
+- **BC4/BC5 palettes built in registers** inside the gather: BC5 **1.65×**
+  (0.84 → 0.51 ns/px), BC4 1.35–1.5×.
+- **BC3 alpha palette in registers** via `pmulhi` reciprocals (÷7 and ÷5 exact
+  over the reachable range): BC3 **1.4×** (1.21 → 0.82 ns/px).
+- **`pdep` removed** from the BC4/BC5 index unpack in favour of `pshufb` +
+  multiply-shift: 1.17× on BC4, and **AMD Zen 1/Zen 2 are no longer excluded**
+  from these kernels — their microcoded `pdep` had forced those parts to scalar.
+
+### Encode
+
+- Mip chain: encode from the source buffer, recycled ping-pong buffers —
+  **3.05×** on a 1024²×11-level chain.
+- Mip box filter vectorised (SSSE3 + AVX2 twin) **12.4×**, plus first-ever
+  kernels for volume (**36×**) and 1×N chain tails (**10.7×**).
+- BGRA8 ↔ RGBA8 swizzle **3.14×**, shared by decode and encode.
+- BC4/BC5 surface span pre-pass **2.35×** (~4.7× on flat content).
+- BC7 PCA colour seed **1.52×**.
+
+### aarch64
+
+NEON kernels for the BC7 interpolation path, with their scalar oracles
+**executing** under `qemu-aarch64` — 26/26 decode tests including all eight BC7
+mode oracles. Emulation proves correctness, not speed: **no ARM timing is
+claimed.**
+
+### Behaviour note: BC4/BC5 now require SSE4.1 for the vector path
+
+Building the palette in registers uses `pmulld`/`pblendw`, so the BC4/BC5
+dispatch tests SSE4.1 alongside SSSE3. In practice this moves nobody: the path
+previously also required BMI2, and every BMI2 part post-dates SSE4.1 by years.
+A pre-Penryn Core 2 (SSSE3, no SSE4.1) takes the scalar path for BC4/BC5 where
+before it could take the vector one. Output is unchanged either way.
+
+### Notes for maintainers
+
+Three cost models in comments were disproved by measurement and corrected in
+source rather than left to rot: the BC7 PCA seed's early-outs were documented as
+keeping it off most blocks, and it builds 1.165× *per block*; two threading ideas
+in the mip chain measured 0.38× and 0.50× and are recorded as refutations with
+their mechanism (the chain is bandwidth-bound, not parallelism-starved).
+
 ## 0.8.0 - 2026-08-22
 
 **The encoder-parity release.** At 0.7.0, DirectXTex was still faster on four

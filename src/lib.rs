@@ -62,6 +62,20 @@ pub use surface::{CubemapFace, SubresourceId, SurfaceView, SurfaceViewMut};
 mod content;
 pub use content::{DecodeContent, HdrDecodeContent, ImageRgba8, ImageRgbaF32};
 
+#[cfg(all(
+    feature = "simd",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(feature = "decode", feature = "encode")
+))]
+mod simd_tables;
+
+#[cfg(all(
+    feature = "simd",
+    target_arch = "x86_64",
+    any(feature = "decode", feature = "encode")
+))]
+mod swizzle;
+
 #[cfg(feature = "decode")]
 mod decode;
 #[cfg(feature = "decode")]

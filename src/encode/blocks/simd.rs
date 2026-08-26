@@ -123,6 +123,8 @@ unsafe fn alpha_minmax_avx2_impl(samples: &[u8; 16]) -> (u8, u8) {
 /// race can do is detect twice and store the same byte twice. There is nothing
 /// to publish besides the byte itself, so no ordering is needed to make it
 /// safe to read.
+#[cfg(target_arch = "x86_64")]
+#[inline]
 pub(super) fn has_avx2() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     // 0 = not yet probed, 1 = absent, 2 = present.
@@ -144,6 +146,7 @@ pub(super) fn has_avx2() -> bool {
 /// inlines with it, and `std_detect`'s `detect_and_initialize` appeared FOUR
 /// times inside `encode_bc1_bytes` alone: a call site and a branch, per
 /// dispatch, for something that runs once per process.
+#[cfg(target_arch = "x86_64")]
 #[cold]
 #[inline(never)]
 fn detect_avx2() -> u8 {
@@ -154,12 +157,11 @@ fn detect_avx2() -> u8 {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[inline]
-pub(super) fn has_avx2() -> bool {
-    false
-}
-
+// NOTE: there is deliberately no `has_avx2` stub for other architectures.
+// Every dispatch site is `#[cfg(all(feature = "simd", target_arch = "x86_64"))]`
+// — a stub would only let a future mis-gated call site compile its scalar half
+// while the vector half fails on the x86-only intrinsics anyway. The aarch64
+// `cargo check` in the commit gate is what keeps this true.
 
 /// AVX2 twin of the mode-6 exhaustive index fit: evaluates ALL 16 palette
 /// entries; identical output to `fit_indices_mode6_exhaustive`.
@@ -173,14 +175,6 @@ pub(super) fn fit_indices_mode6_avx2(
     // call site).
     unsafe { fit_indices_mode6_avx2_impl(pixels, pal) }
 }
-
-/// Squared distance from eight consecutive pixels to one palette point, as
-/// eight packed `i32` in pixel order.
-///
-/// `_mm256_hadd_epi32` folds within 128-bit lanes, so the pair sums come out
-/// interleaved as `[p0,p1,p4,p5,p2,p3,p6,p7]`; `perm` puts them back in order.
-#[inline]
-#[target_feature(enable = "avx2")]
 
 /// Exhaustive mode-6 index fit, entirely in registers.
 ///
@@ -197,6 +191,11 @@ pub(super) fn fit_indices_mode6_avx2(
 ///
 /// Selection is unchanged: `_mm256_cmpgt_epi32(best, cur)` is exactly
 /// `cur < best`, which keeps the lowest index on ties as the scalar twin does.
+///
+/// (`_mm256_hadd_epi32` folds within 128-bit lanes, so per-pixel pair sums come
+/// out interleaved as `[p0,p1,p4,p5,p2,p3,p6,p7]`; `perm` puts them back in
+/// order.)
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn fit_indices_mode6_avx2_impl(
     pixels: &[[u8; 4]; 16],
@@ -453,6 +452,7 @@ pub(super) fn bc1_fit_4color_pre_avx2(
     unsafe { bc1_fit_4color_pre_avx2_impl(pixels, pal, psq, err_limit) }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(super) fn bc1_fit_4color_avx2(
     pixels: &[[u8; 4]; 16],
     colors: &[[u8; 3]; 4],
@@ -475,6 +475,7 @@ pub(super) fn bc1_fit_4color_avx2(
 /// The extraction loop below stays scalar deliberately: it carries the
 /// early-abort on the running total, which is order-dependent and runs once per
 /// call rather than once per colour.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn bc1_fit_4color_avx2_impl(
     pixels: &[[u8; 4]; 16],
@@ -654,6 +655,121 @@ unsafe fn bc1_fit_4color_pre_avx2_impl(
     )
 }
 
+/// The fit's register-resident body as a MACRO, currently with
+/// [`bc1_fit_core_avx2`] as its only user. It was extracted for a batched
+/// lattice-round kernel that was REFUTED (2026-08-26, dead flat — see the
+/// note in `lattice_refine_bc1`); the extraction itself is semantically
+/// neutral, oracle-gated, and kept because the next candidate-sweep kernel
+/// (the RDO window is the same shape) will want it — the file's measured
+/// rule: a `#[target_feature]` helper cannot be force-inlined on stable, so
+/// sharing by function puts a real call inside the hottest loop; share by
+/// macro or not at all. Takes the sixteen pixels already widened to i16
+/// (`p0..p3`), the prepared palette registers, the block's pixel-square term
+/// and the abort limit; evaluates to `Option<(table, err)>`.
+///
+/// The algorithm and every micro-decision below are documented in the git
+/// history of `bc1_fit_core_avx2`, whose body this was extracted from
+/// verbatim; the load-bearing points are kept as comments in place.
+#[cfg(target_arch = "x86_64")]
+macro_rules! bc1_fit_core_body {
+    ($p0:expr, $p1:expr, $p2:expr, $p3:expr, $p8:expr, $cst4:expr, $psq:expr, $err_limit:expr) => {{
+        let (p0, p1, p2, p3) = ($p0, $p1, $p2, $p3);
+        let (p8, cst4) = ($p8, $cst4);
+        let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
+        // Nearest palette entry, with the index riding in the low two bits.
+        //
+        // Each lane holds `cst[k] - 8*dot`, which is `4*(sum q^2 - 2*dot) + k`,
+        // and that differs from `4*SSE + k` only by the constant `4*sum p^2`. A
+        // constant shift cannot reorder anything, so `vpminsd` picks the same
+        // entry the old `cmpgt`-and-blend pair did — including ties, which both
+        // resolve toward the smaller k.
+        let mut best_lo = _mm256_set1_epi32(i32::MAX);
+        let mut best_hi = _mm256_set1_epi32(i32::MAX);
+        // Unrolled explicitly so both operands are lifted from REGISTERS by a
+        // permute with an IMMEDIATE — written as `for k in 0..4`, LLVM built
+        // the index vectors at runtime (469 instructions against 109).
+        macro_rules! step {
+            ($k:literal) => {{
+                const IMM: i32 = $k | ($k << 2) | ($k << 4) | ($k << 6);
+                let pv = _mm256_permute4x64_epi64::<IMM>(p8);
+                let cv = _mm256_broadcastd_epi32(_mm_shuffle_epi32::<IMM>(cst4));
+                // `hadd` leaves lanes in the permuted order the tail restores;
+                // every step from here to the index extraction is lane-wise, so
+                // it commutes.
+                let lo = _mm256_sub_epi32(
+                    cv,
+                    _mm256_hadd_epi32(_mm256_madd_epi16(p0, pv), _mm256_madd_epi16(p1, pv)),
+                );
+                let hi = _mm256_sub_epi32(
+                    cv,
+                    _mm256_hadd_epi32(_mm256_madd_epi16(p2, pv), _mm256_madd_epi16(p3, pv)),
+                );
+                best_lo = _mm256_min_epi32(best_lo, lo);
+                best_hi = _mm256_min_epi32(best_hi, hi);
+            }};
+        }
+        step!(0);
+        step!(1);
+        step!(2);
+        step!(3);
+
+        // Total error: shift the two tag bits off (arithmetic — the relative
+        // term is signed, and `4*v + k` floors back to `v` for negative `v`
+        // too), add the per-pixel term back, then the usual hadd chain. The
+        // true SSE is at most 16*3*255^2 = 3.1M, nowhere near i32.
+        let s = _mm256_add_epi32(_mm256_srai_epi32(best_lo, 2), _mm256_srai_epi32(best_hi, 2));
+        let h = _mm256_hadd_epi32(s, s);
+        let h = _mm256_hadd_epi32(h, h);
+        let err = $psq
+            + _mm_cvtsi128_si32(_mm_add_epi32(
+                _mm256_castsi256_si128(h),
+                _mm256_extracti128_si256(h, 1),
+            ));
+        // Every term is a squared distance and so non-negative, which makes the
+        // running sum monotone — "some prefix reaches the limit" and "the total
+        // reaches the limit" are the same statement. Deciding it HERE means a
+        // losing candidate never pays for the index pack below.
+        if err >= $err_limit {
+            None
+        } else {
+            // Pixel order is restored once, here, and only for the indices —
+            // the error total above is a sum, so it is order-independent.
+            let tag = _mm256_set1_epi32(3);
+            let idx_lo = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_lo, tag), perm);
+            let idx_hi = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_hi, tag), perm);
+
+            // Indices: 32-bit lanes in pixel order down to sixteen bytes of
+            // 0..=3. `packs` saturates, which cannot bite on values that small.
+            let i0 = _mm_packs_epi32(
+                _mm256_castsi256_si128(idx_lo),
+                _mm256_extracti128_si256(idx_lo, 1),
+            );
+            let i1 = _mm_packs_epi32(
+                _mm256_castsi256_si128(idx_hi),
+                _mm256_extracti128_si256(idx_hi, 1),
+            );
+            let iv = _mm_packs_epi16(i0, i1);
+            // Sixteen 2-bit indices into one `u32`, by weighted accumulation:
+            // `maddubs` folds adjacent BYTES with weights 1 and 4 (at most
+            // 3 + 12 = 15), `madd` folds adjacent WORDS with weights 1 and 16
+            // (at most 255), two saturating packs bring the four bytes together
+            // in order. Every intermediate is inside its lane's range, so
+            // neither pack actually saturates.
+            let g8 = _mm_maddubs_epi16(
+                iv,
+                _mm_setr_epi8(1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4),
+            );
+            let g16 = _mm_madd_epi16(g8, _mm_setr_epi16(1, 16, 1, 16, 1, 16, 1, 16));
+            let packed = _mm_packus_epi16(
+                _mm_packus_epi32(g16, _mm_setzero_si128()),
+                _mm_setzero_si128(),
+            );
+            let table = _mm_cvtsi128_si32(packed) as u32;
+            Some((table, err))
+        }
+    }};
+}
+
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2")]
@@ -666,122 +782,15 @@ unsafe fn bc1_fit_core_avx2(
 ) -> Option<(u32, i32)> {
     use std::arch::x86_64::*;
     let base = pixels.as_ptr() as *const u8;
-    let perm = _mm256_setr_epi32(0, 1, 4, 5, 2, 3, 6, 7);
     // Sixteen pixels widened to i16, four at a time. NOT masked: the alpha lane
     // needs zeroing only where it could reach the result, and it cannot. The
     // dot product is against a palette whose every entry is [R,G,B,0] by
     // construction, so the alpha term is multiplied by zero; and the sum of
     // squares, the one place pixel alpha WOULD contribute, is now supplied by
-    // the caller. Four vpand retire with the mask.
+    // the caller.
     let ld = |off: usize| _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i));
     let (p0, p1, p2, p3) = (ld(0), ld(16), ld(32), ld(48));
-
-    // Nearest palette entry, with the index riding in the low two bits.
-    //
-    // Each lane holds `cst[k] - 8*dot`, which is `4*(sum q^2 - 2*dot) + k`, and
-    // that differs from `4*SSE + k` only by the constant `4*sum p^2`. A constant
-    // shift cannot reorder anything, so `vpminsd` picks the same entry the old
-    // `cmpgt`-and-blend pair did — including ties, which both resolve toward the
-    // smaller k. Two accumulators and four `vpblendvb` an iteration disappear
-    // with it; `blendv` is two uops on Intel where `min` and `sub` are one.
-    let mut best_lo = _mm256_set1_epi32(i32::MAX);
-    let mut best_hi = _mm256_set1_epi32(i32::MAX);
-    // Unrolled explicitly so both operands are lifted from REGISTERS by a
-    // permute with an IMMEDIATE.
-    //
-    // Written as `for k in 0..4`, the index vectors are functions of `k`, and
-    // LLVM built them at runtime rather than folding them — the core measured
-    // 469 instructions that way against 109 for the loop it replaced. With `k`
-    // a literal, `vpermq` broadcasts 64-bit lane k (which is exactly entry k,
-    // since an entry is i16 lanes 4k..4k+3) and `pshufd` does the same for the
-    // constant, both on an immediate, both one instruction, neither touching
-    // memory.
-    macro_rules! step {
-        ($k:literal) => {{
-            const IMM: i32 = $k | ($k << 2) | ($k << 4) | ($k << 6);
-            let pv = _mm256_permute4x64_epi64::<IMM>(p8);
-            let cv = _mm256_broadcastd_epi32(_mm_shuffle_epi32::<IMM>(cst4));
-            // `hadd` leaves lanes in the permuted order the tail restores;
-            // every step from here to the index extraction is lane-wise, so it
-            // commutes.
-            let lo = _mm256_sub_epi32(
-                cv,
-                _mm256_hadd_epi32(_mm256_madd_epi16(p0, pv), _mm256_madd_epi16(p1, pv)),
-            );
-            let hi = _mm256_sub_epi32(
-                cv,
-                _mm256_hadd_epi32(_mm256_madd_epi16(p2, pv), _mm256_madd_epi16(p3, pv)),
-            );
-            best_lo = _mm256_min_epi32(best_lo, lo);
-            best_hi = _mm256_min_epi32(best_hi, hi);
-        }};
-    }
-    step!(0);
-    step!(1);
-    step!(2);
-    step!(3);
-
-    // Total error: shift the two tag bits off (arithmetic — the relative term is
-    // signed, and `4*v + k` floors back to `v` for negative `v` too), add the
-    // per-pixel term back, then the usual hadd chain. The true SSE is at most
-    // 16*3*255^2 = 3.1M, nowhere near i32.
-    let s = _mm256_add_epi32(_mm256_srai_epi32(best_lo, 2), _mm256_srai_epi32(best_hi, 2));
-    let h = _mm256_hadd_epi32(s, s);
-    let h = _mm256_hadd_epi32(h, h);
-    // The pixel-only term rejoins here, as one scalar add rather than four
-    // vpmaddwd and three vpaddd per call. It is a property of the BLOCK, and
-    // the lattice fits the same block about seven times.
-    let err = psq
-        + _mm_cvtsi128_si32(_mm_add_epi32(
-            _mm256_castsi256_si128(h),
-            _mm256_extracti128_si256(h, 1),
-        ));
-    // Every term is a squared distance and so non-negative, which makes the
-    // running sum monotone — "some prefix reaches the limit" and "the total
-    // reaches the limit" are the same statement. One comparison decides it, and
-    // deciding it HERE means a losing candidate never pays for the index pack
-    // below, which is most of them on the lattice's contract-only moves.
-    if err >= err_limit {
-        return None;
-    }
-
-    // Pixel order is restored once, here, and only for the indices — the error
-    // total above is a sum, so it is order-independent.
-    let tag = _mm256_set1_epi32(3);
-    let idx_lo = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_lo, tag), perm);
-    let idx_hi = _mm256_permutevar8x32_epi32(_mm256_and_si256(best_hi, tag), perm);
-
-    // Indices: 32-bit lanes in pixel order down to sixteen bytes of 0..=3.
-    // `packs` saturates, which cannot bite on values that small.
-    let i0 = _mm_packs_epi32(
-        _mm256_castsi256_si128(idx_lo),
-        _mm256_extracti128_si256(idx_lo, 1),
-    );
-    let i1 = _mm_packs_epi32(
-        _mm256_castsi256_si128(idx_hi),
-        _mm256_extracti128_si256(idx_hi, 1),
-    );
-    let iv = _mm_packs_epi16(i0, i1);
-    // Sixteen 2-bit indices into one `u32`, by weighted accumulation rather than
-    // by lifting bit-planes and interleaving them.
-    //
-    // `maddubs` folds adjacent BYTES with weights 1 and 4, giving eight 4-bit
-    // groups (at most 3 + 12 = 15). `madd` then folds adjacent WORDS with
-    // weights 1 and 16, giving four 8-bit groups (at most 255). Two saturating
-    // packs bring those four bytes together in the right order, and the low
-    // dword is the finished table. Every intermediate is inside its lane's
-    // range, so neither pack actually saturates.
-    let g8 = _mm_maddubs_epi16(
-        iv,
-        _mm_setr_epi8(1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4, 1, 4),
-    );
-    let g16 = _mm_madd_epi16(g8, _mm_setr_epi16(1, 16, 1, 16, 1, 16, 1, 16));
-    let packed = _mm_packus_epi16(
-        _mm_packus_epi32(g16, _mm_setzero_si128()),
-        _mm_setzero_si128(),
-    );
-    let table = _mm_cvtsi128_si32(packed) as u32;
-    Some((table, err))
+    bc1_fit_core_body!(p0, p1, p2, p3, p8, cst4, psq, err_limit)
 }
 
 
@@ -1093,7 +1102,7 @@ unsafe fn bc1_sse_from_pal(
     let mut acc = _mm256_setzero_si256();
     for g in 0..4usize {
         let sel = _mm_loadu_si128(
-            crate::decode::simd::BC1_SEL[((table >> (8 * g)) & 0xff) as usize].as_ptr()
+            crate::simd_tables::BC1_SEL[((table >> (8 * g)) & 0xff) as usize].as_ptr()
                 as *const __m128i,
         );
         // Four reconstructed pixels, and the four source pixels beside them.
@@ -1320,6 +1329,7 @@ unsafe fn ls_pixels_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
 ///
 /// `SEL1[b]` is the four indices packed in `b`, one per byte — a `pshufb`
 /// selector for four pixels of a single channel. 1 KiB, built at compile time.
+#[cfg(target_arch = "x86_64")]
 const fn build_sel1() -> [[u8; 4]; 256] {
     let mut t = [[0u8; 4]; 256];
     let mut b = 0usize;
@@ -1334,6 +1344,7 @@ const fn build_sel1() -> [[u8; 4]; 256] {
     t
 }
 
+#[cfg(target_arch = "x86_64")]
 static SEL1: [[u8; 4]; 256] = build_sel1();
 
 /// SSE of ONE channel of a 4-colour BC1 block, indices fixed.
@@ -1400,8 +1411,6 @@ pub(super) fn bc1_ls_solve(
     unsafe { bc1_ls_solve_impl(b0, b1, a00, a01, a11, det) }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
 /// The divide itself, shared by both entry points.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
@@ -1428,6 +1437,14 @@ unsafe fn solve_pair(
     (e0, e1)
 }
 
+/// The full solve: divide, then round-and-pack each endpoint.
+///
+/// `#[target_feature]` here is load-bearing beyond ISA correctness: without it
+/// this body compiles at baseline, and its calls to `solve_pair` and
+/// `round_pack` (twice) cannot inline — three real ABI boundaries per solve
+/// on the hot mode-6 LS path.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 unsafe fn bc1_ls_solve_impl(
     b0: [f32; 4],
     b1: [f32; 4],
@@ -2357,6 +2374,208 @@ unsafe fn bc1_ls_endpoints_avx2_impl(
     Some(bc1_ls_solve(v0, v1, a00, a01, a11, det))
 }
 
+/// Mean, covariance and principal-axis projection extremes for one block —
+/// the AVX2 twin of `pca_extremes_rgb`'s three loops.
+///
+/// # Why this is bit-identical, stage by stage
+///
+/// Float reassociation normally forbids vectorising a reduction. Here every
+/// stage either stays in its scalar order or is provably exact:
+///
+/// - **Mean.** `sum p[c]` over sixteen bytes is at most 4080, an integer far
+///   inside f32's exact range, and `/16.0` is a power of two — so the sum is
+///   exact in ANY order and the mean is exact.
+/// - **Covariance.** NOT exact (the running sums exceed 2^24), so the order is
+///   preserved instead: the vector holds the SIX covariance terms in six lanes
+///   and accumulates them across pixels, so each lane sees exactly the scalar
+///   accumulator's sequence. Vectorised across terms, not across pixels.
+/// - **Projection.** Each `t` is its own expression — no cross-pixel
+///   accumulation — evaluated in the scalar's association
+///   `((dr*ax) + (dg*ay)) + (db*az)`, so every lane is bit-identical.
+/// - **Extremes.** `min`/`max` are exact and associative, so the reduction may
+///   be reordered; the FIRST index attaining the extreme is then recovered by
+///   an ordered scan, which is what the scalar's strict `<` / `>` keeps.
+///
+/// Returns `None` on the same two degeneracies the scalar returns `None` for:
+/// a principal axis that collapses (`len < 1e-6`) and coincident extremes.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn pca_extremes_avx2(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+    debug_assert!(has_avx2());
+    // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above); the pixel
+    // array is fixed-size and read with unaligned loads.
+    unsafe { pca_extremes_avx2_impl(pixels) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pca_extremes_avx2_impl(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8; 3])> {
+    use std::arch::x86_64::*;
+    let base = pixels.as_ptr() as *const u8;
+
+    // --- mean: exact in any order (see the doc) ---
+    let mut sum = _mm256_setzero_si256();
+    for h in 0..2usize {
+        // Eight pixels as 32 bytes; `sad_epu8` against zero would fold the
+        // wrong groups, so widen and add instead.
+        let v = _mm256_loadu_si256(base.add(h * 32) as *const __m256i);
+        sum = _mm256_add_epi32(
+            sum,
+            _mm256_add_epi32(
+                _mm256_cvtepu8_epi32(_mm256_castsi256_si128(v)),
+                _mm256_cvtepu8_epi32(_mm_srli_si128(_mm256_castsi256_si128(v), 8)),
+            ),
+        );
+        sum = _mm256_add_epi32(
+            sum,
+            _mm256_add_epi32(
+                _mm256_cvtepu8_epi32(_mm256_extracti128_si256(v, 1)),
+                _mm256_cvtepu8_epi32(_mm_srli_si128(_mm256_extracti128_si256(v, 1), 8)),
+            ),
+        );
+    }
+    // Lanes 0..3 and 4..7 each hold an RGBA partial; fold them.
+    let s128 = _mm_add_epi32(
+        _mm256_castsi256_si128(sum),
+        _mm256_extracti128_si256(sum, 1),
+    );
+    let mean4 = _mm_mul_ps(_mm_cvtepi32_ps(s128), _mm_set1_ps(1.0 / 16.0));
+
+    // --- covariance: six terms in six lanes, accumulated in pixel order ---
+    // `d8` holds [dr, dg, db, da, ...]; the two index vectors pick the pairs
+    // (rr, rg, rb, gg, gb, bb). Lanes 6-7 are fed index 0 and discarded.
+    let ia = _mm256_setr_epi32(0, 0, 0, 1, 1, 2, 0, 0);
+    let ib = _mm256_setr_epi32(0, 1, 2, 1, 2, 2, 0, 0);
+    let mut cov = _mm256_setzero_ps();
+    for i in 0..16usize {
+        let p4 = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
+            (base.add(i * 4) as *const u32).read_unaligned() as i32,
+        )));
+        let d8 = _mm256_castps128_ps256(_mm_sub_ps(p4, mean4));
+        let a = _mm256_permutevar8x32_ps(d8, ia);
+        let b = _mm256_permutevar8x32_ps(d8, ib);
+        cov = _mm256_add_ps(cov, _mm256_mul_ps(a, b));
+    }
+    let mut c = [0f32; 8];
+    _mm256_storeu_ps(c.as_mut_ptr(), cov);
+
+    // --- power iteration: 3x3, too small to vectorise; scalar verbatim ---
+    let mut axis = [c[0] + c[1] + c[2], c[1] + c[3] + c[4], c[2] + c[4] + c[5]];
+    for _ in 0..3 {
+        let n = [
+            c[0] * axis[0] + c[1] * axis[1] + c[2] * axis[2],
+            c[1] * axis[0] + c[3] * axis[1] + c[4] * axis[2],
+            c[2] * axis[0] + c[4] * axis[1] + c[5] * axis[2],
+        ];
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if len < 1e-6 {
+            return None;
+        }
+        axis = [n[0] / len, n[1] / len, n[2] / len];
+    }
+
+    // --- projection: per-lane, in the scalar's association ---
+    let mut m = [0f32; 4];
+    _mm_storeu_ps(m.as_mut_ptr(), mean4);
+    let mut t = [0f32; 16];
+    for h in 0..2usize {
+        // Eight pixels' channels, de-interleaved by widening each dword.
+        let mut acc = _mm256_setzero_ps();
+        for (ch, &ax) in axis.iter().enumerate() {
+            let mut lane = [0f32; 8];
+            for (k, slot) in lane.iter_mut().enumerate() {
+                *slot = *base.add((h * 8 + k) * 4 + ch) as f32 - m[ch];
+            }
+            let dv = _mm256_loadu_ps(lane.as_ptr());
+            let term = _mm256_mul_ps(dv, _mm256_set1_ps(ax));
+            acc = if ch == 0 { term } else { _mm256_add_ps(acc, term) };
+        }
+        _mm256_storeu_ps(t.as_mut_ptr().add(h * 8), acc);
+    }
+
+    // --- extremes: exact min/max reduction, then the FIRST attaining index ---
+    let mut lo_t = f32::MAX;
+    let mut hi_t = f32::MIN;
+    for &v in t.iter() {
+        if v < lo_t {
+            lo_t = v;
+        }
+        if v > hi_t {
+            hi_t = v;
+        }
+    }
+    let mut lo_i = 0usize;
+    let mut hi_i = 0usize;
+    let mut lo_set = false;
+    let mut hi_set = false;
+    for (i, &v) in t.iter().enumerate() {
+        if !lo_set && v == lo_t {
+            lo_i = i;
+            lo_set = true;
+        }
+        if !hi_set && v == hi_t {
+            hi_i = i;
+            hi_set = true;
+        }
+    }
+    let lo_p = [pixels[lo_i][0], pixels[lo_i][1], pixels[lo_i][2]];
+    let hi_p = [pixels[hi_i][0], pixels[hi_i][1], pixels[hi_i][2]];
+    if lo_p == hi_p {
+        return None;
+    }
+    Some((hi_p, lo_p))
+}
+
+/// Per-channel `(min, max)` of an interleaved RGBA8 surface, one pass, SSE2.
+///
+/// RGBA is periodic with period four and a 16-byte register holds exactly four
+/// pixels, so a running byte-wise min/max over raw 16-byte chunks accumulates
+/// channel `j % 4` in lane `j` with NO shuffles in the loop; the four lanes of
+/// each channel fold at the end. SSE2 is baseline on x86_64, so unlike every
+/// other kernel in this file there is no runtime detection and no fallback arm
+/// on this target — one path, the one that ships. (The scalar walk in
+/// `blocks::channel_span` remains for non-x86 and `simd`-off builds.)
+///
+/// Exactly `npx` pixels are read — the same bytes the scalar walk touches.
+/// The caller proves `rgba.len() >= npx * 4`.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn channel_spans_sse2(rgba: &[u8], npx: usize) -> [(u8, u8); 4] {
+    use std::arch::x86_64::*;
+    let bytes = &rgba[..npx * 4];
+    let chunks = bytes.chunks_exact(16);
+    let tail = chunks.remainder();
+    let mut lo = [255u8; 16];
+    let mut hi = [0u8; 16];
+    // SAFETY: every intrinsic is SSE2, unconditionally present on x86_64. Each
+    // load reads exactly the sixteen bytes of its chunk; the stores write the
+    // two sixteen-byte locals.
+    unsafe {
+        let mut vlo = _mm_set1_epi8(-1); // 0xFF in every lane
+        let mut vhi = _mm_setzero_si128();
+        for c in chunks {
+            let v = _mm_loadu_si128(c.as_ptr() as *const __m128i);
+            vlo = _mm_min_epu8(vlo, v);
+            vhi = _mm_max_epu8(vhi, v);
+        }
+        _mm_storeu_si128(lo.as_mut_ptr() as *mut __m128i, vlo);
+        _mm_storeu_si128(hi.as_mut_ptr() as *mut __m128i, vhi);
+    }
+    let mut out = [(255u8, 0u8); 4];
+    for (ch, slot) in out.iter_mut().enumerate() {
+        let (mut l, mut h) = (255u8, 0u8);
+        for lane in (ch..16).step_by(4) {
+            l = l.min(lo[lane]);
+            h = h.max(hi[lane]);
+        }
+        // 0..=3 whole pixels the vector loop could not cover.
+        for px in tail.chunks_exact(4) {
+            l = l.min(px[ch]);
+            h = h.max(px[ch]);
+        }
+        *slot = (l, h);
+    }
+    out
+}
+
 #[cfg(test)]
 mod oracle {
     #[cfg(target_arch = "x86_64")]
@@ -2426,7 +2645,8 @@ mod oracle {
         }
     }
 
-#[test]
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn alpha_pack_indices_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2460,7 +2680,8 @@ mod oracle {
         }
     }
 
-#[test]
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn alpha_fixed_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2500,7 +2721,8 @@ mod oracle {
         }
     }
 
-#[test]
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn bc1_chan_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2640,6 +2862,443 @@ mod oracle {
                 assert_eq!(g1[c].to_bits(), b1[c].to_bits(), "case {case} b1[{c}]");
             }
         }
+    }
+
+    /// The PCA twin must return EXACTLY what the scalar returns — the same
+    /// two pixels, or the same `None` — across gradients (where the axis is
+    /// well-conditioned), flat and near-flat blocks (where it collapses to
+    /// `None`), single-channel ramps, and full noise.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn pca_extremes_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x9ca5_0f17_3e2b_44d1u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            match case % 5 {
+                // Two-colour gradient — the well-conditioned case.
+                0 => {
+                    let (ra, rb) = (next(), next());
+                    for (i, p) in px.iter_mut().enumerate() {
+                        for c in 0..3 {
+                            let a = (ra >> (8 * c)) as u8 as i32;
+                            let b = (rb >> (8 * c)) as u8 as i32;
+                            p[c] = (a + (b - a) * i as i32 / 15) as u8;
+                        }
+                        p[3] = 255;
+                    }
+                }
+                // Exactly flat — axis collapses, both arms must say None.
+                1 => {
+                    let r = next();
+                    for p in px.iter_mut() {
+                        *p = [r as u8, (r >> 8) as u8, (r >> 16) as u8, 255];
+                    }
+                }
+                // Near-flat: ±1 noise, the 1e-6 boundary's neighbourhood.
+                2 => {
+                    let r = next();
+                    for p in px.iter_mut() {
+                        for c in 0..3 {
+                            let n = (next() % 3) as i32 - 1;
+                            p[c] = (((r >> (8 * c)) as u8 as i32 + n).clamp(0, 255)) as u8;
+                        }
+                        p[3] = 255;
+                    }
+                }
+                // One channel varies — a degenerate axis in two dimensions.
+                3 => {
+                    let ch = (next() % 3) as usize;
+                    for p in px.iter_mut() {
+                        *p = [64, 64, 64, 255];
+                        p[ch] = next() as u8;
+                    }
+                }
+                _ => {
+                    for p in px.iter_mut() {
+                        let r = next();
+                        *p = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+                    }
+                }
+            }
+            let fast = pca_extremes_avx2(&px);
+            let slow = super::super::pca_extremes_rgb_scalar(&px);
+            assert_eq!(fast, slow, "case {case} (kind {})", case % 5);
+        }
+    }
+
+    /// A/B: the scalar PCA seed against its AVX2 twin, over a block corpus.
+    /// Run with: `cargo test --release probe_pca -- --ignored --nocapture`
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn probe_pca_ab() {
+        use super::*;
+        assert!(has_avx2());
+        let mut state = 0xdead_beef_cafe_f00du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // 8192 gradient-ish blocks — the population that actually reaches the
+        // seed (flat blocks bail early in both arms).
+        let mut work = Vec::with_capacity(8192);
+        for _ in 0..8192 {
+            let mut px = [[0u8; 4]; 16];
+            let (ra, rb) = (next(), next());
+            for (i, p) in px.iter_mut().enumerate() {
+                for c in 0..3 {
+                    let a = (ra >> (8 * c)) as u8 as i32;
+                    let b = (rb >> (8 * c)) as u8 as i32;
+                    let n = (next() % 9) as i32 - 4;
+                    p[c] = ((a + (b - a) * i as i32 / 15 + n).clamp(0, 255)) as u8;
+                }
+                p[3] = 255;
+            }
+            work.push(px);
+        }
+        use std::hint::black_box;
+        let best = |f: &mut dyn FnMut() -> u64| {
+            let mut best = u64::MAX;
+            for _ in 0..15 {
+                let t = std::time::Instant::now();
+                let sink = black_box(f());
+                let dt = t.elapsed().as_nanos() as u64;
+                assert_ne!(sink, u64::MAX);
+                best = best.min(dt);
+            }
+            best
+        };
+        let scalar_ns = best(&mut || {
+            let mut sink = 0u64;
+            for px in black_box(&work) {
+                if let Some((a, _)) = super::super::pca_extremes_rgb_scalar(px) {
+                    sink = sink.wrapping_add(a[0] as u64);
+                }
+            }
+            sink | 1
+        });
+        let simd_ns = best(&mut || {
+            let mut sink = 0u64;
+            for px in black_box(&work) {
+                if let Some((a, _)) = pca_extremes_avx2(px) {
+                    sink = sink.wrapping_add(a[0] as u64);
+                }
+            }
+            sink | 1
+        });
+        eprintln!(
+            "pca_extremes over 8192 blocks: scalar {:.1} ns/block, avx2 {:.1} ns/block, ratio {:.2}x",
+            scalar_ns as f64 / 8192.0,
+            simd_ns as f64 / 8192.0,
+            scalar_ns as f64 / simd_ns as f64,
+        );
+    }
+
+    /// The one-pass SSE2 span must equal the scalar walk for every channel,
+    /// across every tail residue (0..=3 pixels past a 16-byte boundary),
+    /// empty surfaces, and buffers longer than the surface (only `npx` pixels
+    /// may be read — trailing sentinel bytes must not leak into the result).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn channel_spans_matches_scalar() {
+        use super::*;
+        let mut state = 0x5aa5_c4a2_2e11_9b3du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let npx = (next() % 68) as usize;
+            // Two sentinel pixels past the surface: if the kernel read them,
+            // the 0x00 bytes would corrupt a min and the 0xFF bytes a max.
+            let mut buf = vec![0u8; npx * 4 + 8];
+            for b in buf[..npx * 4].iter_mut() {
+                *b = next() as u8;
+            }
+            for (i, b) in buf[npx * 4..].iter_mut().enumerate() {
+                *b = if i % 2 == 0 { 0x00 } else { 0xFF };
+            }
+            let got = channel_spans_sse2(&buf, npx);
+            for ch in 0..4 {
+                let (mut lo, mut hi) = (255u8, 0u8);
+                for px in buf[..npx * 4].chunks_exact(4) {
+                    lo = lo.min(px[ch]);
+                    hi = hi.max(px[ch]);
+                }
+                assert_eq!(got[ch], (lo, hi), "case {case}, {npx} px, ch {ch}");
+            }
+        }
+    }
+
+    /// Best-of-N micro A/B: the shipping scalar walk (indexed, per-channel)
+    /// against the one-pass SSE2 form, 2048x2048. The old BC5 flat gate paid
+    /// the scalar walk TWICE on flat content; the kernel pass covers all four
+    /// channels at once. Run with:
+    /// `cargo test --release channel_spans -- --ignored --nocapture`
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[ignore]
+    fn probe_channel_spans_ab() {
+        use super::*;
+        const W: usize = 2048;
+        const H: usize = 2048;
+        let mut state = 0xdead_beef_cafe_f00du64;
+        let mut buf = vec![0u8; W * H * 4];
+        for b in buf.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = state as u8;
+        }
+        // The shipping scalar walk, verbatim shape (blocks::channel_span).
+        let scalar_walk = |channel: usize| -> u8 {
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for y in 0..H {
+                let row = y * W * 4;
+                for x in 0..W {
+                    let v = buf[row + x * 4 + channel];
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            hi.saturating_sub(lo)
+        };
+        let best = |f: &mut dyn FnMut() -> u64| {
+            let mut best = u64::MAX;
+            for _ in 0..31 {
+                let t = std::time::Instant::now();
+                let sink = f();
+                let dt = t.elapsed().as_nanos() as u64;
+                assert_ne!(sink, u64::MAX);
+                best = best.min(dt);
+            }
+            best
+        };
+        // `black_box` on both the input and the result: the walk is pure, and
+        // without the box LLVM hoists it out of the timing loop entirely (the
+        // scalar arm measured 0.0000 ns before this).
+        use std::hint::black_box;
+        let scalar_ns = best(&mut || black_box(scalar_walk(black_box(0))) as u64);
+        let simd_ns = best(&mut || {
+            let s = black_box(channel_spans_sse2(black_box(&buf), W * H));
+            s[0].1.saturating_sub(s[0].0) as u64
+        });
+        let px = (W * H) as f64;
+        eprintln!(
+            "channel_span 2048x2048: scalar {:.4} ns/px/channel, sse2 all-4 {:.4} ns/px, ratio {:.2}x (BC5 flat paid 2x scalar)",
+            scalar_ns as f64 / px,
+            simd_ns as f64 / px,
+            scalar_ns as f64 / simd_ns as f64,
+        );
+    }
+
+    /// `alpha_select_avx2`'s packed-key argmin (`d * 8 + j` through
+    /// `min_epi16`) must reproduce `alpha_select_scalar` exactly — including
+    /// the FIRST-minimum tie-break of the strict `<` — and report the same
+    /// SSE. Duplicate palette entries, constant palettes and equidistant
+    /// samples are forced regularly: those are precisely the inputs where a
+    /// tie-break defect would hide.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn alpha_select_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x5e1e_c7ab_10ca_7e5du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut pal = [0u8; 8];
+            let r = next();
+            for (i, p) in pal.iter_mut().enumerate() {
+                *p = (r >> (8 * i)) as u8;
+            }
+            match case % 8 {
+                // Duplicate-heavy palette: distances tie between entries.
+                1 => {
+                    let (a, b) = (next() as u8, next() as u8);
+                    for (i, p) in pal.iter_mut().enumerate() {
+                        *p = if i % 2 == 0 { a } else { b };
+                    }
+                }
+                // A constant palette: every entry ties on every sample.
+                2 => pal = [next() as u8; 8],
+                // The extremes.
+                3 => pal = [0, 255, 0, 255, 128, 127, 1, 254],
+                _ => {}
+            }
+            let mut samples = [0u8; 16];
+            for half in samples.chunks_exact_mut(8) {
+                let r = next();
+                for (i, s) in half.iter_mut().enumerate() {
+                    *s = (r >> (8 * i)) as u8;
+                }
+            }
+            if case % 5 == 0 {
+                // Samples sitting exactly between two palette entries — the
+                // equidistant case the key packing exists to break correctly.
+                for (i, s) in samples.iter_mut().enumerate() {
+                    let a = pal[i % 8] as i32;
+                    let b = pal[(i + 1) % 8] as i32;
+                    *s = ((a + b) / 2) as u8;
+                }
+            }
+            let fast = alpha_select_avx2(&pal, &samples);
+            let slow = super::super::alpha_select_scalar(&pal, &samples);
+            assert_eq!(fast, slow, "case {case}");
+        }
+    }
+
+    /// The FUSED palette-build + index-fit must equal the all-scalar
+    /// composition: the `W6M` interpolation loop followed by the exhaustive
+    /// fit. Each half has its own oracle; this pins the FUSION — the i16
+    /// palette staying in registers must not move a single index or the SSE.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn palette_fit_mode6_fused_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x0dd5_ee0f_ba5e_ba11u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            for p in px.iter_mut() {
+                let r = next();
+                *p = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            }
+            let r = next();
+            let mut c0 = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            let mut c1 = [
+                (r >> 32) as u8,
+                (r >> 40) as u8,
+                (r >> 48) as u8,
+                (r >> 56) as u8,
+            ];
+            match case % 4 {
+                1 => c1 = c0,                                     // zero delta
+                2 => {
+                    c0 = [0, 0, 0, 0];
+                    c1 = [255, 255, 255, 255]; // full swing
+                }
+                _ => {}
+            }
+            // `base` exactly as every production caller derives it
+            // (`palette_mode6_base`).
+            let base = [
+                c0[0] as i32 * 64 + 32,
+                c0[1] as i32 * 64 + 32,
+                c0[2] as i32 * 64 + 32,
+                c0[3] as i32 * 64 + 32,
+            ];
+            let fast = palette_fit_mode6_avx2(&px, base, c0, c1);
+            let mut pal = [[0u8; 4]; 16];
+            for (k, &w) in super::super::W6M.iter().enumerate() {
+                let w = w as i32;
+                for c in 0..4 {
+                    let delta = c1[c] as i32 - c0[c] as i32;
+                    pal[k][c] = ((base[c] + w * delta) >> 6) as u8;
+                }
+            }
+            let slow = super::super::fit_indices_mode6_exhaustive(&px, &pal);
+            assert_eq!(fast, slow, "case {case}");
+        }
+    }
+
+    /// The fused accumulate + solve + 565 pack must be bit-identical to the
+    /// scalar chain it replaced in `refit_with_ls`: pixel-order
+    /// multiply-then-add accumulation, the `(a11*b0 - a01*b1) / det` solve,
+    /// `round_clamp_u8`, then `to_565`. Singular systems are skipped with the
+    /// same `1e-4` guard `table_ls` applies, so the kernel is tested exactly
+    /// on the domain production hands it.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn ls_accum_solve_565_matches_scalar() {
+        use super::*;
+        if !has_avx2() {
+            return;
+        }
+        let mut state = 0x1d5a_cc50_7565_c001u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const W: [f32; 4] = [0.0, 1.0, 1.0 / 3.0, 2.0 / 3.0];
+        let mut tested = 0u32;
+        for case in 0..60_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            for q in px.iter_mut() {
+                let r = next();
+                *q = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+            }
+            let table = next() as u32;
+            let mut uw = [[0f32; 8]; 16];
+            let (mut a00, mut a01, mut a11) = (0f32, 0f32, 0f32);
+            for (i, slot) in uw.iter_mut().enumerate() {
+                let w = W[((table >> (2 * i)) & 3) as usize];
+                let u = 1.0 - w;
+                *slot = [u, u, u, u, w, w, w, w];
+                a00 += u * u;
+                a01 += u * w;
+                a11 += w * w;
+            }
+            let det = a00 * a11 - a01 * a01;
+            if det.abs() < 1e-4 {
+                continue; // singular; `table_ls` never hands these to the kernel
+            }
+            tested += 1;
+            let pxv = ls_pixels(&px);
+            let fast = ls_accum_solve_565(&pxv, &uw, a00, a01, a11, det);
+            // The scalar chain, replicated operation for operation.
+            let mut b0 = [0f32; 3];
+            let mut b1 = [0f32; 3];
+            for (i, p) in px.iter().enumerate() {
+                let (u, w) = (uw[i][0], uw[i][4]);
+                for c in 0..3 {
+                    let x = p[c] as f32;
+                    b0[c] += u * x;
+                    b1[c] += w * x;
+                }
+            }
+            let mut e0 = [0u8; 3];
+            let mut e1 = [0u8; 3];
+            for c in 0..3 {
+                e0[c] = super::super::round_clamp_u8((a11 * b0[c] - a01 * b1[c]) / det);
+                e1[c] = super::super::round_clamp_u8((a00 * b1[c] - a01 * b0[c]) / det);
+            }
+            let slow = (super::super::to_565(e0), super::super::to_565(e1));
+            assert_eq!(fast, slow, "case {case}");
+        }
+        // A random 2-bit table is singular only when all sixteen fields agree,
+        // so effectively every case must have been exercised.
+        assert!(tested >= 59_000, "singular-skip rate impossibly high: {tested}");
     }
 
     #[cfg(target_arch = "x86_64")]

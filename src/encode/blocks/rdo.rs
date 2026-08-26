@@ -33,6 +33,22 @@ const WINDOW: usize = 16;
 const SAVE_WHOLE: f32 = 7.0;
 const SAVE_PART: f32 = 2.5;
 
+/// `x.ceil() as i32`, without the libm call.
+///
+/// `ceil` needs SSE4.1 — above the portable x86-64 baseline — so it lowers to
+/// a `callq ceilf` inside every RDO block loop. `as` truncates toward zero,
+/// which for negative `x` (a cheap base J goes negative whenever lambda
+/// scales the allowance past the base error) already IS the ceiling; for
+/// positive `x` the ceiling is one above the truncation unless `x` was exact.
+/// The saturating add keeps the `x >= 2^31` edge equal to what
+/// `.ceil() as i32` saturates to; NaN lands on 0 both ways.
+/// `ceil_i32_matches_ceil` sweeps the equivalence.
+#[inline]
+pub(super) fn ceil_i32(x: f32) -> i32 {
+    let t = x as i32;
+    t.saturating_add((x > t as f32) as i32)
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Class {
     Base,
@@ -210,7 +226,7 @@ pub(crate) fn encode_image_bc1_rdo(
 
                         if filled > 0 {
                             // 1. Whole previous block.
-                            let lim = (best_j + lam * SAVE_WHOLE).ceil() as i32;
+                            let lim = ceil_i32(best_j + lam * SAVE_WHOLE);
                             if lim > 0 {
                                 if let Some(err) = bc1_block_sse_limited(&pixels, &prev_block, lim) {
                                     let j = err as f32 - lambda * SAVE_WHOLE;
@@ -258,7 +274,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 // iteration; now it is recomputed only where it
                                 // can have changed — same value, one `ceil` and
                                 // one convert fewer per pass.
-                                let mut lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                let mut lim = ceil_i32(best_j + lam * SAVE_PART);
                                 if lim > 0 && !dup {
                                     if let Some(cand) = recent_ls[k]
                                         .as_ref()
@@ -270,7 +286,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                                 best_j = j;
                                                 best = cand;
                                                 best_class = Class::Table;
-                                                lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                                lim = ceil_i32(best_j + lam * SAVE_PART);
                                             }
                                         }
                                     }
@@ -316,7 +332,7 @@ pub(crate) fn encode_image_bc1_rdo(
                                 {
                                     continue; // already tried via the window
                                 }
-                                let lim = (best_j + lam * SAVE_PART).ceil() as i32;
+                                let lim = ceil_i32(best_j + lam * SAVE_PART);
                                 if lim <= 0 {
                                     break;
                                 }
@@ -673,6 +689,7 @@ fn refit_with_ls(
     let mut e0 = [0u8; 3];
     let mut e1 = [0u8; 3];
     // Set by the vector path, which packs to 565 inside the kernel.
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(unused_mut))]
     let mut qq: Option<(u16, u16)> = None;
     // The solve is six float divisions scalar; vectorised it is two `divps`,
     // and bit-identical for free because IEEE defines these lane-wise. Rounding
@@ -690,7 +707,10 @@ fn refit_with_ls(
         false
     };
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-    let done = false;
+    let done = {
+        let _ = pxv; // consumed by the vector arm only
+        false
+    };
     if !done {
         let (b0, b1) = ls_accum_scalar(pixels, &ls.uw);
         for c in 0..3 {

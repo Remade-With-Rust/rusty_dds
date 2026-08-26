@@ -347,6 +347,27 @@ pub(crate) fn encode_block_uf16(pixels: &[[f32; 4]; 16], out: &mut [u8]) {
     out[..16].copy_from_slice(&bits.into_array());
 }
 
+/// `x.round().clamp(0.0, 65504.0) as i32`, without the libm call.
+///
+/// Same shape as `blocks::round_clamp_u8` — clamp first (integer bounds, so
+/// clamping before rounding cannot change the result), then exploit that a
+/// non-negative value makes round-half-away-from-zero equal `floor(x + 0.5)`.
+/// One thing does NOT carry over from the f32 helper: `x` here is a
+/// full-precision f64, and the naive `x + 0.5` can itself round — for the
+/// largest f64 below a half-integer, `x + 0.5` rounds UP to exactly the tie,
+/// and flooring that misrounds by one. So no addition: truncate (exact, and
+/// equal to floor since `c` is non-negative), subtract (exact — Sterbenz for
+/// `t >= 1`, trivial for `t == 0`), and compare the exact fraction to 0.5.
+///
+/// NaN cannot reach this (the `det` guard), but it agrees anyway: both
+/// spellings saturate NaN to 0. `round_oracle` sweeps the equivalence.
+#[inline]
+fn round_clamp_bc6h(x: f64) -> i32 {
+    let c = x.clamp(0.0, 65504.0);
+    let t = c as i32;
+    t + ((c - t as f64) >= 0.5) as i32
+}
+
 /// LS endpoints from current indices (half-bits domain, W4 weights).
 fn ls_endpoints(halves: &[[i32; 3]; 16], indices: &[u8; 16]) -> Option<([i32; 3], [i32; 3])> {
     let mut a00 = 0f64;
@@ -373,8 +394,8 @@ fn ls_endpoints(halves: &[[i32; 3]; 16], indices: &[u8; 16]) -> Option<([i32; 3]
     let mut e0 = [0i32; 3];
     let mut e1 = [0i32; 3];
     for c in 0..3 {
-        e0[c] = ((a11 * b0[c] - a01 * b1[c]) / det).round().clamp(0.0, 65504.0) as i32;
-        e1[c] = ((a00 * b1[c] - a01 * b0[c]) / det).round().clamp(0.0, 65504.0) as i32;
+        e0[c] = round_clamp_bc6h((a11 * b0[c] - a01 * b1[c]) / det);
+        e1[c] = round_clamp_bc6h((a00 * b1[c] - a01 * b0[c]) / det);
     }
     Some((e0, e1))
 }
@@ -449,4 +470,48 @@ pub(crate) fn encode_slice_uf16(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod round_oracle {
+    use super::round_clamp_bc6h;
+
+    fn want(x: f64) -> i32 {
+        x.round().clamp(0.0, 65504.0) as i32
+    }
+
+    /// `round_clamp_bc6h` must equal `x.round().clamp(0.0, 65504.0) as i32`.
+    /// The adversarial set is every half-integer tie in range plus its two
+    /// f64 neighbours — the neighbour below the tie is exactly the input the
+    /// naive `floor(x + 0.5)` misrounds — then boundaries, specials, and a
+    /// dense pseudo-random sweep over (and beyond) the clamp range.
+    #[test]
+    fn round_clamp_bc6h_matches_round_then_clamp() {
+        for k in 0..=65504i64 {
+            let tie = k as f64 + 0.5;
+            for x in [
+                tie,
+                f64::from_bits(tie.to_bits() - 1),
+                f64::from_bits(tie.to_bits() + 1),
+                k as f64,
+            ] {
+                assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+            }
+        }
+        for x in [
+            0.0, -0.0, -0.25, -0.5, -1.5, -1e300, 65504.0, 65504.4999, 65504.5, 65505.7, 1e300,
+            f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::MIN_POSITIVE, -f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+        }
+        let mut state = 0x6bc6_5150_c0de_2026u64;
+        for _ in 0..400_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // [-4096, +69600): covers below-zero, in-range, and above-clamp.
+            let x = (state >> 11) as f64 / (1u64 << 53) as f64 * 73696.0 - 4096.0;
+            assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+        }
+    }
 }

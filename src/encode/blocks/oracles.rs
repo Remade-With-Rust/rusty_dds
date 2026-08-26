@@ -420,4 +420,174 @@ mod alpha_select_oracle {
         }
     }
 
+    /// `round_clamp_snorm` must equal `x.round().clamp(-127.0, 127.0) as i32`
+    /// — the signed LS refit's spelling. Ties on BOTH sides of zero matter:
+    /// round-half-away sends `-0.5` to `-1`, where a floor-based form would
+    /// send it to `0`.
+    #[test]
+    fn round_clamp_snorm_matches_round_then_clamp() {
+        use super::super::round_clamp_snorm;
+        let mut cases: Vec<f32> = vec![
+            0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 126.5, -126.5, 127.0,
+            -127.0, 127.5, -127.5, 128.0, -300.0, 300.0, 0.49999997, -0.49999997,
+            f32::MIN_POSITIVE, -f32::MIN_POSITIVE, f32::INFINITY, f32::NEG_INFINITY,
+        ];
+        // Every representable half-integer tie in range, plus its two bit
+        // neighbours (the one just below the tie is what a naive f32
+        // `x + 0.5` misrounds).
+        for k in -127i32..127 {
+            let tie = k as f32 + 0.5;
+            cases.push(tie);
+            cases.push(f32::from_bits(tie.to_bits() - 1));
+            cases.push(f32::from_bits(tie.to_bits() + 1));
+        }
+        let mut state = 0x517e_57a7_e0f3_2b1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let r = next();
+            cases.push((r as u32 as f32 / u32::MAX as f32) * 600.0 - 300.0);
+            cases.push(f32::from_bits((r >> 32) as u32));
+        }
+        for x in cases {
+            if x.is_nan() {
+                continue; // the solves cannot produce NaN; det is bounded away from 0
+            }
+            let want = x.round().clamp(-127.0, 127.0) as i32;
+            assert_eq!(round_clamp_snorm(x), want, "x = {x:?} ({:#x})", x.to_bits());
+        }
+    }
+
+    /// `ceil_i32` must equal `x.ceil() as i32` — both signs (truncation
+    /// toward zero already IS the ceiling for negative inputs), exact
+    /// integers (no `+1` when nothing was cut), the saturating `±2^31`
+    /// edges, and arbitrary bit patterns.
+    #[test]
+    fn ceil_i32_matches_ceil() {
+        use super::super::rdo::ceil_i32;
+        let mut cases: Vec<f32> = vec![
+            0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 2.5, -2.5, 0.49999997, -0.49999997,
+            2147483000.0, 2147483648.0, -2147483648.0, 3e9, -3e9, 1e38, -1e38,
+            f32::INFINITY, f32::NEG_INFINITY, f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
+        ];
+        let mut state = 0xce11_a51d_2026_08_26u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let r = next();
+            // the J values the RDO limits actually take, and far outside them
+            cases.push((r as u32 as f32 / u32::MAX as f32) * 4_000_000.0 - 1_000_000.0);
+            cases.push(f32::from_bits((r >> 32) as u32));
+        }
+        for x in cases {
+            if x.is_nan() {
+                continue; // J is a sum of finite SSEs; NaN cannot reach the limit
+            }
+            let want = x.ceil() as i32;
+            assert_eq!(ceil_i32(x), want, "x = {x:?} ({:#x})", x.to_bits());
+        }
+    }
+
+    /// The extrema kernels' packed-key argmin/argmax must match the scalar
+    /// arms' FIRST-extreme rule — §4.5 oracle debt: the `l*16 | (15-i)`
+    /// max-key trick was shipping untested. Ties are the whole point of the
+    /// sweep: two pixels with EQUAL luminance but DIFFERENT bytes make a
+    /// wrong tie-break visible in the returned pixel, so half the cases
+    /// manufacture exactly that, at random positions.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    #[test]
+    fn extrema_avx2_match_scalar() {
+        use super::super::simd;
+        if !simd::has_avx2() {
+            eprintln!("AVX2 not available; skipping");
+            return;
+        }
+        // Scalar references, replicated from `bc7::extrema_rgba_scalar` /
+        // `bc7::extrema_opaque_scalar` (private to bc7; these loops are the
+        // specification, strict `<` / `>` keeping the first extreme).
+        fn rgba_ref(px: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
+            let (mut min_l, mut max_l) = (i32::MAX, i32::MIN);
+            let (mut min_p, mut max_p) = ([0u8; 4], [255u8; 4]);
+            for p in px {
+                let l = p[0] as i32 + p[1] as i32 + p[2] as i32 + p[3] as i32;
+                if l < min_l {
+                    min_l = l;
+                    min_p = *p;
+                }
+                if l > max_l {
+                    max_l = l;
+                    max_p = *p;
+                }
+            }
+            (max_p, min_p)
+        }
+        fn opaque_ref(px: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
+            let (mut min_l, mut max_l) = (i32::MAX, i32::MIN);
+            let (mut min_rgb, mut max_rgb) = ([0u8; 3], [0u8; 3]);
+            for p in px {
+                let l = p[0] as i32 * 2 + p[1] as i32 * 3 + p[2] as i32;
+                if l < min_l {
+                    min_l = l;
+                    min_rgb = [p[0], p[1], p[2]];
+                }
+                if l > max_l {
+                    max_l = l;
+                    max_rgb = [p[0], p[1], p[2]];
+                }
+            }
+            (max_rgb, min_rgb)
+        }
+        let mut state = 0xe87a_11e5_2026_0826u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..120_000u32 {
+            let mut px = [[0u8; 4]; 16];
+            match case {
+                0 => {}                           // all-zero: every pixel ties
+                1 => px = [[7, 31, 255, 12]; 16], // identical non-zero: same
+                _ => {
+                    for p in px.iter_mut() {
+                        let r = next();
+                        *p = [r as u8, (r >> 8) as u8, (r >> 16) as u8, (r >> 24) as u8];
+                    }
+                    let i = (next() as usize) & 15;
+                    let j = (next() as usize) & 15;
+                    let p = px[i];
+                    match case & 3 {
+                        // r/b swap: r+g+b+a unchanged (an rgba tie with
+                        // different bytes), 2r+3g+b usually not (opaque gets
+                        // its ties from the exact copies and from birthday
+                        // collisions in a 0..=1530 key over 120k blocks).
+                        0 => px[j] = [p[2], p[1], p[0], p[3]],
+                        // Exact copy: ties BOTH luminances at two positions.
+                        2 => px[j] = p,
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!(
+                simd::extrema_rgba_avx2(&px),
+                rgba_ref(&px),
+                "rgba case {case} px={px:?}"
+            );
+            assert_eq!(
+                simd::extrema_opaque_avx2(&px),
+                opaque_ref(&px),
+                "opaque case {case} px={px:?}"
+            );
+        }
+    }
+
 }
