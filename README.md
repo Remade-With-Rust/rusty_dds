@@ -1,3 +1,7 @@
+### In The Wild with 470 Active Installs
+
+FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
+
 # rusty_dds
 
 [![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/Remade-With-Rust)
