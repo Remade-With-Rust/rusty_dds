@@ -28,6 +28,8 @@ exclude = [
     "corpus/raw_hdr/*",
     "corpus/manifest.json",
     "bench/preserved/*",
+    # rusty_dds vs dds 0.2 harness (#2): its own crate, its own deps.
+    "bench/dds02/*",
     "docs/artifacts/*.json",
     "target/*",
     # Internal campaign planning: refutation ledgers, session coordination

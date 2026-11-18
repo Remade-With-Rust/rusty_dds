@@ -80,6 +80,8 @@ mod swizzle;
 mod decode;
 #[cfg(feature = "decode")]
 pub use decode::reference;
+#[cfg(feature = "decode")]
+pub use decode::{DecodeOptions, SingleChannel};
 
 #[cfg(feature = "encode")]
 mod encode;

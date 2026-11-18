@@ -340,7 +340,7 @@ impl D3DFormat {
                 // lum     rgb   alpha  rgb cnt                r bitmask         g bitmask         b bitmask         a bitmask
                 (  false,  true,  true, Some(32),        Some(      0xff), Some(    0xff00), Some(  0xff0000), Some(0xff000000)) => Some(D3DFormat::A8B8G8R8),
                 (  false,  true, false, Some(32),        Some(    0xffff), Some(0xffff0000), None,             None            ) => Some(D3DFormat::G16R16),
-                (  false,  true,  true, Some(32),        Some(     0x3ff), Some(   0xffc00), Some(0x3ff00000), None            ) => Some(D3DFormat::A2B10G10R10),
+                (  false,  true,  true, Some(32),        Some(     0x3ff), Some(   0xffc00), Some(0x3ff00000), Some(0xc0000000)) => Some(D3DFormat::A2B10G10R10),
                 (  false,  true,  true, Some(16),        Some(    0x7c00), Some(     0x3e0), Some(      0x1f), Some(    0x8000)) => Some(D3DFormat::A1R5G5B5),
                 (  false,  true, false, Some(16),        Some(    0xf800), Some(     0x7e0), Some(      0x1f), None            ) => Some(D3DFormat::R5G6B5),
                 (  false, false,  true, Some( 8) | None, None,             None,             None,             Some(      0xff)) => Some(D3DFormat::A8),

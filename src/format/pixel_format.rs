@@ -71,6 +71,11 @@ impl PixelFormat {
         let g_bit_mask = r.read_u32::<LittleEndian>()?;
         let b_bit_mask = r.read_u32::<LittleEndian>()?;
         let a_bit_mask = r.read_u32::<LittleEndian>()?;
+        // An absent channel is stored as a zero mask. The classifier matches
+        // absent masks as `None`, so a zero read back as `Some(0)` made every
+        // format with a missing channel (`G16R16`, `X8R8G8B8` writers that
+        // zero alpha, ...) unclassifiable.
+        let nz = |m: u32| if m == 0 { None } else { Some(m) };
         Ok(PixelFormat {
             size,
             flags,
@@ -86,25 +91,29 @@ impl PixelFormat {
             } else {
                 None
             },
-            r_bit_mask: if flags.contains(PixelFormatFlags::RGB) {
-                Some(r_bit_mask)
+            // Luminance formats store their one mask in the red field. Dropping
+            // it left every L8/L16/A8L8/A4L4 file unclassifiable.
+            r_bit_mask: if flags.contains(PixelFormatFlags::RGB)
+                || flags.contains(PixelFormatFlags::LUMINANCE)
+            {
+                nz(r_bit_mask)
             } else {
                 None
             },
             g_bit_mask: if flags.contains(PixelFormatFlags::RGB) {
-                Some(g_bit_mask)
+                nz(g_bit_mask)
             } else {
                 None
             },
             b_bit_mask: if flags.contains(PixelFormatFlags::RGB) {
-                Some(b_bit_mask)
+                nz(b_bit_mask)
             } else {
                 None
             },
             a_bit_mask: if flags.contains(PixelFormatFlags::ALPHA_PIXELS)
                 || flags.contains(PixelFormatFlags::ALPHA)
             {
-                Some(a_bit_mask)
+                nz(a_bit_mask)
             } else {
                 None
             },
@@ -157,12 +166,24 @@ impl Default for PixelFormat {
 impl From<D3DFormat> for PixelFormat {
     fn from(format: D3DFormat) -> PixelFormat {
         let mut pf: PixelFormat = Default::default();
-        if let Some(bpp) = format.get_bits_per_pixel() {
-            pf.flags.insert(PixelFormatFlags::RGB);
-            pf.rgb_bit_count = Some(bpp as u32)
-        } else if let Some(fourcc) = format.get_fourcc() {
+        // A FourCC wins over a bit count. The float and 16-bit formats
+        // (`A16B16G16R16F`, `R32F`, ...) have BOTH, and they are identified on
+        // read by their FourCC alone: writing them as masked RGB produced a
+        // header with no masks that nothing could classify back.
+        if let Some(fourcc) = format.get_fourcc() {
             pf.flags.insert(PixelFormatFlags::FOURCC);
             pf.fourcc = Some(fourcc);
+        } else if let Some(bpp) = format.get_bits_per_pixel() {
+            // Luminance and alpha-only layouts carry their own flag; the reader
+            // keys on it, and `RGB` would make them unreadable.
+            match format {
+                D3DFormat::L8 | D3DFormat::L16 | D3DFormat::A8L8 | D3DFormat::A4L4 => {
+                    pf.flags.insert(PixelFormatFlags::LUMINANCE)
+                }
+                D3DFormat::A8 => pf.flags.insert(PixelFormatFlags::ALPHA),
+                _ => pf.flags.insert(PixelFormatFlags::RGB),
+            }
+            pf.rgb_bit_count = Some(bpp as u32)
         }
         if let Some(abitmask) = format.a_bit_mask() {
             pf.flags.insert(PixelFormatFlags::ALPHA_PIXELS);

@@ -1,7 +1,7 @@
 //! BC6H decode matrix: container plumbing + tiler proven against direct
 //! per-block `bcdec_rs::bc6h_float` calls (the same oracle discipline as
 //! the LDR decode matrix), across 2D / NPOT / mips / array / volume and
-//! both signednesses. LDR/HDR APIs must fail closed on each other.
+//! both signednesses. The RGBA8 API must fail closed on HDR content.
 
 #![cfg(feature = "decode")]
 
@@ -174,7 +174,8 @@ fn apis_fail_closed_across_domains() {
     // LDR API refuses BC6H…
     let hdr = make_dds(8, 8, None, 1, 1, false, 0x6666);
     assert!(hdr.decode_rgba8(SubresourceId::mip_layer(0, 0)).is_err());
-    // …and the HDR API refuses LDR content.
+    // …but the f32 API now takes LDR content too (rusty_dds#2), as an exact
+    // widen of the 8-bit decode.
     let img = ImageRgba8 {
         width: 8,
         height: 8,
@@ -182,7 +183,14 @@ fn apis_fail_closed_across_domains() {
         pixels: vec![128; 8 * 8 * 4],
     };
     let ldr = img.encode_dds(DecodeContent::Bc7).expect("encode bc7");
-    assert!(ldr.decode_rgba_f32(SubresourceId::mip_layer(0, 0)).is_err());
+    let id = SubresourceId::mip_layer(0, 0);
+    let wide = ldr.decode_rgba_f32(id).expect("f32 decode of bc7");
+    let narrow = ldr.decode_rgba8(id).expect("rgba8 decode of bc7");
+    assert!(wide
+        .pixels
+        .iter()
+        .zip(&narrow.pixels)
+        .all(|(&f, &b)| f == b as f32 / 255.0));
 }
 
 /// The caller-parallel seam must produce byte-identical pixels to the whole-surface

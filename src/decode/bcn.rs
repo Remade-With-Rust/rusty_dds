@@ -33,7 +33,7 @@ use crate::decode::neon as interp;
 /// net loss. 16 384 is the smallest size where parallelism is *measured* to win;
 /// the true break-even lies between the two and would need a dedicated sweep to
 /// pin down, so this errs towards the proven side.
-const BC7_PARALLEL_MIN_BLOCKS: usize = 16_384;
+pub(super) const BC7_PARALLEL_MIN_BLOCKS: usize = 16_384;
 
 // A worker-scaling rule (`workers = blocks / 8192`) was tried here on the theory
 // that 24 threads over-subscribe a small job. Measurement REFUTED it: it cost

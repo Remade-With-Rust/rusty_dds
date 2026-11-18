@@ -3,6 +3,55 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## Unreleased
+
+**`decode_rgba_f32` covers every format** (Remade-With-Rust/rusty_dds#2).
+
+### Added — float, 16-bit and packed uncompressed decode
+
+`decode_rgba_f32` (and `_into`, and the `decode_block_rows_f32_into` seam) used
+to accept BC6H alone. It now decodes `R32G32B32A32_FLOAT`, `R16G16B16A16_FLOAT`,
+`R32_FLOAT`, `R16_UNORM`, `R16G16_UNORM`, `R10G10B10A2_UNORM`,
+`R11G11B10_FLOAT`, `R9G9B9E5_SHAREDEXP`, `B5G6R5_UNORM`, `R8_UNORM` and the
+rest of the 8/16/32-bit UNORM/SNORM/FLOAT family, plus the legacy D3D9
+equivalents. Full list: [docs/formats.md](docs/formats.md). Floats are
+unclamped, UNORM is the correctly rounded `x / (2^n - 1)`, SNORM is `-1..=1`,
+missing channels read 0 and missing alpha 1. Each format is gated bit-for-bit
+against an independent f64 oracle written from the DXGI definitions
+(`tests/f32_decode.rs`).
+
+### Added — BC4/BC5 at full precision, and every LDR format in f32
+
+BC4 and BC5 decode to `f32` straight from their endpoints, so interpolated
+levels that `decode_rgba8` rounds to 8 bits survive. BC1/BC2/BC3/BC7/RGBA8/BGRA8
+come back as an exact `x / 255` of the 8-bit decode. The f32 API therefore no
+longer fails closed on LDR content; `decode_rgba8` still refuses BC6H.
+
+### Added — `DecodeOptions` / `SingleChannel::Grey`
+
+`decode_rgba8_with`, `decode_rgba8_into_with`, `decode_rgba_f32_with` and
+`decode_rgba_f32_into_with` take `DecodeOptions`. `SingleChannel::Grey` expands
+BC4 and the one-channel uncompressed formats to `(r, r, r, 1)`, the DirectXTex
+and `dds`-crate convention. The default stays `(r, 0, 0, 1)`, what a GPU samples.
+
+### Fixed — legacy (non-DX10) headers that could not round-trip
+
+* `Dds::new_d3d` wrote the float formats (`A16B16G16R16F`, `R32F`, ...) as
+  masked RGB with no masks instead of by FourCC, and `L8`/`L16`/`A8L8`/`A4L4`
+  and `A8` with the RGB flag; none of them could be classified on read.
+* The pixel-format reader dropped the luminance mask (stored in the red field),
+  so no luminance file classified.
+* A zero (absent) channel mask read back as `Some(0)` where the classifier
+  expects `None`, so `G16R16` and similar never matched.
+* The `A2B10G10R10` classifier row required alpha but matched no alpha mask.
+
+### Measured against `dds` 0.2
+
+See the benchmark in `bench/dds02/` (not part of the published crate) and the
+numbers posted on #2. Over 14 formats at 1024^2, 4096^2 and a 4096^2 mip chain,
+rusty_dds's f32 output is bit-identical to `dds` 0.2's (BC4 compared with
+`SingleChannel::Grey`, `dds`'s convention).
+
 ## 0.9.0 - 2026-08-26
 
 **The gates release.** Every change is **byte-identical** — no decoded pixel and
