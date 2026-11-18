@@ -3,7 +3,7 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
-## Unreleased
+## 0.10.0 - 2026-11-18
 
 **`decode_rgba_f32` covers every format** (Remade-With-Rust/rusty_dds#2).
 
@@ -44,6 +44,16 @@ and `dds`-crate convention. The default stays `(r, 0, 0, 1)`, what a GPU samples
 * A zero (absent) channel mask read back as `Some(0)` where the classifier
   expects `None`, so `G16R16` and similar never matched.
 * The `A2B10G10R10` classifier row required alpha but matched no alpha mask.
+
+### Fixed — debug builds failed every `encode_determinism` test
+
+`push_seed` (BC7 encode) carried `debug_assert!(*n < seeds.len())` with a
+comment calling a sixth seed unreachable. It is reached, so every
+`encode_determinism` test panicked in a debug build (the CI on #1 caught it;
+release builds, which compile the assert out, were unaffected). Release
+builds always took the early return that declines a sixth seed, and every
+frozen payload hash was recorded that way, so the assert is removed and the
+behaviour kept: **encoder output is unchanged**.
 
 ### Measured against `dds` 0.2
 
