@@ -399,9 +399,21 @@ fn run_arm(arm: Arm, case: &Case, bufs: &mut Bufs) {
 
 struct Gate {
     max_abs: f32,
+    /// Largest distance in units in the last place between the two outputs.
+    max_ulps: u32,
+    /// Channels whose f32 bit patterns differ (NaN vs NaN counts as equal).
     differing: u64,
     total: u64,
     note: &'static str,
+}
+
+/// Distance in ulps between two finite floats of the same sign.
+fn ulps(a: f32, b: f32) -> u32 {
+    let key = |x: f32| {
+        let i = x.to_bits() as i32;
+        if i < 0 { i32::MIN - i } else { i }
+    };
+    key(a).abs_diff(key(b))
 }
 
 /// Two buffer sets in all: `ours` is the timing buffer set (reused after),
@@ -410,15 +422,18 @@ fn gate(case: &Case, ours: &mut Bufs) -> Gate {
     let mut other = Bufs::new(&case.bytes, case.mips);
     run_arm(Arm::Dds02F32, case, &mut other);
     run_arm(Arm::RdF32, case, ours);
-    let mut g = Gate { max_abs: 0.0, differing: 0, total: 0, note: "" };
+    // EXACT: an earlier version treated |d| <= 1e-6 as equal, which hid
+    // one-ulp differences and was reported as "bit-identical". Bits only now.
+    let mut g = Gate { max_abs: 0.0, max_ulps: 0, differing: 0, total: 0, note: "" };
     for (x, y) in other.f.iter().flatten().zip(ours.f.iter().flatten()) {
         g.total += 1;
-        let d = (x - y).abs();
-        if !(d <= 1e-6 || (x.is_nan() && y.is_nan()) || x == y) {
+        if x.to_bits() != y.to_bits() && !(x.is_nan() && y.is_nan()) {
             g.differing += 1;
+            let d = (x - y).abs();
             if d > g.max_abs || d.is_nan() {
                 g.max_abs = d;
             }
+            g.max_ulps = g.max_ulps.max(ulps(*x, *y));
         }
     }
     // The serial seam must equal the threaded path bit for bit.
@@ -441,8 +456,8 @@ fn gate(case: &Case, ours: &mut Bufs) -> Gate {
     }
     g.note = if case.name.starts_with("BC3") && g.differing > 0 {
         "dds 0.2 BC3 colour uses BC1 3-colour mode"
-    } else if case.name.starts_with("BC5") && g.differing > 0 {
-        "f32 interpolation rounding"
+    } else if (case.name.starts_with("BC4") || case.name.starts_with("BC5")) && g.differing > 0 {
+        "dds 0.2 multiplies by a rounded reciprocal; rusty_dds rounds the quotient once"
     } else {
         ""
     };
@@ -470,6 +485,7 @@ fn main() {
     let pairs: usize = get("--pairs").map(|s| s.parse().unwrap()).unwrap_or(21);
     let min_ms: f64 = get("--min-ms").map(|s| s.parse().unwrap()).unwrap_or(60.0);
     let filter = get("--filter");
+    let gate_only = args.iter().any(|a| a == "--gate-only");
     let sizes = [(1024, 1), (4096, 1), (4096, 13)];
 
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -486,13 +502,25 @@ fn main() {
 
     let mut quantum = f64::INFINITY;
 
-    println!("| case | arm | best ms | median ms | p10-p90 ms | vs dds 0.2 (median) |");
-    println!("|---|---|---:|---:|---:|---:|");
+    if gate_only {
+        println!("| case | f32 channels whose bits differ from dds 0.2 | max abs diff | max ulps | note |");
+        println!("|---|---:|---:|---:|---|");
+    } else {
+        println!("| case | arm | best ms | median ms | p10-p90 ms | vs dds 0.2 (median) |");
+        println!("|---|---|---:|---:|---:|---:|");
+    }
     let mut gates = Vec::new();
     for_each_case(&sizes, &filter, |case| {
         let case = &case;
         let mut bufs = Bufs::new(&case.bytes, case.mips);
         let g = gate(case, &mut bufs);
+        if gate_only {
+            println!(
+                "| {} | {} of {} | {:.2e} | {} ulp | {} |",
+                case.name, g.differing, g.total, g.max_abs, g.max_ulps, g.note
+            );
+            return;
+        }
         let mut arms = vec![Arm::Dds02F32, Arm::RdF32, Arm::RdF32Null];
         if case.bc7 {
             arms.push(Arm::RdF32Serial);
@@ -568,19 +596,23 @@ fn main() {
         gates.push((case.name.clone(), g, bufs.pixels(), k, pr[pr.len() / 2], pr[pr.len() - 1]));
     });
 
+    if gate_only {
+        return;
+    }
     println!();
     println!("clock quantum (smallest gap between distinct raw samples): {:.4} ms", quantum);
     println!();
-    println!("| case | pixels/decode | K | null arm median / worst pair | f32 gate vs dds 0.2: differing channels | max abs diff | note |");
-    println!("|---|---:|---:|---:|---:|---:|---|");
+    println!("| case | pixels/decode | K | null arm median / worst pair | f32 channels whose bits differ from dds 0.2 | max abs diff | max ulps | note |");
+    println!("|---|---:|---:|---:|---:|---:|---:|---|");
     for (name, g, px, k, nmed, nworst) in gates {
         println!(
-            "| {name} | {px} | {k} | {:.1}% / {:.1}% | {} of {} | {:.2e} | {} |",
+            "| {name} | {px} | {k} | {:.1}% / {:.1}% | {} of {} | {:.2e} | {} | {} |",
             nmed * 100.0,
             nworst * 100.0,
             g.differing,
             g.total,
             g.max_abs,
+            g.max_ulps,
             g.note
         );
     }

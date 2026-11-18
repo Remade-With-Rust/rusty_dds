@@ -49,8 +49,15 @@ and `dds`-crate convention. The default stays `(r, 0, 0, 1)`, what a GPU samples
 
 See the benchmark in `bench/dds02/` (not part of the published crate) and the
 numbers posted on #2. Over 14 formats at 1024^2, 4096^2 and a 4096^2 mip chain,
-rusty_dds's f32 output is bit-identical to `dds` 0.2's (BC4 compared with
-`SingleChannel::Grey`, `dds`'s convention).
+rusty_dds's f32 output is bit-identical to `dds` 0.2's for every format except
+BC4 and BC5 (BC4 compared with `SingleChannel::Grey`, `dds`'s convention). There,
+13-14% of channels differ by exactly one ulp (<= 6e-8): `dds` multiplies by a
+rounded reciprocal, rusty_dds returns the correctly rounded quotient.
+
+BC4/BC5 f32 palettes come from tables of correctly rounded quotients rather than
+six divides per block; the divide form stays as the test oracle
+(`bc4_palette_f32_rounds_to_the_8bit_palette`, all 2 x 65 536 endpoint pairs,
+bit-exact).
 
 ## 0.9.0 - 2026-08-26
 

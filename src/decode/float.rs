@@ -640,47 +640,87 @@ fn single_words(src: &[u8], dst: &mut [f32], grey: bool, f: impl Fn(u16) -> f32)
     }
 }
 
+/// Correctly rounded `n / d` for every numerator a BC4 palette entry can have.
+///
+/// Every entry of a BC4 palette is `(a*e0 + b*e1) / (n * 255)` (or `127` for
+/// SNORM), and the endpoints are the same form with `(n, 0)` weights. A divide
+/// per entry is six-plus `divss` per block, which made the f32 BC4 path SLOWER
+/// than `dds` 0.2 at 1024^2 (0.83x under the system allocator). Multiplying by
+/// a rounded reciprocal, as `dds` does, is not exact: it is off by one ulp on
+/// 1 881 of these numerators. A table of the exact quotients is both.
+pub(crate) struct Bc4Tables {
+    u7: Vec<f32>, // n / 1785, n in 0..=1785
+    u5: Vec<f32>, // n / 1275, n in 0..=1275
+    s7: Vec<f32>, // n / 889,  n in -889..=889, offset 889
+    s5: Vec<f32>, // n / 635,  n in -635..=635, offset 635
+}
+
+impl Bc4Tables {
+    pub(crate) fn get() -> &'static Bc4Tables {
+        static T: std::sync::OnceLock<Bc4Tables> = std::sync::OnceLock::new();
+        T.get_or_init(|| {
+            let q = |lo: i32, hi: i32, d: f32| (lo..=hi).map(|n| n as f32 / d).collect::<Vec<f32>>();
+            Bc4Tables {
+                u7: q(0, 1785, 1785.0),
+                u5: q(0, 1275, 1275.0),
+                s7: q(-889, 889, 889.0),
+                s5: q(-635, 635, 635.0),
+            }
+        })
+    }
+}
+
 /// The eight-entry palette of one BC4 channel, in `f32`.
 ///
-/// Each interpolant is the exact rational `(a*e0 + b*e1) / (n * 255)` (or
-/// `127` for SNORM) rounded once, because both operands are small integers that
-/// `f32` holds exactly and IEEE division rounds correctly. The 8-bit path
-/// rounds the same value to the nearest level; this one keeps it.
+/// Each entry is the exact rational `(a*e0 + b*e1) / (n * 255)` (or `127` for
+/// SNORM) rounded once: both operands are small integers that `f32` holds
+/// exactly, and the quotient comes from a table of correctly rounded divides
+/// (see [`Bc4Tables`]). The 8-bit path rounds the same value to the nearest
+/// level; this one keeps it.
 #[inline]
-pub(crate) fn bc4_palette_f32(a0: u8, a1: u8, signed: bool) -> [f32; 8] {
+pub(crate) fn bc4_palette_f32(a0: u8, a1: u8, signed: bool, t: &Bc4Tables) -> [f32; 8] {
+    let (e0, e1) = if signed {
+        ((a0 as i8 as i32).max(-127), (a1 as i8 as i32).max(-127))
+    } else {
+        (a0 as i32, a1 as i32)
+    };
+    let (t7, t5, off7, off5) = if signed {
+        (&t.s7[..], &t.s5[..], 889, 635)
+    } else {
+        (&t.u7[..], &t.u5[..], 0, 0)
+    };
+    if e0 > e1 {
+        let l = |w0: i32, w1: i32| t7[(w0 * e0 + w1 * e1 + off7) as usize];
+        [l(7, 0), l(0, 7), l(6, 1), l(5, 2), l(4, 3), l(3, 4), l(2, 5), l(1, 6)]
+    } else {
+        let l = |w0: i32, w1: i32| t5[(w0 * e0 + w1 * e1 + off5) as usize];
+        [
+            l(5, 0),
+            l(0, 5),
+            l(4, 1),
+            l(3, 2),
+            l(2, 3),
+            l(1, 4),
+            if signed { -1.0 } else { 0.0 },
+            1.0,
+        ]
+    }
+}
+
+/// The definition the table form must equal: one IEEE divide per entry.
+#[cfg(test)]
+fn bc4_palette_f32_div(a0: u8, a1: u8, signed: bool) -> [f32; 8] {
     let (e0, e1, scale) = if signed {
-        (
-            (a0 as i8 as i32).max(-127),
-            (a1 as i8 as i32).max(-127),
-            127.0f32,
-        )
+        ((a0 as i8 as i32).max(-127), (a1 as i8 as i32).max(-127), 127.0f32)
     } else {
         (a0 as i32, a1 as i32, 255.0f32)
     };
     let lerp = |w0: i32, w1: i32, n: f32| (w0 * e0 + w1 * e1) as f32 / (n * scale);
     let (f0, f1) = (e0 as f32 / scale, e1 as f32 / scale);
     if e0 > e1 {
-        [
-            f0,
-            f1,
-            lerp(6, 1, 7.0),
-            lerp(5, 2, 7.0),
-            lerp(4, 3, 7.0),
-            lerp(3, 4, 7.0),
-            lerp(2, 5, 7.0),
-            lerp(1, 6, 7.0),
-        ]
+        [f0, f1, lerp(6, 1, 7.0), lerp(5, 2, 7.0), lerp(4, 3, 7.0), lerp(3, 4, 7.0), lerp(2, 5, 7.0), lerp(1, 6, 7.0)]
     } else {
-        [
-            f0,
-            f1,
-            lerp(4, 1, 5.0),
-            lerp(3, 2, 5.0),
-            lerp(2, 3, 5.0),
-            lerp(1, 4, 5.0),
-            if signed { -1.0 } else { 0.0 },
-            1.0,
-        ]
+        [f0, f1, lerp(4, 1, 5.0), lerp(3, 2, 5.0), lerp(2, 3, 5.0), lerp(1, 4, 5.0), if signed { -1.0 } else { 0.0 }, 1.0]
     }
 }
 
@@ -711,16 +751,17 @@ pub(crate) fn decode_bc45_f32(
         return Err(Error::OutOfBounds);
     }
     let pitch = w * 4;
+    let t = Bc4Tables::get();
     for (yb, row_blocks) in data[..need].chunks_exact(bx * block).enumerate() {
         let y0 = yb * 4;
         let rows_here = (h - y0).min(4);
         for (xb, blk) in row_blocks.chunks_exact(block).enumerate() {
             let x0 = xb * 4;
             let cols_here = (w - x0).min(4);
-            let pr = bc4_palette_f32(blk[0], blk[1], signed);
+            let pr = bc4_palette_f32(blk[0], blk[1], signed, t);
             let ir = super::bcn::bc4_indices(&blk[..8]);
             if two {
-                let pg = bc4_palette_f32(blk[8], blk[9], signed);
+                let pg = bc4_palette_f32(blk[8], blk[9], signed, t);
                 let ig = super::bcn::bc4_indices(&blk[8..16]);
                 for r in 0..rows_here {
                     let o = (y0 + r) * pitch + x0 * 4;
@@ -824,7 +865,15 @@ mod tests {
         for signed in [false, true] {
             for a0 in 0..=255u8 {
                 for a1 in 0..=255u8 {
-                    let f = bc4_palette_f32(a0, a1, signed);
+                    let f = bc4_palette_f32(a0, a1, signed, Bc4Tables::get());
+                    let exact = bc4_palette_f32_div(a0, a1, signed);
+                    for k in 0..8 {
+                        assert_eq!(
+                            f[k].to_bits(),
+                            exact[k].to_bits(),
+                            "a0={a0} a1={a1} signed={signed} k={k}: table differs from the divide"
+                        );
+                    }
                     let b = super::super::bcn::bc4_palette_packed(a0, a1, signed).to_le_bytes();
                     for k in 0..8 {
                         let (want, got) = if signed {
