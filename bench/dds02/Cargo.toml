@@ -1,0 +1,24 @@
+[package]
+name = "dds02_bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "rusty_dds vs dds 0.2: decode-to-RGBA speed, correctness-gated (rusty_dds#2). Not part of the published crate."
+
+# Standalone: never a member of the library's (non-)workspace.
+[workspace]
+
+[dependencies]
+rusty_dds = { path = "../..", features = ["decode", "encode", "simd"] }
+# Default features, as MaterialCraft builds it (rayon is used by its encoder only).
+dds = "=0.2.0"
+bytemuck = "1"
+png = "0.17"
+rusty_alloc-api = { path = "../../../rusty_alloc/crates/rusty_alloc_api", optional = true }
+
+[features]
+# Link rusty_alloc as the global allocator (MaterialCraft's shipping allocator).
+rusty-alloc = ["dep:rusty_alloc-api"]
+
+[profile.release]
+debug = false

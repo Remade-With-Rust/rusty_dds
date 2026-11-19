@@ -1,4 +1,4 @@
-### In The Wild with 484 Active Installs
+### In The Wild with 2,298 Active Installs
 
 FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com</a>
 
@@ -283,7 +283,7 @@ rusty_dds = "0.9"
 
 | Feature | Default | Provides |
 |---------|---------|----------|
-| `decode` | yes | `decode_rgba8`, `decode_rgba_f32` (BC6H), `bcdec_rs` |
+| `decode` | yes | `decode_rgba8`, `decode_rgba_f32` (every format: BC6H, BCn, float / 16-bit / packed uncompressed), `bcdec_rs` |
 | `encode` | yes | `encode_from_rgba8`, `encode_bc6h_uf16`, `EncodeLayout`, `EncodeQuality`, opt-in RDO |
 | `simd` | yes | AVX2 encode kernels — runtime-detected, scalar fallback, **byte-identical output**. Turn it off for a build the compiler proves contains no `unsafe`. |
 | `tuning` | **no** | Development only. Re-opens the frozen encoder constants to `RUSTY_DDS_*` environment overrides for campaign sweeps. Never ship with it on — output would stop being a pure function of its inputs. |
@@ -375,7 +375,9 @@ cargo bench --bench decode_ab
   via `EncodeLayout::with_rdo(Rdo::lambda(λ))`: smaller *compressed* payloads at
   parity-or-better quality. `Rdo::Off` (the default) is byte-identical to the
   plain encoder, gated by payload hash in `tests/encode_determinism.rs`.
-- **HDR** — BC6H decode (`decode_rgba_f32`) + UF16 mode-11 encode (`encode_bc6h_uf16`).
+- **HDR and wide formats** — `decode_rgba_f32` decodes BC6H, BC4/BC5 at full precision, and
+  float / 16-bit / packed uncompressed layouts (`R16G16B16A16_FLOAT`, `R16_UNORM`, `R10G10B10A2`, …;
+  full list in [docs/formats.md](docs/formats.md)). UF16 mode-11 encode (`encode_bc6h_uf16`).
   Notes: [docs/artifacts/encode-quality.md](docs/artifacts/encode-quality.md).
 - **GPU plans** — `upload_plan_compressed` / `upload_plan_decoded_rgba8` (Vulkan / wgpu / DXGI
   names; no graphics API dependency).
@@ -393,6 +395,7 @@ cargo bench --bench decode_ab
 | LDR encode (same matrix) | ✅ |
 | Feature-gated `decode` / `encode` | ✅ Phase 5 |
 | BC6H / float HDR | ✅ decode (`decode_rgba_f32`) · ✅ encode UF16 mode-11 (`encode_bc6h_uf16`) |
+| Float / 16-bit / packed uncompressed | ✅ decode (`decode_rgba_f32`) |
 
 ## Architecture
 

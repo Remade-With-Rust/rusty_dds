@@ -811,12 +811,13 @@ pub(super) type Seed = ([u8; 4], [u8; 4]);
 /// skipping it is byte-identical and saves a whole index-fit pass.
 #[inline]
 pub(super) fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
-    // The callers never push a sixth seed, but nothing in the signature says
-    // so, which left BOTH the `[..*n]` slice and the `[*n]` store carrying a
-    // bounds check. One early return states the invariant once and makes both
-    // provable; it is unreachable on every input the encoder produces, and
-    // where the old code would have panicked this simply declines to grow.
-    debug_assert!(*n < seeds.len());
+    // A full list declines to grow. This IS reached: callers can offer a sixth
+    // seed, and a `debug_assert!` that claimed otherwise failed every
+    // `encode_determinism` test in debug builds (CI on PR #1). Release builds
+    // always took this early return, and every frozen payload hash was
+    // recorded that way, so returning here is the shipped behaviour; letting
+    // the list grow would change encoder output. The return also makes the
+    // `[*n]` store below provably in bounds.
     if *n >= seeds.len() {
         return;
     }
