@@ -8,6 +8,7 @@
 //! in-house.
 
 mod bc6h;
+pub(crate) mod float;
 pub(crate) mod bcn;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod interp_pack;
@@ -21,6 +22,8 @@ pub mod reference;
 use crate::content::{
     slice_payload_bytes, DecodeContent, HdrDecodeContent, ImageRgba8, ImageRgbaF32,
 };
+use float::{F32Kind, PlainFormat};
+pub use float::{DecodeOptions, SingleChannel};
 use crate::error::Error;
 use crate::surface::SubresourceId;
 use crate::DdsBase;
@@ -48,7 +51,9 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Neither is wrong; they answer different questions. If you are porting
     /// from `DirectXTex::Decompress` and your single-channel maps suddenly look
     /// red, this is why — replicate the red channel yourself. DirectXTex does
-    /// *not* replicate for BC5, so only BC4 is affected.
+    /// *not* replicate for BC5, so only BC4 is affected. To get grey without a
+    /// post-pass, call [`DdsBase::decode_rgba8_with`] with
+    /// [`SingleChannel::Grey`].
     pub fn decode_rgba8(&self, id: SubresourceId) -> Result<ImageRgba8, Error> {
         let surf = self.surface(id)?;
         let kind = self.decode_content()?;
@@ -60,70 +65,106 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             pixels,
         })
     }
+
+    /// [`DdsBase::decode_rgba8`] with [`DecodeOptions`] — today, the choice of
+    /// `(R, 0, 0, 255)` or grey `(R, R, R, 255)` for BC4.
+    ///
+    /// ```
+    /// # use rusty_dds::{Dds, DdsView, SubresourceId, DecodeOptions, SingleChannel};
+    /// # let mut bytes = Vec::new();
+    /// # Dds::new_dxgi(rusty_dds::NewDxgiParams {
+    /// #     height: 8, width: 8, depth: None,
+    /// #     format: rusty_dds::DxgiFormat::BC4_UNorm,
+    /// #     mipmap_levels: None, array_layers: None, caps2: None, is_cubemap: false,
+    /// #     resource_dimension: rusty_dds::D3D10ResourceDimension::Texture2D,
+    /// #     alpha_mode: rusty_dds::AlphaMode::Straight,
+    /// # })?.write(&mut bytes)?;
+    /// let dds = DdsView::parse(&bytes)?;
+    /// let grey = DecodeOptions::new().single_channel(SingleChannel::Grey);
+    /// let img = dds.decode_rgba8_with(SubresourceId::mip_layer(0, 0), grey)?;
+    /// let [r, g, b, _] = img.pixel(0, 0).unwrap();
+    /// assert!(r == g && g == b);
+    /// # Ok::<(), rusty_dds::Error>(())
+    /// ```
+    pub fn decode_rgba8_with(
+        &self,
+        id: SubresourceId,
+        opts: DecodeOptions,
+    ) -> Result<ImageRgba8, Error> {
+        let mut img = self.decode_rgba8(id)?;
+        apply_grey_u8(self.decode_content()?, opts, &mut img.pixels);
+        Ok(img)
+    }
+
+    /// [`DdsBase::decode_rgba8_into`] with [`DecodeOptions`].
+    pub fn decode_rgba8_into_with(
+        &self,
+        id: SubresourceId,
+        dst: &mut Vec<u8>,
+        opts: DecodeOptions,
+    ) -> Result<(u32, u32, u32), Error> {
+        let dims = self.decode_rgba8_into(id, dst)?;
+        apply_grey_u8(self.decode_content()?, opts, dst);
+        Ok(dims)
+    }
+}
+
+/// Replicate red into green and blue for single-channel LDR content.
+fn apply_grey_u8(kind: DecodeContent, opts: DecodeOptions, px: &mut [u8]) {
+    if opts.grey() && matches!(kind, DecodeContent::Bc4UNorm | DecodeContent::Bc4SNorm) {
+        for p in px.chunks_exact_mut(4) {
+            p[1] = p[0];
+            p[2] = p[0];
+        }
+    }
 }
 
 impl<D: AsRef<[u8]>> DdsBase<D> {
-    /// Decode one HDR subresource (BC6H) to tightly packed RGBA `f32`
-    /// (`A = 1.0`). Volumes decode every depth slice, stacked. LDR content
-    /// stays on [`DdsBase::decode_rgba8`](crate::DdsBase::decode_rgba8); each API fails closed on the other's
-    /// formats.
+    /// Decode one subresource to tightly packed RGBA `f32`.
+    ///
+    /// Every format this crate decodes is accepted:
+    ///
+    /// * **BC6H** — HDR, unclamped, `A = 1.0`.
+    /// * **Uncompressed float and wide formats** — `R32G32B32A32_FLOAT`,
+    ///   `R16G16B16A16_FLOAT`, `R32_FLOAT`, `R16_UNORM`, `R16G16_UNORM`,
+    ///   `R10G10B10A2_UNORM`, `R11G11B10_FLOAT`, `R9G9B9E5_SHAREDEXP`,
+    ///   `B5G6R5_UNORM`, `R8_UNORM` and the rest of the 8/16/32-bit
+    ///   UNORM/SNORM/FLOAT family, plus the legacy D3D9 equivalents
+    ///   (`A16B16G16R16F`, `L16`, `R5G6B5`, …).
+    /// * **BC4 and BC5** — decoded from the endpoints in `f32`, keeping the
+    ///   interpolated levels that [`DdsBase::decode_rgba8`] rounds to 8 bits.
+    /// * **BC1, BC2, BC3, BC7, RGBA8, BGRA8** — defined at 8 bits, widened as an
+    ///   exact `x / 255`.
+    ///
+    /// Floats are unclamped; UNORM is `0.0..=1.0`; SNORM is `-1.0..=1.0`.
+    /// Missing channels read `0.0` and missing alpha `1.0`, the GPU sampling
+    /// convention — use [`DdsBase::decode_rgba_f32_with`] and
+    /// [`SingleChannel::Grey`](crate::SingleChannel::Grey) to expand BC4 and
+    /// other one-channel formats to grey. Volumes decode every depth slice,
+    /// stacked. sRGB-tagged formats are not linearised.
     pub fn decode_rgba_f32(&self, id: SubresourceId) -> Result<ImageRgbaF32, Error> {
-        let kind = self.hdr_decode_content()?;
-        let signed = kind == HdrDecodeContent::Bc6hSf16;
-        let surf = self.surface(id)?;
-        let slice_bytes = {
-            let bx = (surf.width as usize + 3) / 4;
-            let by = (surf.height as usize + 3) / 4;
-            bx.checked_mul(by)
-                .and_then(|n| n.checked_mul(16))
-                .ok_or(Error::OutOfBounds)?
-        };
-        let need = slice_bytes
-            .checked_mul(surf.depth as usize)
-            .ok_or(Error::OutOfBounds)?;
-        if surf.data.len() < need {
-            return Err(Error::TruncatedData);
-        }
-        // The 2D case is every case that matters, and `decode_bc6h` already
-        // returns exactly the buffer we want. Building a second full-size `Vec`
-        // and extending it into cost a whole extra allocation plus a copy of the
-        // output — and this output is 16 bytes a pixel, four times RGBA8. The
-        // LDR path has always short-circuited depth == 1; this one did not.
-        if surf.depth <= 1 {
-            return Ok(ImageRgbaF32 {
-                width: surf.width,
-                height: surf.height,
-                depth: surf.depth,
-                pixels: bc6h::decode_bc6h(&surf.data[..slice_bytes], surf.width, surf.height, signed)?,
-            });
-        }
+        self.decode_rgba_f32_with(id, DecodeOptions::new())
+    }
 
-        let mut pixels = Vec::with_capacity(
-            (surf.width as usize)
-                .saturating_mul(surf.height as usize)
-                .saturating_mul(surf.depth as usize)
-                .saturating_mul(4),
-        );
-        for z in 0..surf.depth as usize {
-            let start = z * slice_bytes;
-            pixels.extend(bc6h::decode_bc6h(
-                &surf.data[start..start + slice_bytes],
-                surf.width,
-                surf.height,
-                signed,
-            )?);
-        }
+    /// [`DdsBase::decode_rgba_f32`] with [`DecodeOptions`].
+    pub fn decode_rgba_f32_with(
+        &self,
+        id: SubresourceId,
+        opts: DecodeOptions,
+    ) -> Result<ImageRgbaF32, Error> {
+        let mut pixels = Vec::new();
+        let (width, height, depth) = self.decode_rgba_f32_into_with(id, &mut pixels, opts)?;
         Ok(ImageRgbaF32 {
-            width: surf.width,
-            height: surf.height,
-            depth: surf.depth,
+            width,
+            height,
+            depth,
             pixels,
         })
     }
 
-    /// Decode one HDR subresource to RGBA `f32` **into a buffer you own**.
+    /// Decode one subresource to RGBA `f32` **into a buffer you own**.
     ///
-    /// The HDR twin of [`DdsBase::decode_rgba8_into`], and it matters more here:
+    /// The `f32` twin of [`DdsBase::decode_rgba8_into`], and it matters more here:
     /// this output is 16 bytes a pixel, four times RGBA8, so a 1024^2 surface
     /// hands back 16 MiB that the operating system zeroed for you and the
     /// decoder immediately overwrote. Recycle one buffer per worker instead.
@@ -135,11 +176,22 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         id: SubresourceId,
         dst: &mut Vec<f32>,
     ) -> Result<(u32, u32, u32), Error> {
-        let kind = self.hdr_decode_content()?;
-        let signed = kind == HdrDecodeContent::Bc6hSf16;
+        self.decode_rgba_f32_into_with(id, dst, DecodeOptions::new())
+    }
+
+    /// [`DdsBase::decode_rgba_f32_into`] with [`DecodeOptions`].
+    pub fn decode_rgba_f32_into_with(
+        &self,
+        id: SubresourceId,
+        dst: &mut Vec<f32>,
+        opts: DecodeOptions,
+    ) -> Result<(u32, u32, u32), Error> {
+        let kind = self.f32_kind()?;
         let surf = self.surface(id)?;
         let (w, h, d) = (surf.width, surf.height, surf.depth.max(1));
-        let slice_bytes = hdr_slice_bytes(w, h)?;
+        // Validate the source before sizing the destination: `w` and `h` are
+        // header fields, and the output is 16 bytes a pixel.
+        let slice_bytes = kind.slice_bytes(w, h)?;
         let need = slice_bytes.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
         if surf.data.len() < need {
             return Err(Error::TruncatedData);
@@ -150,11 +202,17 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             .and_then(|n| n.checked_mul(4))
             .ok_or(Error::OutOfBounds)?;
         let total = out_slice.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
-        // `resize` only zeroes what it adds, so a correctly sized buffer costs
-        // nothing here — the whole point of handing one back in.
+        // A correctly sized buffer costs nothing here — the whole point of
+        // handing one back in. A buffer that must grow is replaced by a zeroed
+        // allocation, which the OS hands over already zero; `resize` would
+        // memset 16 bytes a pixel on top of the page faults.
         if dst.len() != total {
-            dst.clear();
-            dst.resize(total, 0.0);
+            if dst.capacity() < total {
+                *dst = vec![0.0; total];
+            } else {
+                dst.clear();
+                dst.resize(total, 0.0);
+            }
         }
 
         for z in 0..d as usize {
@@ -162,13 +220,13 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             let dst_z = dst
                 .get_mut(z * out_slice..(z + 1) * out_slice)
                 .ok_or(Error::OutOfBounds)?;
-            bc6h::decode_bc6h_into(src, w, h, signed, dst_z)?;
+            decode_rows_f32(kind, src, w, h, opts.grey(), true, dst_z)?;
         }
         Ok((w, h, d))
     }
 
-    /// Decode a **range of block rows** of one HDR subresource into caller
-    /// memory — the seam your job system splits on.
+    /// Decode a **range of block rows** of one subresource to RGBA `f32` in
+    /// caller memory — the seam your job system splits on.
     ///
     /// BC6H is the most expensive decode this crate ships: at 1024^2 it is
     /// ~21 ms serial, against 2.6 ms for BC7 split across a caller's threads.
@@ -176,9 +234,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// not grow one — a texture library that seizes cores inside a frame is a
     /// library an engine has to work around. This hands you the split instead.
     ///
-    /// `rows` is in block rows of 4 pixel rows each; `dst` receives only those
-    /// rows, tightly packed at `width * 4` floats per pixel row. Use
-    /// [`DdsBase::block_rows_f32`] for the count.
+    /// `rows` is in block rows (4 pixel rows each for block-compressed formats,
+    /// 1 for uncompressed); `dst` receives only those rows, tightly packed at
+    /// `width * 4` floats per pixel row. Use [`DdsBase::block_rows_f32`] for the
+    /// count.
     ///
     /// # Split only what is worth splitting
     ///
@@ -216,48 +275,224 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         rows: core::ops::Range<u32>,
         dst: &mut [f32],
     ) -> Result<(), Error> {
-        let kind = self.hdr_decode_content()?;
-        let signed = kind == HdrDecodeContent::Bc6hSf16;
+        let kind = self.f32_kind()?;
         let surf = self.surface(id)?;
         if surf.depth.max(1) != 1 {
             // Volumes want a slice index alongside the row range; no caller has
             // needed it yet, and guessing the layout would be worse than failing.
             return Err(Error::UnsupportedFormat);
         }
-        let total = surf.height.div_ceil(4);
+        let bh = kind.block_height();
+        let total = surf.height.div_ceil(bh);
         if rows.start > rows.end || rows.end > total {
             return Err(Error::OutOfBounds);
         }
-        let y0 = rows.start * 4;
-        let y1 = (rows.end * 4).min(surf.height);
+        let y0 = rows.start * bh;
+        let y1 = (rows.end * bh).min(surf.height);
         if y0 >= y1 {
             return Ok(());
         }
 
-        // 16 bytes per block, one block row is `blocks_x` of them.
-        let row_pitch = (surf.width as usize).div_ceil(4) * 16;
+        let row_pitch = kind.row_bytes(surf.width)?;
         let src = surf
             .data
             .get(rows.start as usize * row_pitch..rows.end as usize * row_pitch)
             .ok_or(Error::TruncatedData)?;
-        bc6h::decode_bc6h_into(src, surf.width, y1 - y0, signed, dst)
+        let need = (surf.width as usize)
+            .checked_mul((y1 - y0) as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?;
+        if dst.len() != need {
+            return Err(Error::OutOfBounds);
+        }
+        // The caller is splitting the work across its own threads: never
+        // spawn more underneath it.
+        decode_rows_f32(kind, src, surf.width, y1 - y0, false, false, dst)
     }
 
-    /// Block rows in one HDR subresource — the unit
-    /// [`DdsBase::decode_block_rows_f32_into`] splits on. Always 4 pixel rows.
+    /// Block rows in one subresource — the unit
+    /// [`DdsBase::decode_block_rows_f32_into`] splits on. Four pixel rows for
+    /// block-compressed formats, one for uncompressed.
     pub fn block_rows_f32(&self, id: SubresourceId) -> Result<u32, Error> {
-        self.hdr_decode_content()?;
-        Ok(self.surface(id)?.height.div_ceil(4))
+        let kind = self.f32_kind()?;
+        Ok(self.surface(id)?.height.div_ceil(kind.block_height()))
+    }
+
+    /// Classify for the `f32` path: BC6H first, then the LDR matrix, then the
+    /// uncompressed float and wide layouts.
+    pub(crate) fn f32_kind(&self) -> Result<F32Kind, Error> {
+        if let Ok(k) = self.hdr_decode_content() {
+            return Ok(F32Kind::Bc6h {
+                signed: k == HdrDecodeContent::Bc6hSf16,
+            });
+        }
+        if let Ok(k) = self.decode_content() {
+            return Ok(F32Kind::Ldr(k));
+        }
+        if let Some(p) = self.get_dxgi_format().and_then(PlainFormat::from_dxgi) {
+            return Ok(F32Kind::Plain(p));
+        }
+        if let Some(p) = self.get_d3d_format().and_then(PlainFormat::from_d3d) {
+            return Ok(F32Kind::Plain(p));
+        }
+        Err(Error::UnsupportedFormat)
     }
 }
 
-/// Payload bytes for one BC6H slice.
-fn hdr_slice_bytes(width: u32, height: u32) -> Result<usize, Error> {
-    let bx = (width as usize).div_ceil(4);
-    let by = (height as usize).div_ceil(4);
-    bx.checked_mul(by)
-        .and_then(|n| n.checked_mul(16))
-        .ok_or(Error::OutOfBounds)
+/// Decode `height` pixel rows (whole block rows, the last possibly partial) of
+/// one slice into `dst`, exactly `width * height * 4` floats.
+fn decode_rows_f32(
+    kind: F32Kind,
+    src: &[u8],
+    width: u32,
+    height: u32,
+    grey: bool,
+    threads: bool,
+    dst: &mut [f32],
+) -> Result<(), Error> {
+    let w = width as usize;
+    let need = w
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(Error::OutOfBounds)?;
+    if dst.len() != need {
+        return Err(Error::OutOfBounds);
+    }
+    match kind {
+        F32Kind::Bc6h { signed } => bc6h::decode_bc6h_into(src, width, height, signed, dst),
+        F32Kind::Ldr(DecodeContent::Bc4UNorm) => {
+            float::decode_bc45_f32(src, width, height, false, false, grey, dst)
+        }
+        F32Kind::Ldr(DecodeContent::Bc4SNorm) => {
+            float::decode_bc45_f32(src, width, height, true, false, grey, dst)
+        }
+        F32Kind::Ldr(DecodeContent::Bc5UNorm) => {
+            float::decode_bc45_f32(src, width, height, false, true, grey, dst)
+        }
+        F32Kind::Ldr(DecodeContent::Bc5SNorm) => {
+            float::decode_bc45_f32(src, width, height, true, true, grey, dst)
+        }
+        // Uncompressed 8-bit needs no 8-bit decode first: widen straight from
+        // the payload instead of through a scratch band.
+        F32Kind::Ldr(DecodeContent::Rgba8) => {
+            decode_rows_f32(F32Kind::Plain(PlainFormat::Rgba8Un), src, width, height, grey, threads, dst)
+        }
+        F32Kind::Ldr(DecodeContent::Bgra8) => {
+            decode_rows_f32(F32Kind::Plain(PlainFormat::Bgra8), src, width, height, grey, threads, dst)
+        }
+        F32Kind::Ldr(k) => decode_ldr_widen(k, src, width, height, threads, dst),
+        F32Kind::Plain(p) => {
+            let row = kind.row_bytes(width)?;
+            let need_src = row.checked_mul(height as usize).ok_or(Error::OutOfBounds)?;
+            if src.len() < need_src {
+                return Err(Error::TruncatedData);
+            }
+            // Rows are tightly packed in the payload and in `dst`, so the whole
+            // band is one call. Row-at-a-time measured 2.0x slower on
+            // R32G32B32A32_FLOAT: a 16 KiB `memcpy` per row never reaches the
+            // streaming-store path that a whole-surface copy does.
+            float::convert_row(p, &src[..need_src], dst, grey);
+            Ok(())
+        }
+    }
+}
+
+/// Formats defined at 8 bits (BC1/2/3/7, RGBA8, BGRA8): decode with the 8-bit
+/// kernels a band at a time into a small scratch and widen with an exact table.
+///
+/// The band keeps the scratch cache-resident instead of materialising a whole
+/// RGBA8 surface (64 MiB at 4096^2) beside the 256 MiB `f32` one. BC7 is the
+/// one format slow enough to want threads; large BC7 surfaces split the bands
+/// across cores, sized so no band crosses the 8-bit decoder's own parallel
+/// threshold and spawns a second, nested pool.
+fn decode_ldr_widen(
+    kind: DecodeContent,
+    src: &[u8],
+    width: u32,
+    height: u32,
+    threads: bool,
+    dst: &mut [f32],
+) -> Result<(), Error> {
+    let w = width as usize;
+    let bh = block_height(kind) as usize;
+    let row_src = block_row_bytes(kind, width)?;
+    let rows_total = (height as usize).div_ceil(bh);
+    let need_src = row_src.checked_mul(rows_total).ok_or(Error::OutOfBounds)?;
+    if src.len() < need_src {
+        return Err(Error::TruncatedData);
+    }
+    let src = &src[..need_src];
+
+    let blocks_x = if bh == 1 { w } else { w.div_ceil(4) };
+    // Block rows per band: ~16 for small widths, fewer for wide surfaces so a
+    // BC7 band stays under `BC7_PARALLEL_MIN_BLOCKS`.
+    let band_rows = (16usize)
+        .min((bcn::BC7_PARALLEL_MIN_BLOCKS - 1) / blocks_x.max(1))
+        .max(1)
+        * if bh == 1 { 4 } else { 1 };
+
+    // One serial worker over block rows [r0, r1) into its own pixel rows.
+    let run = |r0: usize, r1: usize, out: &mut [f32]| -> Result<(), Error> {
+        let mut scratch: Vec<u8> = Vec::new();
+        let mut r = r0;
+        let mut out_off = 0usize;
+        while r < r1 {
+            let r_end = (r + band_rows).min(r1);
+            let py0 = r * bh;
+            let py1 = (r_end * bh).min(height as usize);
+            let px_rows = py1 - py0;
+            let n = w * px_rows * 4;
+            scratch.resize(n, 0);
+            decode_slice_into(
+                kind,
+                &src[r * row_src..r_end * row_src],
+                width,
+                px_rows as u32,
+                &mut scratch[..n],
+            )?;
+            float::widen_u8(&scratch[..n], &mut out[out_off..out_off + n]);
+            out_off += n;
+            r = r_end;
+        }
+        Ok(())
+    };
+
+    let parallel = threads
+        && kind == DecodeContent::Bc7
+        && rows_total >= 2
+        && blocks_x.saturating_mul(rows_total) >= bcn::BC7_PARALLEL_MIN_BLOCKS;
+    if !parallel {
+        return run(0, rows_total, dst);
+    }
+
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cores = *CORES.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    let workers = cores.clamp(1, rows_total);
+    let base = rows_total / workers;
+    let extra = rows_total % workers;
+    std::thread::scope(|s| {
+        let mut rest: &mut [f32] = dst;
+        let mut start = 0usize;
+        let mut handles = Vec::with_capacity(workers);
+        for k in 0..workers {
+            let len = base + usize::from(k < extra);
+            let (r0, r1) = (start, start + len);
+            start = r1;
+            let px_rows = (r1 * bh).min(height as usize) - r0 * bh;
+            let (band, tail) = rest.split_at_mut(w * px_rows * 4);
+            rest = tail;
+            let run = &run;
+            handles.push(s.spawn(move || run(r0, r1, band)));
+        }
+        for h in handles {
+            h.join().map_err(|_| Error::OutOfBounds)??;
+        }
+        Ok(())
+    })
 }
 
 impl<D: AsRef<[u8]>> DdsBase<D> {

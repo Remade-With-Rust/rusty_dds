@@ -33,8 +33,31 @@ partitioning over a harvest-chosen 8-shape shortlist.
 | C-BC6H-SF16 | `BC6H_SF16` | ✅ `decode_rgba_f32` | ❌ deferred | ✅ |
 | C-BC6H-Typeless | `BC6H_Typeless` | ✅ `decode_rgba_f32` | ❌ | ✅ |
 
-LDR and HDR fail closed on each other: `decode_rgba8` refuses BC6H and
-`decode_rgba_f32` refuses the LDR set, rather than silently converting.
+`decode_rgba8` refuses BC6H rather than tone-mapping it.
+
+## Supported (f32 matrix, `decode_rgba_f32`)
+
+`decode_rgba_f32` (and `_into`, `_with`, and the `decode_block_rows_f32_into`
+seam) accepts **every** format in the two tables above plus the uncompressed
+layouts below. Floats come back unclamped, UNORM in `0..=1`, SNORM in
+`-1..=1` (most negative code clamped to `-1`). Missing channels read `0`,
+missing alpha `1` — the GPU sampling convention; pass
+`DecodeOptions::new().single_channel(SingleChannel::Grey)` to expand BC4 and
+the one-channel formats to `(r, r, r, 1)` instead.
+
+| Family | DXGI | Legacy D3D9 header |
+|--------|------|--------------------|
+| 32-bit float | `R32G32B32A32_FLOAT`, `R32G32B32_FLOAT`, `R32G32_FLOAT`, `R32_FLOAT` | `A32B32G32R32F`, `G32R32F`, `R32F` |
+| 16-bit float | `R16G16B16A16_FLOAT`, `R16G16_FLOAT`, `R16_FLOAT` | `A16B16G16R16F`, `G16R16F`, `R16F` |
+| 16-bit norm | `R16G16B16A16_UNORM/SNORM`, `R16G16_UNORM/SNORM`, `R16_UNORM/SNORM` | `A16B16G16R16`, `G16R16`, `L16` |
+| 8-bit norm | `R8G8B8A8_SNORM`, `B8G8R8X8_UNORM`, `R8G8_UNORM/SNORM`, `R8_UNORM/SNORM`, `A8_UNORM` | `A8B8G8R8`, `A8R8G8B8`, `X8R8G8B8`, `X8B8G8R8`, `R8G8B8`, `A8`, `L8`, `A8L8`, `A4L4` |
+| Packed | `R10G10B10A2_UNORM`, `R11G11B10_FLOAT`, `R9G9B9E5_SHAREDEXP`, `B5G6R5_UNORM`, `B5G5R5A1_UNORM`, `B4G4R4A4_UNORM` | `A2B10G10R10`, `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5`, `A4R4G4B4`, `X4R4G4B4` |
+
+BC4 and BC5 decode to `f32` straight from their endpoints, keeping the
+interpolated levels the 8-bit path rounds. BC1/BC2/BC3/BC7/RGBA8/BGRA8 are
+defined at 8 bits and come back as an exact `x / 255`. Typeless and integer
+(`_UINT`/`_SINT`) layouts stay `UnsupportedFormat`: they have no defined float
+value.
 
 **sRGB:** `_sRGB` tags keep **stored** channel bytes (no linearization) on
 decode; GPU names map to `*Srgb` variants in [`GpuFormat`](../src/upload.rs).
@@ -44,8 +67,8 @@ decode; GPU names map to `*Srgb` variants in [`GpuFormat`](../src/upload.rs).
 | Format family | Status |
 |---------------|--------|
 | ASTC / ETC / PVRTC | out of scope (not DDS-primary desktop BCn) |
-| Packed RGB10A2, R16G16, float RGBA, etc. | container may parse; no decode/encode |
-| Legacy D3D uncompressed bitmasks beyond the DXGI map | `UnsupportedFormat` on decode/encode |
+| Uncompressed float / wide / packed formats | `decode_rgba_f32` only (above); no RGBA8 decode, no encode |
+| Typeless, `_UINT` / `_SINT`, `A8R3G3B2`, `Q16W16V16U16`, `CxV8U8` | `UnsupportedFormat` |
 | Video / YUV DXGI formats | unsupported |
 
 ## Contexts (all supported for the tables above)

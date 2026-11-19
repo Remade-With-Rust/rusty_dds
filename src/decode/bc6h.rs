@@ -317,31 +317,6 @@ fn validate(data: &[u8], width: u32, height: u32) -> Result<(usize, usize, usize
     Ok((blocks_x, blocks_y, width as usize, height as usize))
 }
 
-pub fn decode_bc6h(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    signed: bool,
-) -> Result<Vec<f32>, Error> {
-    let (_, _, w, h) = validate(data, width, height)?;
-    // The zero-fill LOOKS like pure tax — `decode_bc6h_into` overwrites every
-    // element — and an uninitialised-buffer form (`with_capacity` + `set_len`)
-    // was built and MEASURED: no change (3.4-4.6 ns/px both ways, interleaved
-    // A/B at 1024²/1023²). Under the system allocator a fresh 16 MiB vec is
-    // dominated by first-touch page faults, which the decode's own writes pay
-    // either way; the memset rides the same fault-warmed pages almost free.
-    // Re-evaluate under `rusty_alloc` (segments recycle, faults vanish, the
-    // memset becomes the dominant term) before spending `unsafe` here.
-    let mut out = vec![
-        0f32;
-        w.checked_mul(h)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or(Error::OutOfBounds)?
-    ];
-    decode_bc6h_into(data, width, height, signed, &mut out)?;
-    Ok(out)
-}
-
 /// IEEE binary16 -> binary32, branchless.
 ///
 /// BC6H's decoded value *is* a half bit pattern, so this conversion is on the
