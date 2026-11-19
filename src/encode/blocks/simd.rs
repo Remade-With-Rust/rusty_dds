@@ -1604,7 +1604,12 @@ unsafe fn ls_accum_mode6_impl(
         // accumulates `b1[c]`; each lane still performs the same
         // `acc += weight * x` in pixel order, so nothing about the arithmetic
         // moves.
-        let wv = _mm256_castpd_ps(_mm256_broadcast_sd(&*(UW6.as_ptr().add(k) as *const f64)));
+        // `UW6` rows are `[f32; 2]` (4-byte aligned), so read the 8-byte pair
+        // unaligned rather than forming a `&f64` to it — that reference was
+        // misaligned (UB; debug builds abort on it). Same bits, and LLVM still
+        // folds the load into `vbroadcastsd`.
+        let uw = (UW6.as_ptr().add(k) as *const f64).read_unaligned();
+        let wv = _mm256_castpd_ps(_mm256_set1_pd(uw));
         let px = _mm256_loadu_ps(pxv.as_ptr().add(i) as *const f32);
         acc = _mm256_add_ps(acc, _mm256_mul_ps(wv, px));
         aacc = _mm_add_ps(aacc, _mm_loadu_ps(AW6.as_ptr().add(k) as *const f32));
