@@ -34,13 +34,19 @@ pub trait DataFormat {
     fn get_pitch(&self, width: u32) -> Option<u32>;
 
     /// This gets the height of each row of data. Normally it is 1, but for block
-    /// compressed textures, each row is 4 pixels high.
+    /// compressed textures each row is one block high (4 pixels for BCn).
     fn get_pitch_height(&self) -> u32 {
-        if self.get_block_size().is_some() {
-            4
-        } else {
-            1
+        match self.get_block_dimensions() {
+            Some((_, h)) => h,
+            None => 1,
         }
+    }
+
+    /// Width and height in pixels of one compressed block, for compressed
+    /// formats. BCn blocks are 4x4, which is the default for any format with a
+    /// block size; ASTC formats report their footprint.
+    fn get_block_dimensions(&self) -> Option<(u32, u32)> {
+        self.get_block_size().map(|_| (4, 4))
     }
 
     /// This gets the number of bits required to store a single pixel.  It is
@@ -79,11 +85,12 @@ pub trait DataFormat {
 /// allocations. This is the allocation-free equivalent for that path; the boxed
 /// accessor stays for callers who want type erasure.
 ///
-/// The delegation below covers exactly the five methods `DataFormat` requires.
-/// Neither `DxgiFormat` nor `D3DFormat` overrides the two provided methods
-/// (`get_pitch_height`, `get_minimum_mipmap_size_in_bytes`), so inheriting them
-/// here is behaviour-identical to dispatching through `dyn DataFormat`. If
-/// either concrete type ever overrides one, this enum must delegate it too.
+/// The delegation below covers the five methods `DataFormat` requires plus
+/// `get_block_dimensions`, which `DxgiFormat` overrides for ASTC. Neither
+/// concrete type overrides the other provided methods (`get_pitch_height`,
+/// `get_minimum_mipmap_size_in_bytes`), so inheriting them here is
+/// behaviour-identical to dispatching through `dyn DataFormat`. If either
+/// concrete type ever overrides one, this enum must delegate it too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FormatOf {
     Dxgi(DxgiFormat),
@@ -109,6 +116,13 @@ impl DataFormat for FormatOf {
         match self {
             FormatOf::Dxgi(f) => f.get_block_size(),
             FormatOf::D3d(f) => f.get_block_size(),
+        }
+    }
+
+    fn get_block_dimensions(&self) -> Option<(u32, u32)> {
+        match self {
+            FormatOf::Dxgi(f) => f.get_block_dimensions(),
+            FormatOf::D3d(f) => f.get_block_dimensions(),
         }
     }
 

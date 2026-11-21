@@ -88,7 +88,8 @@ impl DataFormat for D3DFormat {
                 .map(|n| n / 8)
         } else {
             let bs = self.get_block_size()?;
-            let blocks = 1.max(width.checked_add(3)? / 4);
+            let (bw, _) = self.get_block_dimensions()?;
+            let blocks = 1.max(width.checked_add(bw - 1)? / bw);
             blocks.checked_mul(bs)
         }
     }
