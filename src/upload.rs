@@ -104,7 +104,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// (stored sRGB bytes are not linearized — same policy as decode).
     pub fn upload_plan_decoded_rgba8(&self, id: SubresourceId) -> Result<UploadPlan, Error> {
         // Ensure we can decode this content (even if gpu_format fails for exotic forms).
-        let _ = self.decode_content()?;
+        let _ = self.rgba8_content()?;
         let surf = self.surface(id)?;
         let pixels = (surf.width as usize)
             .checked_mul(surf.height as usize)

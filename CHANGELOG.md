@@ -3,6 +3,19 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## Unreleased
+
+### Fixed — legacy uncompressed 32-bit headers refused by `decode_rgba8`
+
+A legacy (non-DX10) header with the standard `A8R8G8B8` or `X8R8G8B8` masks
+(also `A8B8G8R8`, `X8B8G8R8`) was classified correctly and decoded by
+`decode_rgba_f32`, but `decode_rgba8`, `decode_rgba8_into`,
+`decode_block_rows_into` and `upload_plan_decoded_rgba8` returned
+`UnsupportedFormat`. `A8R8G8B8` / `A8B8G8R8` now classify as `Bgra8` / `Rgba8`
+(the same byte layouts), and the padded layouts `X8R8G8B8`, `X8B8G8R8` and
+DXGI `B8G8R8X8_UNORM` decode to RGBA8 with alpha 255. Output is byte-identical
+to FFmpeg 8.0.1 on the reported files. Found by ArtCraft's cross-tool corpus.
+
 ## 0.10.0 - 2026-11-18
 
 **`decode_rgba_f32` covers every format** (Remade-With-Rust/rusty_dds#2).

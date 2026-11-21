@@ -148,6 +148,30 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         Err(Error::UnsupportedFormat)
     }
 
+    /// Classify for the RGBA8 decode path: [`Self::decode_content`], plus the
+    /// 32-bit layouts whose fourth byte is padding rather than alpha
+    /// (`X8R8G8B8`, `X8B8G8R8`, `B8G8R8X8_UNORM`). Those return `opaque = true`
+    /// and decode with alpha forced to 255, whatever the padding byte holds —
+    /// the value DirectXTex, FFmpeg and a GPU sampler give an X channel. They
+    /// are not in the encode matrix, so `decode_content` keeps refusing them.
+    pub(crate) fn rgba8_content(&self) -> Result<(DecodeContent, bool), Error> {
+        use crate::format::FormatOf;
+        let err = match self.decode_content() {
+            Ok(c) => return Ok((c, false)),
+            Err(e) => e,
+        };
+        match self.format_of() {
+            Some(FormatOf::Dxgi(
+                DxgiFormat::B8G8R8X8_UNorm
+                | DxgiFormat::B8G8R8X8_Typeless
+                | DxgiFormat::B8G8R8X8_UNorm_sRGB,
+            ))
+            | Some(FormatOf::D3d(D3DFormat::X8R8G8B8)) => Ok((DecodeContent::Bgra8, true)),
+            Some(FormatOf::D3d(D3DFormat::X8B8G8R8)) => Ok((DecodeContent::Rgba8, true)),
+            _ => Err(err),
+        }
+    }
+
     /// Classify this DDS for HDR float decode ([`crate::Dds::decode_rgba_f32`]).
     pub fn hdr_decode_content(&self) -> Result<HdrDecodeContent, Error> {
         match self.get_dxgi_format() {
@@ -212,6 +236,11 @@ fn d3d_decode_content(format: D3DFormat) -> Result<DecodeContent, Error> {
         DXT1 => DecodeContent::Bc1,
         DXT2 | DXT3 => DecodeContent::Bc2,
         DXT4 | DXT5 => DecodeContent::Bc3,
+        // The legacy masks for exactly the DXGI byte layouts above: A8R8G8B8
+        // is B8G8R8A8_UNORM in memory and A8B8G8R8 is R8G8B8A8_UNORM, the same
+        // mapping DirectXTex's legacy table makes.
+        A8R8G8B8 => DecodeContent::Bgra8,
+        A8B8G8R8 => DecodeContent::Rgba8,
         _ => return Err(Error::UnsupportedFormat),
     })
 }

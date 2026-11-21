@@ -20,6 +20,14 @@ Same IDs as the decode/encode completeness tests.
 | C-RGBA | `R8G8B8A8_*` | ✅ | ✅ | ✅ |
 | C-BGRA | `B8G8R8A8_*` | ✅ | ✅ | ✅ |
 
+Legacy (non-DX10) headers whose masks name the same byte layouts classify the
+same way: `A8B8G8R8` is C-RGBA and `A8R8G8B8` is C-BGRA for `decode_content`,
+`decode_rgba8` and `decode_rgba_f32` (their upload plan is the decoded-RGBA8
+path). The padded layouts `X8R8G8B8`, `X8B8G8R8` and `B8G8R8X8_UNORM` decode
+through `decode_rgba8` too, with alpha forced to 255 whatever the padding byte
+holds (DirectXTex and FFmpeg do the same); they are not encode targets, so
+`decode_content` still refuses them.
+
 BC7 encode picks per block: mode 6 is the always-tried baseline, modes 5 and 4
 decouple colour and alpha indices (they win on content whose alpha gradient
 disagrees with its colour gradient — UI, decals), and mode 1 adds two-subset
@@ -67,7 +75,7 @@ decode; GPU names map to `*Srgb` variants in [`GpuFormat`](../src/upload.rs).
 | Format family | Status |
 |---------------|--------|
 | ASTC / ETC / PVRTC | out of scope (not DDS-primary desktop BCn) |
-| Uncompressed float / wide / packed formats | `decode_rgba_f32` only (above); no RGBA8 decode, no encode |
+| Uncompressed float / wide / packed formats (other than the 8-bit RGBA/BGRA/X layouts above) | `decode_rgba_f32` only (above); no RGBA8 decode, no encode |
 | Typeless, `_UINT` / `_SINT`, `A8R3G3B2`, `Q16W16V16U16`, `CxV8U8` | `UnsupportedFormat` |
 | Video / YUV DXGI formats | unsupported |
 
