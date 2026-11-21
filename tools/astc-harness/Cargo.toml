@@ -11,6 +11,9 @@ description = "Differential harness for the rusty_dds ASTC module against the as
 [dependencies]
 rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "__astc_internals", "ktx2-zstd"] }
 png = "0.17"
+# Third-party readers for container gates (C3): the dds crate decodes ASTC via astc-decode.
+dds = "=0.2.0"
+astc-decode = "=0.3.1"
 
 [profile.release]
 debug = 1

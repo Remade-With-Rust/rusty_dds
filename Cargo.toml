@@ -191,5 +191,9 @@ name = "encode_determinism"
 required-features = ["encode"]
 
 [[test]]
+name = "astc_dds"
+required-features = ["astc", "decode"]
+
+[[test]]
 name = "parser_robustness"
 required-features = ["decode"]

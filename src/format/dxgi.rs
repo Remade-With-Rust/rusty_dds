@@ -149,6 +149,51 @@ pub enum DxgiFormat {
     P208                        = 130,
     V208                        = 131,
     V408                        = 132,
+    // ASTC: not a Microsoft-defined DXGI format. These are the de facto
+    // values (image-rs/image-dds, and the tools it interoperates with): three
+    // per footprint, four apart. See docs/formats.md.
+    ASTC_4X4_Typeless           = 133,
+    ASTC_4X4_UNorm              = 134,
+    ASTC_4X4_UNorm_sRGB         = 135,
+    ASTC_5X4_Typeless           = 137,
+    ASTC_5X4_UNorm              = 138,
+    ASTC_5X4_UNorm_sRGB         = 139,
+    ASTC_5X5_Typeless           = 141,
+    ASTC_5X5_UNorm              = 142,
+    ASTC_5X5_UNorm_sRGB         = 143,
+    ASTC_6X5_Typeless           = 145,
+    ASTC_6X5_UNorm              = 146,
+    ASTC_6X5_UNorm_sRGB         = 147,
+    ASTC_6X6_Typeless           = 149,
+    ASTC_6X6_UNorm              = 150,
+    ASTC_6X6_UNorm_sRGB         = 151,
+    ASTC_8X5_Typeless           = 153,
+    ASTC_8X5_UNorm              = 154,
+    ASTC_8X5_UNorm_sRGB         = 155,
+    ASTC_8X6_Typeless           = 157,
+    ASTC_8X6_UNorm              = 158,
+    ASTC_8X6_UNorm_sRGB         = 159,
+    ASTC_8X8_Typeless           = 161,
+    ASTC_8X8_UNorm              = 162,
+    ASTC_8X8_UNorm_sRGB         = 163,
+    ASTC_10X5_Typeless          = 165,
+    ASTC_10X5_UNorm             = 166,
+    ASTC_10X5_UNorm_sRGB        = 167,
+    ASTC_10X6_Typeless          = 169,
+    ASTC_10X6_UNorm             = 170,
+    ASTC_10X6_UNorm_sRGB        = 171,
+    ASTC_10X8_Typeless          = 173,
+    ASTC_10X8_UNorm             = 174,
+    ASTC_10X8_UNorm_sRGB        = 175,
+    ASTC_10X10_Typeless         = 177,
+    ASTC_10X10_UNorm            = 178,
+    ASTC_10X10_UNorm_sRGB       = 179,
+    ASTC_12X10_Typeless         = 181,
+    ASTC_12X10_UNorm            = 182,
+    ASTC_12X10_UNorm_sRGB       = 183,
+    ASTC_12X12_Typeless         = 185,
+    ASTC_12X12_UNorm            = 186,
+    ASTC_12X12_UNorm_sRGB       = 187,
     Force_UInt                  = 0xffffffff_u32
 }
 
@@ -320,8 +365,17 @@ impl DataFormat for DxgiFormat {
             | DxgiFormat::BC7_UNorm
             | DxgiFormat::BC7_UNorm_sRGB => Some(16),
 
+            f if f.astc_info().is_some() => Some(16),
+
             _ => None,
         }
+    }
+
+    fn get_block_dimensions(&self) -> Option<(u32, u32)> {
+        if let Some((w, h, _)) = self.astc_info() {
+            return Some((w, h));
+        }
+        self.get_block_size().map(|_| (4, 4))
     }
 
     fn get_fourcc(&self) -> Option<FourCC> {
@@ -352,6 +406,9 @@ impl DataFormat for DxgiFormat {
 
     // sRGB, float, and compressed, and larger than u32, will all yield None.
     fn requires_extension(&self) -> bool {
+        if self.astc_info().is_some() {
+            return true;
+        }
         matches!(
             *self,
             // Too big, and many are also not maskable types
@@ -439,5 +496,49 @@ impl DxgiFormat {
         } else {
             None
         }
+    }
+}
+
+impl DxgiFormat {
+    /// ASTC block footprint and sRGB flag, for the ASTC values (133..=187).
+    /// `TYPELESS` reports `srgb = false`.
+    pub fn astc_info(&self) -> Option<(u32, u32, bool)> {
+        const FP: [(u32, u32); 14] = [
+            (4, 4),
+            (5, 4),
+            (5, 5),
+            (6, 5),
+            (6, 6),
+            (8, 5),
+            (8, 6),
+            (8, 8),
+            (10, 5),
+            (10, 6),
+            (10, 8),
+            (10, 10),
+            (12, 10),
+            (12, 12),
+        ];
+        let v = *self as u32;
+        if !(133..=187).contains(&v) {
+            return None;
+        }
+        let (i, k) = ((v - 133) / 4, (v - 133) % 4);
+        if k == 3 {
+            return None;
+        }
+        let (w, h) = FP[i as usize];
+        Some((w, h, k == 2))
+    }
+
+    /// The ASTC DXGI value for a footprint (`UNORM` or `UNORM_SRGB`), if the
+    /// footprint is 2D.
+    pub fn from_astc(width: u32, height: u32, srgb: bool) -> Option<DxgiFormat> {
+        use num_traits::FromPrimitive;
+        (133..=187u32)
+            .step_by(4)
+            .filter_map(DxgiFormat::from_u32)
+            .find(|f| matches!(f.astc_info(), Some((w, h, _)) if w == width && h == height))
+            .and_then(|t| DxgiFormat::from_u32(t as u32 + if srgb { 2 } else { 1 }))
     }
 }

@@ -82,6 +82,10 @@ mod decode;
 #[cfg(all(feature = "astc", feature = "decode"))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "astc", feature = "decode"))))]
 pub mod astc;
+#[cfg(all(feature = "astc", feature = "decode"))]
+mod astc_dds;
+#[cfg(all(feature = "astc", feature = "decode"))]
+pub use astc_dds::AstcContent;
 #[cfg(feature = "decode")]
 pub use decode::reference;
 #[cfg(feature = "decode")]
@@ -247,7 +251,7 @@ impl Dds {
             params.alpha_mode,
         );
 
-        Ok(Dds {
+        let mut dds = Dds {
             header: Header::new_dxgi(
                 params.height,
                 params.width,
@@ -258,8 +262,18 @@ impl Dds {
                 params.caps2,
             )?,
             header10: Some(header10),
-            data: vec![0; data_size as usize],
-        })
+            data: Vec::new(),
+        };
+        // ASTC sizes each mip level exactly (see `has_exact_mip_chain`).
+        let data_size = if dds.has_exact_mip_chain() {
+            dds.get_array_stride()?
+                .checked_mul(params.array_layers.unwrap_or(1))
+                .ok_or(Error::OutOfBounds)?
+        } else {
+            data_size
+        };
+        dds.data = vec![0; data_size as usize];
+        Ok(dds)
     }
 
     /// Read a DDS file, accepting a payload of any length.
@@ -537,6 +551,9 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 
     pub fn get_array_stride(&self) -> Result<u32, Error> {
+        if self.has_exact_mip_chain() {
+            return self.exact_array_stride().ok_or(Error::UnsupportedFormat);
+        }
         let size = match self.get_main_texture_size() {
             Some(s) => s,
             None => return Err(Error::UnsupportedFormat),
@@ -544,6 +561,49 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         let mml = self.get_num_mipmap_levels();
         let min_mipmap_size = self.get_min_mipmap_size_in_bytes();
         Ok(get_array_stride(size, min_mipmap_size, mml))
+    }
+
+    /// Formats whose mip chain is sized exactly from the block grid of each
+    /// level (ASTC). Every other format keeps the historical chain, where
+    /// each level is a quarter of the previous one (clamped to the minimum
+    /// mip size); changing that would move existing subresource offsets.
+    pub(crate) fn has_exact_mip_chain(&self) -> bool {
+        self.get_dxgi_format().map_or(false, |f| f.astc_info().is_some())
+    }
+
+    /// Exact bytes of mip `level` of one slice: block columns x block rows x
+    /// depth slices. Only meaningful for [`Self::has_exact_mip_chain`].
+    pub(crate) fn exact_mip_size(&self, level: u32) -> Option<u32> {
+        let format = self.format_of()?;
+        let dim = |v: u32| v.checked_shr(level).unwrap_or(0).max(1);
+        let (w, h, d) = (
+            dim(self.header.width),
+            dim(self.header.height),
+            dim(self.header.depth.unwrap_or(1)),
+        );
+        let pitch = format.get_pitch(w)?;
+        let ph = format.get_pitch_height();
+        if ph == 0 {
+            return None;
+        }
+        let rows = h.checked_add(ph - 1)? / ph;
+        pitch.checked_mul(rows)?.checked_mul(d)
+    }
+
+    /// Exact bytes of one slice's whole mip chain. Past level 32 every
+    /// dimension is 1, so the tail is closed-form (a header may claim
+    /// `mip_map_count = u32::MAX`).
+    fn exact_array_stride(&self) -> Option<u32> {
+        let levels = self.get_num_mipmap_levels();
+        let mut stride: u32 = 0;
+        for level in 0..levels.min(33) {
+            stride = stride.saturating_add(self.exact_mip_size(level)?);
+        }
+        if levels > 33 {
+            let tail = self.exact_mip_size(32)?;
+            stride = stride.saturating_add((levels - 33).saturating_mul(tail));
+        }
+        Some(stride)
     }
 
     pub fn get_num_array_layers(&self) -> u32 {

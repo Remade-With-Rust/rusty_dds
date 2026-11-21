@@ -888,6 +888,130 @@ fn cmd_containers(tmp: &str) -> bool {
     ok
 }
 
+/// C3: ASTC inside DDS. image-dds's 14 files decode like astcenc decoding
+/// their payload; DDS files we write are read by the `dds` crate (which
+/// decodes ASTC through astc-decode 0.3.1, so its pixels are compared with
+/// astc-decode on the same payload, not with ours).
+fn cmd_dds(tmp: &str) -> bool {
+    use rusty_dds::{AlphaMode, D3D10ResourceDimension, Dds, DdsView, DxgiFormat, NewDxgiParams, SubresourceId};
+    let mut ok = true;
+    let mut report = |name: &str, r: Result<(), String>| match &r {
+        Ok(()) => println!("  ok   {name}"),
+        Err(e) => {
+            println!("  FAIL {name}: {e}");
+            ok = false;
+        }
+    };
+    std::fs::create_dir_all(tmp).unwrap();
+    let dir = "/root/astcws/thirdparty/image-dds/test-data/images/astc";
+    let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+    files.sort();
+    for p in files {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        let bytes = std::fs::read(&p).unwrap();
+        let r = (|| -> Result<(), String> {
+            let dds = DdsView::parse(&bytes).map_err(|e| format!("parse: {e}"))?;
+            let c = dds.astc_content().map_err(|e| e.to_string())?;
+            let want = name.trim_start_matches("ASTC ").trim_end_matches(".dds");
+            if c.footprint.to_string() != want {
+                return Err(format!("footprint {} vs name {want}", c.footprint));
+            }
+            let s = dds.astc_surface(SubresourceId::new(0, 0, 0)).map_err(|e| e.to_string())?;
+            if s.data.len() != astc::payload_len(s.width, s.height, 1, s.footprint).unwrap() {
+                return Err("payload length".into());
+            }
+            // The exact mip chain accounts for every byte of the file's payload.
+            let stride = dds.get_array_stride().map_err(|e| e.to_string())? as usize;
+            if stride * dds.get_num_array_layers() as usize != dds.data.len() {
+                return Err(format!("array stride {stride} vs payload {}", dds.data.len()));
+            }
+            // Write the payload as .astc and let astcenc decode it.
+            let mut f = Vec::new();
+            astc::AstcFile::write(&mut f, s.footprint, s.width, s.height, 1, s.data).unwrap();
+            let path = format!("{tmp}/dds_payload.astc");
+            std::fs::write(&path, &f).unwrap();
+            astcenc_agrees(&path, &s, c.srgb, tmp)?;
+            // The DDS entry point gives the same pixels as the surface decode.
+            let img = dds.decode_rgba8(SubresourceId::new(0, 0, 0)).map_err(|e| e.to_string())?;
+            let direct = s.decode_rgba8(if c.srgb { AstcProfile::LdrSrgb } else { AstcProfile::Ldr }).unwrap();
+            if img.pixels != direct.pixels {
+                return Err("decode_rgba8 differs from the surface decode".into());
+            }
+            println!("    {name}: {} {}x{} srgb {} mips {}", c.footprint, s.width, s.height, c.srgb, dds.get_num_mipmap_levels());
+            Ok(())
+        })();
+        report(&format!("C3 image-dds {name}"), r);
+    }
+    // Our DDS-ASTC files, read by the dds crate.
+    for (w, h, fw, fh, mips) in [(64u32, 48u32, 6u32, 6u32, 1u32), (37, 29, 8, 5, 3), (100, 100, 12, 12, 1)] {
+        let fmt = DxgiFormat::from_astc(fw, fh, false).unwrap();
+        let mut d = Dds::new_dxgi(NewDxgiParams {
+            height: h,
+            width: w,
+            depth: None,
+            format: fmt,
+            mipmap_levels: Some(mips),
+            array_layers: None,
+            caps2: None,
+            is_cubemap: false,
+            resource_dimension: D3D10ResourceDimension::Texture2D,
+            alpha_mode: AlphaMode::Straight,
+        })
+        .unwrap();
+        let fp = AstcFootprint::new_2d(fw, fh).unwrap();
+        let lm = gen::legal_modes(fp);
+        let mut rng = gen::Rng::new(w as u64 * 31 + h as u64);
+        let mut legal_blocks = |n: usize| -> Vec<u8> {
+            // Encoder-like content: legal blocks only (astc-decode panics or
+            // errors on some illegal encodings, which is not under test here).
+            let mut v = Vec::new();
+            while v.len() < n * 16 {
+                let b = gen::mixed(&mut rng, fp, &lm);
+                if ai::parse(&b, fp).kind == ai::BlockKind::Normal {
+                    let cems_ldr = ai::parse(&b, fp).cem.iter().all(|c| !matches!(c, 2 | 3 | 7 | 11 | 14 | 15));
+                    if cems_ldr {
+                        v.extend_from_slice(&b);
+                    }
+                }
+            }
+            v
+        };
+        let total = d.data.len();
+        let payload = legal_blocks(total / 16);
+        d.data.copy_from_slice(&payload);
+        let mut file = Vec::new();
+        d.write(&mut file).unwrap();
+        let r = (|| -> Result<(), String> {
+            let mut dec = dds::Decoder::new(std::io::Cursor::new(&file)).map_err(|e| format!("dds crate: {e:?}"))?;
+            let mut img = vec![0u8; (w * h * 4) as usize];
+            dec.read_surface(dds::ImageViewMut::new(&mut img[..], dds::Size::new(w, h), dds::ColorFormat::RGBA_U8).unwrap())
+                .map_err(|e| format!("dds crate decode: {e:?}"))?;
+            // astc-decode on the same level-0 payload.
+            let ours = DdsView::parse(&file).unwrap();
+            let s = ours.astc_surface(SubresourceId::new(0, 0, 0)).unwrap();
+            let mut ad = vec![0u8; (w * h * 4) as usize];
+            astc_decode::astc_decode(s.data, w, h, astc_decode::Footprint::new(fw, fh), |x, y, c| {
+                let i = ((y * w + x) * 4) as usize;
+                ad[i..i + 4].copy_from_slice(&c);
+            })
+            .map_err(|e| format!("astc-decode: {e:?}"))?;
+            if img != ad {
+                return Err("dds crate pixels differ from astc-decode on our payload".into());
+            }
+            // Every mip level's range is exact.
+            for m in 0..mips {
+                let s = ours.astc_surface(SubresourceId::new(m, 0, 0)).unwrap();
+                if s.data.len() != astc::payload_len(s.width, s.height, 1, fp).unwrap() {
+                    return Err(format!("mip {m} length"));
+                }
+            }
+            Ok(())
+        })();
+        report(&format!("C3 our {fw}x{fh} DDS {w}x{h} mips {mips} read by dds 0.2"), r);
+    }
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -912,6 +1036,7 @@ fn main() {
             bad == 0
         }
         Some("containers") => cmd_containers(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
+        Some("dds") => cmd_dds(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();
