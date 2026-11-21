@@ -56,8 +56,12 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// [`SingleChannel::Grey`].
     pub fn decode_rgba8(&self, id: SubresourceId) -> Result<ImageRgba8, Error> {
         let surf = self.surface(id)?;
-        let kind = self.decode_content()?;
-        let pixels = decode_surface_pixels(kind, surf.data, surf.width, surf.height, surf.depth)?;
+        let (kind, opaque) = self.rgba8_content()?;
+        let mut pixels =
+            decode_surface_pixels(kind, surf.data, surf.width, surf.height, surf.depth)?;
+        if opaque {
+            force_opaque(&mut pixels);
+        }
         Ok(ImageRgba8 {
             width: surf.width,
             height: surf.height,
@@ -92,7 +96,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         opts: DecodeOptions,
     ) -> Result<ImageRgba8, Error> {
         let mut img = self.decode_rgba8(id)?;
-        apply_grey_u8(self.decode_content()?, opts, &mut img.pixels);
+        apply_grey_u8(self.rgba8_content()?.0, opts, &mut img.pixels);
         Ok(img)
     }
 
@@ -104,8 +108,17 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         opts: DecodeOptions,
     ) -> Result<(u32, u32, u32), Error> {
         let dims = self.decode_rgba8_into(id, dst)?;
-        apply_grey_u8(self.decode_content()?, opts, dst);
+        apply_grey_u8(self.rgba8_content()?.0, opts, dst);
         Ok(dims)
+    }
+}
+
+/// Alpha to 255 for a layout whose fourth byte is padding (`X8R8G8B8` and
+/// kin): the payload's X byte is unspecified, often 0, and must not read as
+/// transparency.
+fn force_opaque(px: &mut [u8]) {
+    for p in px.chunks_exact_mut(4) {
+        p[3] = 255;
     }
 }
 
@@ -529,7 +542,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<u8>,
     ) -> Result<(u32, u32, u32), Error> {
         let surf = self.surface(id)?;
-        let kind = self.decode_content()?;
+        let (kind, opaque) = self.rgba8_content()?;
         let (w, h, d) = (surf.width, surf.height, surf.depth.max(1));
 
         // Validate the SOURCE before sizing the destination. `w` and `h` come
@@ -561,18 +574,22 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         }
 
         if d == 1 {
-            return decode_slice_into(kind, surf.data, w, h, dst).map(|()| (w, h, d));
+            decode_slice_into(kind, surf.data, w, h, dst)?;
+        } else {
+            let out_slice = (w as usize) * (h as usize) * 4;
+            for z in 0..d as usize {
+                let src = surf
+                    .data
+                    .get(z * slice_bytes..(z + 1) * slice_bytes)
+                    .ok_or(Error::TruncatedData)?;
+                let dst_z = dst
+                    .get_mut(z * out_slice..(z + 1) * out_slice)
+                    .ok_or(Error::OutOfBounds)?;
+                decode_slice_into(kind, src, w, h, dst_z)?;
+            }
         }
-        let out_slice = (w as usize) * (h as usize) * 4;
-        for z in 0..d as usize {
-            let src = surf
-                .data
-                .get(z * slice_bytes..(z + 1) * slice_bytes)
-                .ok_or(Error::TruncatedData)?;
-            let dst_z = dst
-                .get_mut(z * out_slice..(z + 1) * out_slice)
-                .ok_or(Error::OutOfBounds)?;
-            decode_slice_into(kind, src, w, h, dst_z)?;
+        if opaque {
+            force_opaque(dst);
         }
         Ok((w, h, d))
     }
@@ -617,7 +634,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut [u8],
     ) -> Result<(), Error> {
         let surf = self.surface(id)?;
-        let kind = self.decode_content()?;
+        let (kind, opaque) = self.rgba8_content()?;
         if surf.depth.max(1) != 1 {
             // Volume textures stack slices; splitting them wants a slice index
             // as well as a row range, and no caller has asked for it yet.
@@ -641,14 +658,18 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             .get(rows.start as usize * row_pitch..rows.end as usize * row_pitch)
             .ok_or(Error::TruncatedData)?;
 
-        decode_slice_into(kind, src, surf.width, y1 - y0, dst)
+        decode_slice_into(kind, src, surf.width, y1 - y0, dst)?;
+        if opaque {
+            force_opaque(dst);
+        }
+        Ok(())
     }
 
     /// Block rows in one subresource — the unit [`DdsBase::decode_block_rows_into`]
     /// splits on. Four pixel rows each for BCn, one for uncompressed formats.
     pub fn block_rows(&self, id: SubresourceId) -> Result<u32, Error> {
         let surf = self.surface(id)?;
-        let bh = block_height(self.decode_content()?);
+        let bh = block_height(self.rgba8_content()?.0);
         Ok(surf.height.div_ceil(bh))
     }
 }
