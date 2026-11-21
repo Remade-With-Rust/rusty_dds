@@ -27,3 +27,9 @@ bench/dds02/cache/
 bench/dds02/Cargo.lock
 bench/dds02/arms/
 bench/dds02/results/
+
+# ASTC oracle and harness (tools/astc-oracle, tools/astc-harness): build output
+tools/astc-oracle/oracle
+tools/astc-harness/target/
+tools/astc-harness/Cargo.lock
+corpus/astc/

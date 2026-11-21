@@ -56,11 +56,18 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["decode", "encode", "simd"]
+default = ["decode", "encode", "simd", "astc"]
 # CPU BCn/RGBA decode via bcdec_rs (pure Rust).
 decode = ["dep:bcdec_rs"]
 # CPU RGBA → DDS encode (pure Rust; no extra deps).
 encode = []
+# ASTC: decode (with `decode`), encode (with `encode`) and the .astc / KTX
+# containers. Pure Rust, no extra dependencies.
+astc = []
+# DEVELOPMENT ONLY. Exposes the ASTC decoder's internal stages
+# (`astc::internals`) to the differential harness in tools/astc-harness.
+# Not a stable API.
+__astc_internals = ["astc"]
 # AVX2 twins of the hot encode kernels (runtime-detected, scalar fallback,
 # byte-identical output either way). Off => zero `unsafe` in the crate.
 simd = []

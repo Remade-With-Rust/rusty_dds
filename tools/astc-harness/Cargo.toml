@@ -1,0 +1,17 @@
+[package]
+name = "astc_harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Differential harness for the rusty_dds ASTC module against the astc-oracle (astcenc 5.7.1). WSL dev tool; not part of the published crate."
+
+# Standalone: never a member of the library package.
+[workspace]
+
+[dependencies]
+rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "__astc_internals"] }
+png = "0.17"
+
+[profile.release]
+debug = 1
+overflow-checks = true
