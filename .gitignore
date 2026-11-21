@@ -33,3 +33,5 @@ tools/astc-oracle/oracle
 tools/astc-harness/target/
 tools/astc-harness/Cargo.lock
 corpus/astc/
+bench/astc/target/
+bench/astc/Cargo.lock

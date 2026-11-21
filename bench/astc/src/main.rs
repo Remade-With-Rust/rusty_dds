@@ -1,0 +1,221 @@
+//! rusty_dds ASTC decode against the two pure-Rust ASTC decoders on crates.io.
+//!
+//!   astc_bench <file.astc>... [--rounds N] [--profile ldr|srgb]
+//!
+//! Method (printed with every run):
+//! * One binary links all arms, so they share compiler, flags and the global
+//!   allocator: rusty_alloc (`rusty_alloc-api`), the house shipping allocator.
+//! * Correctness first: each baseline's 8-bit output is compared with ours
+//!   (ours is bit-exact with astcenc 5.7.1 `decode_unorm8`, gated in
+//!   tools/astc-harness); the differing-pixel count is printed.
+//! * Every arm decodes the same payload to 8-bit RGBA into a buffer allocated
+//!   once (astc-decode writes through its per-texel callback; texture2ddecoder
+//!   writes packed u32). No file I/O in the timed region.
+//! * Arms interleave in-process and the order reverses every round (ABBA).
+//!   Each sample runs K decodes, K calibrated so a sample is >= 50 ms.
+//! * Null arm: ours twice under two names; its spread is the noise floor.
+//! * Pin the process yourself (`taskset -c 2` on Linux, affinity on Windows).
+
+#[global_allocator]
+static GLOBAL_ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+
+use rusty_dds::astc::{self, AstcFootprint, AstcProfile};
+use std::hint::black_box;
+use std::time::Instant;
+
+struct Input {
+    name: String,
+    fp: AstcFootprint,
+    w: u32,
+    h: u32,
+    payload: Vec<u8>,
+}
+
+fn load(path: &str) -> Input {
+    let d = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    assert_eq!(&d[..4], &[0x13, 0xAB, 0xA1, 0x5C], "{path}: not an .astc file");
+    let fp = AstcFootprint::new_3d(d[4] as u32, d[5] as u32, d[6] as u32).expect("footprint");
+    let dim = |o: usize| d[o] as u32 | (d[o + 1] as u32) << 8 | (d[o + 2] as u32) << 16;
+    let (w, h, z) = (dim(7), dim(10), dim(13));
+    assert!(z == 1 && !fp.is_3d(), "2D only");
+    let n = astc::payload_len(w, h, 1, fp).unwrap();
+    Input {
+        name: std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned(),
+        fp,
+        w,
+        h,
+        payload: d[16..16 + n].to_vec(),
+    }
+}
+
+type Arm<'a> = (&'static str, Box<dyn FnMut() + 'a>);
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut rounds = 15usize;
+    let mut profile = AstcProfile::Ldr;
+    let mut files = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--rounds" => {
+                rounds = args[i + 1].parse().unwrap();
+                i += 1;
+            }
+            "--profile" => {
+                profile = if args[i + 1] == "srgb" { AstcProfile::LdrSrgb } else { AstcProfile::Ldr };
+                i += 1;
+            }
+            f => files.push(f.to_string()),
+        }
+        i += 1;
+    }
+    println!("allocator: rusty_alloc (rusty_alloc-api 2.5.0); profile {profile:?}; {rounds} ABBA rounds; median MT/s");
+    println!("| input | footprint | rusty_dds | null arm | astc-decode 0.3.1 | texture2ddecoder 0.1.2 | ratio vs faster baseline | baseline pixels differing (astc-decode / t2d) |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for f in &files {
+        let inp = load(f);
+        let (w, h) = (inp.w, inp.h);
+        let px = (w * h) as usize;
+        let mut ours = vec![0u8; px * 4];
+        astc::decode_rgba8_into(&inp.payload, w, h, 1, inp.fp, profile, &mut ours).unwrap();
+        // Correctness: baselines against ours.
+        let mut ad = vec![0u8; px * 4];
+        astc_decode::astc_decode(
+            &inp.payload[..],
+            w,
+            h,
+            astc_decode::Footprint::new(inp.fp.width(), inp.fp.height()),
+            |x, y, c| {
+                let i = ((y * w + x) * 4) as usize;
+                ad[i..i + 4].copy_from_slice(&c);
+            },
+        )
+        .unwrap();
+        let mut t2 = vec![0u32; px];
+        texture2ddecoder::decode_astc(
+            &inp.payload,
+            w as usize,
+            h as usize,
+            inp.fp.width() as usize,
+            inp.fp.height() as usize,
+            &mut t2,
+        )
+        .unwrap();
+        let diff_ad = ours.chunks_exact(4).zip(ad.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        let diff_t2 = ours
+            .chunks_exact(4)
+            .zip(t2.iter())
+            .filter(|(a, p)| {
+                let b = p.to_le_bytes();
+                a[..] != [b[2], b[1], b[0], b[3]]
+            })
+            .count();
+
+        let payload = &inp.payload;
+        let fp = inp.fp;
+        let mut buf_a = vec![0u8; px * 4];
+        let mut buf_b = vec![0u8; px * 4];
+        let mut buf_c = vec![0u8; px * 4];
+        let mut buf_d = vec![0u32; px];
+        let mut arms: Vec<Arm> = vec![
+            (
+                "rusty_dds",
+                Box::new(|| {
+                    astc::decode_rgba8_into(payload, w, h, 1, fp, profile, &mut buf_a).unwrap();
+                    black_box(&buf_a);
+                }),
+            ),
+            (
+                "null",
+                Box::new(|| {
+                    astc::decode_rgba8_into(payload, w, h, 1, fp, profile, &mut buf_b).unwrap();
+                    black_box(&buf_b);
+                }),
+            ),
+            (
+                "astc-decode",
+                Box::new(|| {
+                    astc_decode::astc_decode(
+                        &payload[..],
+                        w,
+                        h,
+                        astc_decode::Footprint::new(fp.width(), fp.height()),
+                        |x, y, c| {
+                            let i = ((y * w + x) * 4) as usize;
+                            buf_c[i..i + 4].copy_from_slice(&c);
+                        },
+                    )
+                    .unwrap();
+                    black_box(&buf_c);
+                }),
+            ),
+            (
+                "texture2ddecoder",
+                Box::new(|| {
+                    texture2ddecoder::decode_astc(
+                        payload,
+                        w as usize,
+                        h as usize,
+                        fp.width() as usize,
+                        fp.height() as usize,
+                        &mut buf_d,
+                    )
+                    .unwrap();
+                    black_box(&buf_d);
+                }),
+            ),
+        ];
+        // One K for all arms (work parity), set by the fastest arm so every sample is >= 50 ms.
+        let mut k = 1usize;
+        for (_, arm) in arms.iter_mut() {
+            let t = Instant::now();
+            arm();
+            let s = t.elapsed().as_secs_f64();
+            k = k.max((0.05 / s).ceil() as usize);
+        }
+        let mut samples: Vec<Vec<f64>> = vec![Vec::new(); arms.len()];
+        for r in 0..rounds {
+            let order: Vec<usize> = if r % 2 == 0 {
+                (0..arms.len()).collect()
+            } else {
+                (0..arms.len()).rev().collect()
+            };
+            for a in order {
+                let t = Instant::now();
+                for _ in 0..k {
+                    (arms[a].1)();
+                }
+                let s = t.elapsed().as_secs_f64();
+                samples[a].push(px as f64 * k as f64 / s / 1e6);
+            }
+        }
+        let med: Vec<f64> = samples.iter_mut().map(|s| median(s)).collect();
+        let best_base = med[2].max(med[3]);
+        println!(
+            "| {} {}x{} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.2}x | {} / {} of {} |",
+            inp.name,
+            w,
+            h,
+            fp,
+            med[0],
+            med[1],
+            med[2],
+            med[3],
+            med[0] / best_base,
+            diff_ad,
+            diff_t2,
+            px
+        );
+    }
+}

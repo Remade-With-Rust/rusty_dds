@@ -1,0 +1,19 @@
+[package]
+name = "astc_bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "rusty_dds ASTC decode vs astc-decode 0.3.1 and texture2ddecoder 0.1.2: correctness-gated, ABBA-interleaved, under rusty_alloc. Not part of the published crate."
+
+# Standalone: never a member of the library package.
+[workspace]
+
+[dependencies]
+rusty_dds = { path = "../..", default-features = false, features = ["decode", "astc", "simd"] }
+astc-decode = "=0.3.1"
+texture2ddecoder = "=0.1.2"
+# House rule: every bench binary runs under rusty_alloc (the shipping allocator).
+rusty_alloc-api = "=2.5.0"
+
+[profile.release]
+debug = 1
