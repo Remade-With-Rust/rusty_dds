@@ -191,6 +191,10 @@ name = "encode_determinism"
 required-features = ["encode"]
 
 [[test]]
+name = "astc_containers"
+required-features = ["astc", "decode"]
+
+[[test]]
 name = "astc_dds"
 required-features = ["astc", "decode"]
 
