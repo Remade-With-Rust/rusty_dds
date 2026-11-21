@@ -105,12 +105,15 @@ static int cmd_decode(int argc, char** argv) {
 			o16.assign(px * 4, 0);
 			for (unsigned z = 0; z < d; z++) slices[z] = o16.data() + (size_t)z * w * h * 4;
 		}
-		astcenc_image img;
+		astcenc_image img{}; // value-init: newer astcenc adds fields (row_stride)
 		img.dim_x = w; img.dim_y = h; img.dim_z = d;
 		img.data_type = u8 ? ASTCENC_TYPE_U8 : ASTCENC_TYPE_F16;
 		img.data = slices.data();
 		astcenc_error e = astcenc_decompress_image(ctx, in.data(), got * 16, &img, &swz, 0);
-		if (e != ASTCENC_SUCCESS) die(astcenc_get_error_string(e));
+		// astcenc 6.x decodes every block and then reports ASTCENC_ERR_BAD_BLOCK
+		// if any was an error block; 5.x reports success. Both outputs are valid.
+		if (e != ASTCENC_SUCCESS && strcmp(astcenc_get_error_string(e), "ASTCENC_ERR_BAD_BLOCK") != 0)
+			die(astcenc_get_error_string(e));
 		astcenc_decompress_reset(ctx);
 		// Reorder the strip into per-block texel order.
 		for (size_t b = 0; b < got; b++) {

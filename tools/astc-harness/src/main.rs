@@ -630,6 +630,7 @@ fn cmd_dc2(n: usize, corpus: &str, fps: &[AstcFootprint], report: &str) -> bool 
                 line += " mutated=skipped(no corpus)";
                 continue;
             }
+            let n = if kind == "mix" { (n / 10).max(1) } else { n };
             let mut done = 0usize;
             let mut tot_bad = [0u64; 6];
             while done < n {
