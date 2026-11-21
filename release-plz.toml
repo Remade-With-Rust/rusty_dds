@@ -1,0 +1,9 @@
+# release-plz configuration (https://release-plz.dev/docs/config).
+#
+# On a 0.x crate release-plz treats a `feat` commit as a patch bump by default.
+# This crate signals new public surface with a minor bump (0.10 -> 0.11), so a
+# `feat` always increments the minor version. Never hand-bump `version` in
+# Cargo.toml: a hand bump makes the next release PR re-bump for the changelog.
+
+[workspace]
+features_always_increment_minor = true
