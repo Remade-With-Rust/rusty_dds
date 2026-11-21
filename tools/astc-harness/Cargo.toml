@@ -9,7 +9,7 @@ description = "Differential harness for the rusty_dds ASTC module against the as
 [workspace]
 
 [dependencies]
-rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "__astc_internals"] }
+rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "__astc_internals", "ktx2-zstd"] }
 png = "0.17"
 
 [profile.release]

@@ -32,6 +32,7 @@
 
 mod block_mode;
 mod cem;
+pub mod container;
 pub(crate) mod decode;
 mod footprint;
 mod infill;
@@ -48,6 +49,8 @@ pub mod testgen;
 #[cfg(test)]
 mod tests;
 
+pub use container::ktx::{self, Ktx2View, KtxView};
+pub use container::{AstcFile, AstcSurface};
 pub use footprint::{block_rows, payload_len, AstcFootprint};
 pub use parse::IllegalReason;
 pub use reference::{decode_block_f16, decode_block_rgba8, illegal_reason};

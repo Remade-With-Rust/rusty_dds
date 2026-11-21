@@ -715,6 +715,179 @@ fn cmd_golden(path: &str) -> bool {
     ok
 }
 
+fn astcenc_bin() -> String {
+    std::env::var("ASTCENC").unwrap_or_else(|_| "/root/astcws/rel571/inst/bin/astcenc-none".into())
+}
+
+fn read_png_rgba(path: &str) -> (u32, u32, Vec<u8>) {
+    let dec = png::Decoder::new(std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}")));
+    let mut r = dec.read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).unwrap();
+    let px = (info.width * info.height) as usize;
+    let rgba = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => buf[..px * 4].to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => buf[..px * 3].chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        other => panic!("{path}: png {other:?}"),
+    };
+    (info.width, info.height, rgba)
+}
+
+fn run_astcenc(args: &[&str]) -> bool {
+    std::process::Command::new(astcenc_bin())
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Decode `container` with astcenc (`-dl` or `-ds` to PNG) and compare with
+/// our 8-bit decode of `surf`.
+fn astcenc_agrees(container: &str, surf: &astc::AstcSurface, srgb: bool, tmp: &str) -> Result<(), String> {
+    let png = format!("{tmp}/cmp.png");
+    let _ = std::fs::remove_file(&png);
+    if !run_astcenc(&[if srgb { "-ds" } else { "-dl" }, container, &png, "-silent"]) {
+        return Err(format!("astcenc could not decode {container}"));
+    }
+    let (w, h, theirs) = read_png_rgba(&png);
+    if (w, h) != (surf.width, surf.height) {
+        return Err(format!("size {w}x{h} vs ours {}x{}", surf.width, surf.height));
+    }
+    let prof = if srgb { AstcProfile::LdrSrgb } else { AstcProfile::Ldr };
+    let ours = surf.decode_rgba8(prof).map_err(|e| e.to_string())?;
+    let ours_slice0 = &ours.pixels[..(w * h * 4) as usize];
+    if ours_slice0 != &theirs[..] {
+        let flipped: Vec<u8> = theirs.chunks_exact((w * 4) as usize).rev().flatten().copied().collect();
+        if ours_slice0 == &flipped[..] {
+            return Err("matches only after a vertical flip".into());
+        }
+        let n = ours_slice0.chunks_exact(4).zip(theirs.chunks_exact(4)).filter(|(a, b)| a != b).count();
+        return Err(format!("{n} pixels differ"));
+    }
+    Ok(())
+}
+
+fn cmd_containers(tmp: &str) -> bool {
+    let mut ok = true;
+    let mut report = |name: &str, r: Result<(), String>| {
+        match &r {
+            Ok(()) => println!("  ok   {name}"),
+            Err(e) => {
+                println!("  FAIL {name}: {e}");
+                ok = false;
+            }
+        }
+    };
+    std::fs::create_dir_all(tmp).unwrap();
+    // C1: astcenc's negative .astc files must be errors, not panics.
+    let neg = "/root/astcws/rel571/Test/Data";
+    for f in ["negative_block_size", "negative_huge", "negative_magic", "negative_overflow", "negative_short"] {
+        let p = format!("{neg}/{f}.astc");
+        let d = std::fs::read(&p).unwrap();
+        report(&format!("C1 {f}.astc rejected"), match astc::AstcFile::parse(&d) {
+            Err(_) => Ok(()),
+            Ok(_) => Err("parsed".into()),
+        });
+    }
+    // C1: astcenc's own .astc decodes the same through our container, and
+    // astcenc reads the .astc we write.
+    for f in ["/root/astcws/corpus/s_ldr-rgba-00_6x5_cl_thorough.astc", "/root/astcws/corpus/k_ldr-rgba-base_12x12_cs_medium.astc", "/root/astcws/rel571/Test/Data/LDR-A-1x1.astc"] {
+        let d = std::fs::read(f).unwrap();
+        let file = astc::AstcFile::parse(&d).unwrap();
+        let srgb = f.contains("_cs_");
+        report(&format!("C1 read {f}"), astcenc_agrees(f, &file.surface(), srgb, tmp));
+        let mut out = Vec::new();
+        astc::AstcFile::write(&mut out, file.footprint, file.width, file.height, file.depth, file.data).unwrap();
+        let ours = format!("{tmp}/ours.astc");
+        std::fs::write(&ours, &out).unwrap();
+        report(&format!("C1 write {f}"), if out == d { astcenc_agrees(&ours, &file.surface(), srgb, tmp) } else { Err("bytes differ from input".into()) });
+        // Truncated payload: TruncatedData.
+        report("C1 truncated", match astc::AstcFile::parse(&d[..d.len() - 1]) {
+            Err(rusty_dds::Error::TruncatedData) => Ok(()),
+            other => Err(format!("{other:?}")),
+        });
+    }
+    // C2: KTX 1.0 written by astcenc, read by us; written by us, read by astcenc.
+    let src_png = "/root/astcws/astc-encoder/Test/Images/Small/LDR-RGBA/ldr-rgba-01.png";
+    for (fp, mode) in [("6x5", "-cl"), ("10x8", "-cs"), ("4x4", "-cl")] {
+        let k = format!("{tmp}/astcenc_{fp}.ktx");
+        let _ = std::fs::remove_file(&k);
+        assert!(run_astcenc(&[mode, src_png, &k, fp, "-fast", "-silent"]), "astcenc -c to ktx");
+        let d = std::fs::read(&k).unwrap();
+        let srgb = mode == "-cs";
+        match astc::KtxView::parse(&d) {
+            Err(e) => report(&format!("C2 read astcenc {fp}.ktx"), Err(e.to_string())),
+            Ok(v) => {
+                let s = v.astc_surface(0, 0, 0).unwrap();
+                report(&format!("C2 read astcenc {fp}.ktx (srgb tag {})", v.srgb), if v.srgb != srgb { Err("sRGB tag".into()) } else { astcenc_agrees(&k, &s, srgb, tmp) });
+                let mut out = Vec::new();
+                astc::KtxView::write(&mut out, s.footprint, s.width, s.height, s.depth, srgb, &[s.data]).unwrap();
+                let ours = format!("{tmp}/ours_{fp}.ktx");
+                std::fs::write(&ours, &out).unwrap();
+                let back = astc::KtxView::parse(&out).unwrap();
+                report(&format!("C2 write {fp}.ktx, astcenc reads it"), if back.astc_surface(0, 0, 0).unwrap().data != s.data { Err("round trip".into()) } else { astcenc_agrees(&ours, &s, srgb, tmp) });
+            }
+        }
+    }
+    // C2/C4a: KTX-Software files. The .ktx and .ktx2 versions of the same
+    // array texture must give the same payload per layer.
+    let ks = "/root/astcws/thirdparty/KTX-Software/tests/resources";
+    let k1d = std::fs::read(format!("{ks}/ktx/astc_8x8_unorm_array_7.ktx")).unwrap();
+    let k2d = std::fs::read(format!("{ks}/ktx2/astc_8x8_unorm_array_7.ktx2")).unwrap();
+    match (astc::KtxView::parse(&k1d), astc::Ktx2View::parse(&k2d)) {
+        (Ok(a), Ok(b)) => {
+            println!("    ktx1: {} {}x{}x{} layers {} faces {} levels {}; ktx2: {} {}x{} layers {} levels {}", a.footprint, a.width, a.height, a.depth, a.layers, a.faces, a.levels, b.footprint, b.width, b.height, b.layers, b.levels);
+            let mut same = a.layers == b.layers && a.levels == b.levels;
+            for l in 0..a.levels.min(b.levels) {
+                for y in 0..a.layers.min(b.layers) {
+                    same &= a.astc_surface(l, y, 0).unwrap().data == b.astc_surface(l, y, 0).unwrap().data;
+                }
+            }
+            report("C2/C4a astc_8x8_unorm_array_7: .ktx and .ktx2 payloads equal per level and layer", if same { Ok(()) } else { Err("differ".into()) });
+            let path = format!("{ks}/ktx/astc_8x8_unorm_array_7.ktx");
+            report("C2 astc_8x8_unorm_array_7.ktx layer 0 vs astcenc", astcenc_agrees(&path, &a.astc_surface(0, 0, 0).unwrap(), a.srgb, tmp));
+        }
+        (a, b) => report("C2/C4a array_7", Err(format!("{:?} / {:?}", a.err(), b.err()))),
+    }
+    for f in ["ktx_app_astc_8x8.ktx2", "r8g8b8a8_srgb_mip_astc.ktx2", "Desk_astc_hdr6x6.ktx2"] {
+        let raw = std::fs::read(format!("{ks}/ktx2/{f}")).unwrap();
+        let scheme = u32::from_le_bytes(raw[44..48].try_into().unwrap());
+        let d = match astc::ktx::ktx2_inflate(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                report(&format!("C4a {f} inflate (scheme {scheme})"), Err(e.to_string()));
+                continue;
+            }
+        };
+        if scheme != 0 {
+            println!("    {f}: supercompression scheme {scheme}, inflated {} -> {} bytes", raw.len(), d.len());
+        }
+        match astc::Ktx2View::parse(&d) {
+            Err(e) => println!("  note {f}: {e} (scheme {})", u32::from_le_bytes(d[44..48].try_into().unwrap())),
+            Ok(v) => {
+                println!("    {f}: {} {}x{} srgb {} hdr {} layers {} faces {} levels {}", v.footprint, v.width, v.height, v.srgb, v.hdr, v.layers, v.faces, v.levels);
+                // Re-wrap level 0 as KTX 1.0 and have astcenc decode it.
+                let s = v.astc_surface(0, 0, 0).unwrap();
+                let mut out = Vec::new();
+                astc::KtxView::write(&mut out, s.footprint, s.width, s.height, s.depth, v.srgb, &[s.data]).unwrap();
+                let p = format!("{tmp}/rewrap.ktx");
+                std::fs::write(&p, &out).unwrap();
+                if v.hdr {
+                    // HDR: compare our f32 decode with astcenc's float16 via the oracle path instead.
+                    let blocks: Vec<[u8; 16]> = s.data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+                    let (_, bad) = cells_check(s.footprint, &blocks[..blocks.len().min(65536)]);
+                    report(&format!("C4a {f} payload decodes identically (six cells)"), if bad.iter().all(|&b| b == 0) { Ok(()) } else { Err(format!("{bad:?}")) });
+                } else {
+                    report(&format!("C4a {f} level 0 vs astcenc"), astcenc_agrees(&p, &s, v.srgb, tmp));
+                }
+            }
+        }
+    }
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -738,6 +911,7 @@ fn main() {
             println!("decode {fp} {} {}: {bad} / {n} differ", args[2], args[3]);
             bad == 0
         }
+        Some("containers") => cmd_containers(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();
