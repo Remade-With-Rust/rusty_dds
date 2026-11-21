@@ -3,7 +3,7 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
-## Unreleased
+## 0.10.1 - 2026-11-21
 
 ### Fixed — legacy uncompressed 32-bit headers refused by `decode_rgba8`
 
