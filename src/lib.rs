@@ -44,6 +44,10 @@
 #[macro_use]
 extern crate bitflags;
 
+// The ASTC core uses `alloc` paths only (no `std`), so it can move into a
+// `no_std` crate later.
+extern crate alloc;
+
 mod error;
 pub use error::*;
 

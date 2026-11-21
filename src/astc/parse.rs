@@ -82,7 +82,7 @@ pub struct SymbolicBlock {
 }
 
 impl SymbolicBlock {
-    const fn empty(kind: BlockKind, mode: u16) -> Self {
+    pub(crate) const fn empty(kind: BlockKind, mode: u16) -> Self {
         Self {
             kind,
             mode,

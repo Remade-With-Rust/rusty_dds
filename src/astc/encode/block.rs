@@ -1,0 +1,937 @@
+//! One-block LDR encoder.
+//!
+//! Search (written from the specification and the HPG 2012 paper; see
+//! docs/plans/astc.md section 7):
+//!
+//! 1. A constant block becomes an LDR void-extent block.
+//! 2. For each partitioning considered (one partition, then the best-ranked
+//!    two-partition patterns after a two-means clustering), each partition
+//!    gets a principal-axis line fit: ideal endpoints and an ideal weight per
+//!    texel. Dual-plane candidates fit one channel on its own line.
+//! 3. For every legal block mode, the ideal weights are fitted to the mode's
+//!    weight grid (least squares through the exact infill), quantised to its
+//!    weight range, and an error estimate (weight error along each line plus
+//!    the expected endpoint quantisation error at the colour range the
+//!    remaining bits allow) ranks the candidate.
+//! 4. The best few candidates are encoded for real: endpoints are refitted to
+//!    the quantised weights (least squares), quantised in every applicable
+//!    endpoint mode, and the block is evaluated EXACTLY with the decoder's own
+//!    endpoint and interpolation primitives. Weights are then re-derived from
+//!    the decoded endpoints and the loop repeats.
+//!
+//! Estimates only rank; the final choice is the exact decoded error, so the
+//! encoder's reconstruction is the decoder's output by construction.
+
+use alloc::vec::Vec;
+
+use super::context::{Ctx, Mode};
+use crate::astc::cem;
+use crate::astc::ise::LEVELS;
+use crate::astc::parse::{BlockKind, SymbolicBlock};
+use crate::astc::quant::{color_range, weight_levels, COLOR_NEAREST};
+use crate::astc::texel::lerp;
+use crate::astc::AstcProfile;
+
+/// Preset-derived search limits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Params {
+    /// Highest partition count tried (1 or 2 today).
+    pub max_partitions: u8,
+    /// Two-partition patterns fully searched, best clustering match first.
+    pub part2_candidates: usize,
+    /// Candidates (mode x endpoint class) encoded exactly per partitioning.
+    pub exact_candidates: usize,
+    /// Weight/endpoint refinement passes per exact candidate.
+    pub refine: u8,
+    /// Try dual-plane modes when one channel is poorly correlated.
+    pub dual_plane: bool,
+    /// Lowest inter-channel correlation below which dual plane is tried.
+    pub dual_corr_limit: f32,
+    /// Least-squares iterations when fitting weights to a decimated grid.
+    pub grid_iters: u8,
+    /// Skip the two-partition search when the best one-partition error per
+    /// texel (in the 8-bit domain) is already below this.
+    pub part2_skip_err: f32,
+}
+
+/// What the error is measured against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Target {
+    pub profile: AstcProfile,
+    /// Measure after the `decode_unorm8` rule (top 8 bits). Always true for sRGB.
+    pub unorm8: bool,
+    pub cw: [f32; 4],
+}
+
+const MAX_TEXELS: usize = 216;
+
+/// Endpoint classes searched (the value count decides the colour range).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Lum,        // CEM 0: 2 values
+    LumAlpha,   // CEM 4: 4 values
+    RgbScale,   // CEM 6: 4 values
+    Rgb,        // CEM 8 / 9: 6 values
+    RgbScaleA,  // CEM 10: 6 values
+    Rgba,       // CEM 12 / 13: 8 values
+}
+
+impl Class {
+    fn values(self) -> u32 {
+        match self {
+            Class::Lum => 2,
+            Class::LumAlpha | Class::RgbScale => 4,
+            Class::Rgb | Class::RgbScaleA => 6,
+            Class::Rgba => 8,
+        }
+    }
+    /// Endpoint channels the quantisation error lands on.
+    fn channels(self) -> f32 {
+        match self {
+            Class::Lum => 3.0,
+            _ => 4.0,
+        }
+    }
+}
+
+/// A line fit of one partition.
+#[derive(Clone, Copy, Default)]
+struct Line {
+    e0: [f32; 4],
+    e1: [f32; 4],
+    /// Weighted squared length of e1 - e0 over the plane-1 channels.
+    len2: f32,
+    /// Squared length along the plane-2 channel (dual plane only).
+    len2b: f32,
+}
+
+/// One partitioning with its ideal fit.
+struct Fit {
+    parts: u8,
+    seed: u16,
+    labels: [u8; MAX_TEXELS],
+    lines: [Line; 4],
+    /// Ideal weights in [0, 1]: plane 1, plane 2.
+    w1: [f32; MAX_TEXELS],
+    w2: [f32; MAX_TEXELS],
+    /// Dual-plane channel, 4 = none.
+    ccs: usize,
+    /// Fixed error off the fitted lines (not reducible by weights).
+    perp: f32,
+}
+
+/// The best block found so far.
+pub(crate) struct Best {
+    pub err: f64,
+    pub sym: SymbolicBlock,
+}
+
+struct Src<'a> {
+    px: &'a [[u8; 4]],
+    n: usize,
+    tgt: Target,
+    opaque: bool,
+    grey: bool,
+}
+
+fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+/// Principal-axis line fit of the texels `idx` over the channels in `mask`.
+/// Returns the line and fills `w` (ideal weights) for those texels; returns
+/// the residual error off the line.
+fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -> (Line, f32) {
+    let cw = src.tgt.cw;
+    let n = idx.len().max(1) as f32;
+    let mut mean = [0f32; 4];
+    for &i in idx {
+        for c in 0..4 {
+            mean[c] += src.px[i][c] as f32;
+        }
+    }
+    for m in mean.iter_mut() {
+        *m /= n;
+    }
+    // Covariance over the masked channels, weighted.
+    let mut cov = [[0f32; 4]; 4];
+    for &i in idx {
+        let mut d = [0f32; 4];
+        for c in 0..4 {
+            if mask[c] {
+                d[c] = (src.px[i][c] as f32 - mean[c]) * cw[c];
+            }
+        }
+        for a in 0..4 {
+            for b in 0..4 {
+                cov[a][b] += d[a] * d[b];
+            }
+        }
+    }
+    // Power iteration from the dominant-variance axis; normalised by the max
+    // component (no square root, so no libm in the determinism surface).
+    let mut dir = [0f32; 4];
+    let mut best = -1.0f32;
+    for c in 0..4 {
+        if mask[c] && cov[c][c] > best {
+            best = cov[c][c];
+            dir = [0.0; 4];
+            dir[c] = 1.0;
+        }
+    }
+    for _ in 0..8 {
+        let mut nd = [0f32; 4];
+        for a in 0..4 {
+            nd[a] = cov[a][0] * dir[0] + cov[a][1] * dir[1] + cov[a][2] * dir[2] + cov[a][3] * dir[3];
+        }
+        let mx = nd.iter().fold(0f32, |m, &v| m.max(v.abs()));
+        if mx <= 1e-12 {
+            break;
+        }
+        for v in nd.iter_mut() {
+            *v /= mx;
+        }
+        dir = nd;
+    }
+    // Undo the channel weighting in the direction, then orient so the RGB sum
+    // grows from e0 to e1 (direct endpoint modes need sum(e1) >= sum(e0)).
+    for c in 0..4 {
+        if cw[c] > 0.0 {
+            dir[c] /= cw[c];
+        }
+        if !mask[c] {
+            dir[c] = 0.0;
+        }
+    }
+    let s = dir[0] + dir[1] + dir[2];
+    if s < 0.0 || (s == 0.0 && dir[3] < 0.0) {
+        for v in dir.iter_mut() {
+            *v = -*v;
+        }
+    }
+    let dd = dot4(dir, dir);
+    let mut tmin = f32::MAX;
+    let mut tmax = f32::MIN;
+    let mut ts = [0f32; MAX_TEXELS];
+    for &i in idx {
+        let mut d = [0f32; 4];
+        for c in 0..4 {
+            if mask[c] {
+                d[c] = src.px[i][c] as f32 - mean[c];
+            }
+        }
+        let t = if dd > 0.0 { dot4(d, dir) / dd } else { 0.0 };
+        ts[i] = t;
+        tmin = tmin.min(t);
+        tmax = tmax.max(t);
+    }
+    if idx.is_empty() {
+        tmin = 0.0;
+        tmax = 0.0;
+    }
+    let span = tmax - tmin;
+    let mut perp = 0f32;
+    for &i in idx {
+        w[i] = if span > 0.0 { (ts[i] - tmin) / span } else { 0.0 };
+        for c in 0..4 {
+            if mask[c] {
+                let p = mean[c] + dir[c] * ts[i];
+                let e = (src.px[i][c] as f32 - p) * cw[c];
+                perp += e * e;
+            }
+        }
+    }
+    let mut line = Line::default();
+    for c in 0..4 {
+        if mask[c] {
+            line.e0[c] = (mean[c] + dir[c] * tmin).clamp(0.0, 255.0);
+            line.e1[c] = (mean[c] + dir[c] * tmax).clamp(0.0, 255.0);
+            let d = (line.e1[c] - line.e0[c]) * cw[c];
+            line.len2 += d * d;
+        } else {
+            line.e0[c] = mean[c];
+            line.e1[c] = mean[c];
+        }
+    }
+    (line, perp)
+}
+
+/// Fit one channel on its own (dual plane): min/max endpoints, ideal weights.
+fn fit_channel(src: &Src, idx: &[usize], c: usize, line: &mut Line, w: &mut [f32; MAX_TEXELS]) {
+    let mut lo = 255u8;
+    let mut hi = 0u8;
+    for &i in idx {
+        lo = lo.min(src.px[i][c]);
+        hi = hi.max(src.px[i][c]);
+    }
+    if idx.is_empty() {
+        lo = 0;
+        hi = 0;
+    }
+    let span = (hi - lo) as f32;
+    for &i in idx {
+        w[i] = if span > 0.0 { (src.px[i][c] - lo) as f32 / span } else { 0.0 };
+    }
+    line.e0[c] = lo as f32;
+    line.e1[c] = hi as f32;
+    let d = span * src.tgt.cw[c];
+    line.len2b = d * d;
+}
+
+fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
+    let mut f = Fit {
+        parts,
+        seed,
+        labels: [0; MAX_TEXELS],
+        lines: [Line::default(); 4],
+        w1: [0.0; MAX_TEXELS],
+        w2: [0.0; MAX_TEXELS],
+        ccs,
+        perp: 0.0,
+    };
+    f.labels[..src.n].copy_from_slice(&labels[..src.n]);
+    let mut mask = [true, true, true, !src.opaque];
+    if ccs < 4 {
+        mask[ccs] = false;
+    }
+    for p in 0..parts {
+        let idx: Vec<usize> = (0..src.n).filter(|&i| f.labels[i] == p).collect();
+        let (mut line, perp) = fit_line(src, &idx, mask, &mut f.w1);
+        if ccs < 4 {
+            fit_channel(src, &idx, ccs, &mut line, &mut f.w2);
+        }
+        f.lines[p as usize] = line;
+        f.perp += perp;
+    }
+    f
+}
+
+/// Least-squares fit of per-texel ideal weights (scaled to 0..=64) to a
+/// grid, through the infill taps. Returns grid weights in 0..=64 (float).
+fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &mut [f32; 64]) {
+    let g = &ctx.grids[grid];
+    if g.full {
+        for (o, &w) in out[..g.count].iter_mut().zip(ideal.iter()) {
+            *o = w * 64.0;
+        }
+        return;
+    }
+    // Start from the contribution-weighted average of the texels each stored
+    // weight feeds.
+    for j in 0..g.count {
+        let mut s = 0f32;
+        let mut cs = 0f32;
+        for &(t, c) in &g.feeds[j] {
+            s += ideal[t as usize] * c as f32;
+            cs += c as f32;
+        }
+        out[j] = if cs > 0.0 { 64.0 * s / cs } else { 32.0 };
+    }
+    // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2.
+    let mut resid = [0f32; MAX_TEXELS];
+    for _ in 0..iters {
+        for (t, &(n, tp)) in g.taps.iter().enumerate() {
+            let mut v = 0f32;
+            for &(k, c) in &tp[..n as usize] {
+                v += out[k as usize] * c as f32;
+            }
+            resid[t] = v * (1.0 / 16.0) - 64.0 * ideal[t];
+        }
+        for j in 0..g.count {
+            let mut num = 0f32;
+            let mut den = 0f32;
+            for &(t, c) in &g.feeds[j] {
+                let cf = c as f32 * (1.0 / 16.0);
+                num += cf * resid[t as usize];
+                den += cf * cf;
+            }
+            if den > 0.0 {
+                out[j] = (out[j] - num / den).clamp(0.0, 64.0);
+            }
+        }
+    }
+}
+
+/// Quantise grid weights (0..=64 float) to the weight range's levels.
+fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
+    let (lv, n) = weight_levels(range);
+    let lv = &lv[..n];
+    for (o, &v) in out.iter_mut().zip(g) {
+        // Levels are sorted; pick the nearest (ties to the lower).
+        let mut best = lv[0];
+        let mut bd = f32::MAX;
+        for &l in lv {
+            let d = (l as f32 - v).abs();
+            if d < bd {
+                bd = d;
+                best = l;
+            }
+        }
+        *o = best;
+    }
+}
+
+fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
+    for (t, &(n, tp)) in ctx.grids[grid].taps.iter().enumerate() {
+        let mut s = 0u32;
+        for &(k, c) in &tp[..n as usize] {
+            s += gw[k as usize] as u32 * c as u32;
+        }
+        out[t] = ((s + 8) >> 4) as u8;
+    }
+}
+
+fn config_bits(parts: u8, dual: bool) -> u32 {
+    (if parts == 1 { 17 } else { 29 }) + if dual { 2 } else { 0 }
+}
+
+/// Least-squares endpoints for one channel given integer weights (0..=64).
+fn refit_channel(src: &Src, idx: &[usize], c: usize, w: &[u8; MAX_TEXELS]) -> Option<(f32, f32)> {
+    let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
+    for &i in idx {
+        let t = w[i] as f32 * (1.0 / 64.0);
+        let u = 1.0 - t;
+        let x = src.px[i][c] as f32;
+        a += u * u;
+        b += u * t;
+        d += t * t;
+        x0 += u * x;
+        x1 += t * x;
+    }
+    let det = a * d - b * b;
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let e0 = (x0 * d - x1 * b) / det;
+    let e1 = (x1 * a - x0 * b) / det;
+    Some((e0.clamp(0.0, 255.0), e1.clamp(0.0, 255.0)))
+}
+
+fn near(range: usize, x: f32) -> u8 {
+    let v = (x + 0.5).clamp(0.0, 255.0) as usize;
+    COLOR_NEAREST[range][v.min(255)]
+}
+
+/// Candidate endpoint encodings (CEM, values) for a class.
+fn encode_endpoints(class: Class, range: usize, e0: [f32; 4], e1: [f32; 4], out: &mut Vec<(u8, [u8; 8])>) {
+    out.clear();
+    let lum = |e: [f32; 4]| (e[0] + e[1] + e[2]) * (1.0 / 3.0);
+    match class {
+        Class::Lum => {
+            out.push((0, [near(range, lum(e0)), near(range, lum(e1)), 0, 0, 0, 0, 0, 0]));
+        }
+        Class::LumAlpha => {
+            out.push((
+                4,
+                [near(range, lum(e0)), near(range, lum(e1)), near(range, e0[3]), near(range, e1[3]), 0, 0, 0, 0],
+            ));
+        }
+        Class::Rgb | Class::Rgba => {
+            let alpha = class == Class::Rgba;
+            let cem = if alpha { 12 } else { 8 };
+            // Direct.
+            let mut v = [0u8; 8];
+            for c in 0..3 {
+                v[2 * c] = near(range, e0[c]);
+                v[2 * c + 1] = near(range, e1[c]);
+            }
+            if alpha {
+                v[6] = near(range, e0[3]);
+                v[7] = near(range, e1[3]);
+            }
+            out.push((cem, v));
+            // Blue contraction: stored (2R - B, 2G - B, B), endpoints swapped.
+            let inv = |e: [f32; 4]| [2.0 * e[0] - e[2], 2.0 * e[1] - e[2], e[2], e[3]];
+            let (i0, i1) = (inv(e0), inv(e1));
+            if (0..3).all(|c| (-0.5..=255.5).contains(&i0[c]) && (-0.5..=255.5).contains(&i1[c])) {
+                let mut v = [0u8; 8];
+                for c in 0..3 {
+                    v[2 * c] = near(range, i1[c]);
+                    v[2 * c + 1] = near(range, i0[c]);
+                }
+                if alpha {
+                    v[6] = near(range, e1[3]);
+                    v[7] = near(range, e0[3]);
+                }
+                out.push((cem, v));
+            }
+            // Base + offset (bit transfer): offsets in -32..=31.
+            let mut ok = true;
+            let mut v = [0u8; 8];
+            let chans = if alpha { 4 } else { 3 };
+            for c in 0..chans {
+                let base = (e0[c] + 0.5).clamp(0.0, 255.0) as i32;
+                let off = (e1[c] + 0.5).clamp(0.0, 255.0) as i32 - base;
+                if !(-32..=31).contains(&off) {
+                    ok = false;
+                    break;
+                }
+                let lo = ((base & 0x7F) << 1) as f32;
+                let hi = ((base & 0x80) | ((off & 0x3F) << 1)) as f32;
+                v[2 * c] = near(range, lo);
+                v[2 * c + 1] = near(range, hi);
+            }
+            if ok {
+                out.push((if alpha { 13 } else { 9 }, v));
+            }
+        }
+        Class::RgbScale | Class::RgbScaleA => {
+            let l1 = dot4([e1[0], e1[1], e1[2], 0.0], [e1[0], e1[1], e1[2], 0.0]);
+            let s = if l1 > 0.0 {
+                256.0 * dot4([e0[0], e0[1], e0[2], 0.0], [e1[0], e1[1], e1[2], 0.0]) / l1
+            } else {
+                0.0
+            };
+            let mut v = [0u8; 8];
+            v[0] = near(range, e1[0]);
+            v[1] = near(range, e1[1]);
+            v[2] = near(range, e1[2]);
+            v[3] = near(range, s.min(255.0));
+            if class == Class::RgbScaleA {
+                v[4] = near(range, e0[3]);
+                v[5] = near(range, e1[3]);
+                out.push((10, v));
+            } else {
+                out.push((6, v));
+            }
+        }
+    }
+}
+
+/// Exact error of one partition's texels for decoded endpoints `ep` and
+/// texel weights (plane 1, plane 2).
+fn exact_part_err(
+    src: &Src,
+    idx: &[usize],
+    ep: &cem::Endpoints,
+    w1: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+) -> f64 {
+    let cw = src.tgt.cw;
+    let mut acc = [0u64; 4];
+    for &i in idx {
+        for c in 0..4 {
+            let w = if c == ccs { w2[i] } else { w1[i] };
+            let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
+            let s = src.px[i][c] as i64;
+            let d = if src.tgt.unorm8 { (v >> 8) - s } else { v - s * 257 };
+            acc[c] += (d * d) as u64;
+        }
+    }
+    let scale = if src.tgt.unorm8 { 1.0 } else { 1.0 / (257.0 * 257.0) };
+    (0..4).map(|c| acc[c] as f64 * cw[c] as f64 * scale).sum()
+}
+
+/// Candidate classes for this block.
+fn classes(src: &Src) -> &'static [Class] {
+    match (src.opaque, src.grey) {
+        (true, true) => &[Class::Lum, Class::Rgb],
+        (true, false) => &[Class::Rgb, Class::RgbScale],
+        (false, true) => &[Class::LumAlpha, Class::Rgba],
+        (false, false) => &[Class::Rgba, Class::RgbScaleA],
+    }
+}
+
+struct Cand {
+    est: f32,
+    mode: usize,
+    class: Class,
+    range: usize,
+    gw1: [u8; 64],
+    gw2: [u8; 64],
+}
+
+/// Encode one partitioning: rank modes by estimate, then encode the best few
+/// exactly. Updates `best`.
+fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
+    let dual = fit.ccs < 4;
+    let n = src.n;
+    // Decimated ideal weights per grid (computed lazily per grid).
+    let mut dec1: Vec<Option<[f32; 64]>> = alloc::vec![None; ctx.grids.len()];
+    let mut dec2: Vec<Option<[f32; 64]>> = alloc::vec![None; ctx.grids.len()];
+    let mut cands: Vec<Cand> = Vec::new();
+    let mut eff1 = [0u8; MAX_TEXELS];
+    let mut eff2 = [0u8; MAX_TEXELS];
+    let cls = classes(src);
+    for (mi, m) in ctx.modes.iter().enumerate() {
+        if m.dual != dual {
+            continue;
+        }
+        let g = m.grid as usize;
+        let count = ctx.grids[g].count;
+        if dec1[g].is_none() {
+            let mut d = [0f32; 64];
+            decimate(ctx, g, &fit.w1, prm.grid_iters, &mut d);
+            dec1[g] = Some(d);
+            if dual {
+                let mut d2 = [0f32; 64];
+                decimate(ctx, g, &fit.w2, prm.grid_iters, &mut d2);
+                dec2[g] = Some(d2);
+            }
+        }
+        let mut gw1 = [0u8; 64];
+        let mut gw2 = [0u8; 64];
+        quantize_weights(m.range as usize, &dec1[g].as_ref().unwrap()[..count], &mut gw1[..count]);
+        infill_eff(ctx, g, &gw1, &mut eff1);
+        if dual {
+            quantize_weights(m.range as usize, &dec2[g].as_ref().unwrap()[..count], &mut gw2[..count]);
+            infill_eff(ctx, g, &gw2, &mut eff2);
+        }
+        let mut werr = 0f32;
+        for i in 0..n {
+            let l = &fit.lines[fit.labels[i] as usize];
+            let d = eff1[i] as f32 * (1.0 / 64.0) - fit.w1[i];
+            werr += d * d * l.len2;
+            if dual {
+                let d2 = eff2[i] as f32 * (1.0 / 64.0) - fit.w2[i];
+                werr += d2 * d2 * l.len2b;
+            }
+        }
+        let avail = 128u32.saturating_sub(config_bits(fit.parts, dual) + m.weight_bits as u32);
+        for &class in cls {
+            let values = class.values() * fit.parts as u32;
+            if values > 18 {
+                continue;
+            }
+            let Some(range) = color_range(values, avail) else { continue };
+            let levels = LEVELS[range] as f32;
+            let step = 255.0 / (levels - 1.0);
+            let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
+            let qerr = n as f32 * (2.0 / 3.0) * step * step * (1.0 / 12.0) * class.channels() * cw_mean;
+            let est = werr + qerr + fit.perp;
+            cands.push(Cand {
+                est,
+                mode: mi,
+                class,
+                range,
+                gw1,
+                gw2,
+            });
+        }
+    }
+    // Best few by estimate (stable: ties keep mode order).
+    cands.sort_by(|a, b| a.est.partial_cmp(&b.est).unwrap_or(core::cmp::Ordering::Equal));
+    cands.truncate(prm.exact_candidates.max(1));
+    for c in &cands {
+        exact_candidate(ctx, prm, src, fit, c, best);
+    }
+}
+
+fn exact_candidate(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, cand: &Cand, best: &mut Best) {
+    let m: Mode = ctx.modes[cand.mode];
+    let g = m.grid as usize;
+    let count = ctx.grids[g].count;
+    let dual = fit.ccs < 4;
+    let parts = fit.parts as usize;
+    let mut gw1 = cand.gw1;
+    let mut gw2 = cand.gw2;
+    let idx: Vec<Vec<usize>> = (0..parts)
+        .map(|p| (0..src.n).filter(|&i| fit.labels[i] as usize == p).collect())
+        .collect();
+    let mut encs: Vec<(u8, [u8; 8])> = Vec::new();
+    let mut eff1 = [0u8; MAX_TEXELS];
+    let mut eff2 = [0u8; MAX_TEXELS];
+    for _pass in 0..=prm.refine {
+        infill_eff(ctx, g, &gw1, &mut eff1);
+        if dual {
+            infill_eff(ctx, g, &gw2, &mut eff2);
+        }
+        // Refit endpoints to the quantised weights, then pick the best
+        // encoding per partition (same CEM for all partitions: matched).
+        let mut lines = fit.lines;
+        for p in 0..parts {
+            for c in 0..4 {
+                let w = if c == fit.ccs { &eff2 } else { &eff1 };
+                if let Some((a, b)) = refit_channel(src, &idx[p], c, w) {
+                    lines[p].e0[c] = a;
+                    lines[p].e1[c] = b;
+                }
+            }
+            if src.opaque {
+                lines[p].e0[3] = 255.0;
+                lines[p].e1[3] = 255.0;
+            }
+        }
+        // Collect encodings per partition; choose the CEM with the lowest
+        // total error over partitions.
+        let mut total_by_cem: [(f64, bool); 16] = [(0.0, true); 16];
+        let mut chosen: [[(f64, [u8; 8]); 4]; 16] = [[(f64::MAX, [0; 8]); 4]; 16];
+        for p in 0..parts {
+            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, &mut encs);
+            let mut seen = [false; 16];
+            for &(cemv, v) in encs.iter() {
+                let raw = cem::decode(cemv, &v);
+                let ep = cem::expand(&raw, src.tgt.profile);
+                let e = exact_part_err(src, &idx[p], &ep, &eff1, &eff2, fit.ccs);
+                seen[cemv as usize] = true;
+                if e < chosen[cemv as usize][p].0 {
+                    chosen[cemv as usize][p] = (e, v);
+                }
+            }
+            for cemv in 0..16 {
+                if !seen[cemv] {
+                    total_by_cem[cemv].1 = false;
+                } else {
+                    total_by_cem[cemv].0 += chosen[cemv][p].0;
+                }
+            }
+        }
+        let mut pick = None;
+        for cemv in 0..16 {
+            if total_by_cem[cemv].1 && chosen[cemv][0].0 < f64::MAX {
+                let e = total_by_cem[cemv].0;
+                if pick.map_or(true, |(be, _)| e < be) {
+                    pick = Some((e, cemv));
+                }
+            }
+        }
+        let Some((err, cemv)) = pick else { return };
+        if err < best.err {
+            let mut s = SymbolicBlock::empty_normal();
+            s.mode = m.mode;
+            let gm = ctx.grids[g].w;
+            s.grid = [gm, ctx.grids[g].h, ctx.grids[g].d];
+            s.weight_range = m.range;
+            s.dual_plane = dual;
+            s.plane2_component = if dual { fit.ccs as u8 } else { 0 };
+            s.partitions = fit.parts;
+            s.partition_seed = if parts > 1 { fit.seed } else { 0 };
+            s.cem = [cemv as u8; 4];
+            s.cem_matched = parts > 1;
+            s.color_range = cand.range as u8;
+            let vc = cem::value_count(cemv as u8);
+            s.color_count = (vc * parts) as u8;
+            for p in 0..parts {
+                s.color_values[p * vc..(p + 1) * vc].copy_from_slice(&chosen[cemv][p].1[..vc]);
+            }
+            if dual {
+                for i in 0..count {
+                    s.weights[2 * i] = gw1[i];
+                    s.weights[2 * i + 1] = gw2[i];
+                }
+            } else {
+                s.weights[..count].copy_from_slice(&gw1[..count]);
+            }
+            best.err = err;
+            best.sym = s;
+        }
+        if _pass == prm.refine {
+            break;
+        }
+        // Re-derive ideal weights from the decoded endpoints of the chosen
+        // encoding, then re-decimate and re-quantise.
+        let mut w1 = [0f32; MAX_TEXELS];
+        let mut w2 = [0f32; MAX_TEXELS];
+        for p in 0..parts {
+            let v = chosen[cemv][p].1;
+            let ep = cem::expand(&cem::decode(cemv as u8, &v), src.tgt.profile);
+            for &i in &idx[p] {
+                let (mut num, mut den) = (0f32, 0f32);
+                for c in 0..4 {
+                    if c == fit.ccs {
+                        continue;
+                    }
+                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
+                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
+                    num += d * x * src.tgt.cw[c];
+                    den += d * d * src.tgt.cw[c];
+                }
+                w1[i] = if den > 0.0 { (num / den).clamp(0.0, 1.0) } else { 0.0 };
+                if dual {
+                    let c = fit.ccs;
+                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
+                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
+                    w2[i] = if d != 0.0 { (x / d).clamp(0.0, 1.0) } else { 0.0 };
+                }
+            }
+        }
+        let mut d1 = [0f32; 64];
+        decimate(ctx, g, &w1, prm.grid_iters, &mut d1);
+        quantize_weights(m.range as usize, &d1[..count], &mut gw1[..count]);
+        if dual {
+            let mut d2 = [0f32; 64];
+            decimate(ctx, g, &w2, prm.grid_iters, &mut d2);
+            quantize_weights(m.range as usize, &d2[..count], &mut gw2[..count]);
+        }
+    }
+}
+
+/// Two-means clustering of the block's colours; returns labels.
+fn two_means(src: &Src, labels: &mut [u8; MAX_TEXELS]) {
+    let n = src.n;
+    let col = |i: usize| -> [f32; 4] {
+        let p = src.px[i];
+        let cw = src.tgt.cw;
+        [p[0] as f32 * cw[0], p[1] as f32 * cw[1], p[2] as f32 * cw[2], p[3] as f32 * cw[3]]
+    };
+    let d2 = |a: [f32; 4], b: [f32; 4]| {
+        let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+        dot4(d, d)
+    };
+    let mut mean = [0f32; 4];
+    for i in 0..n {
+        let c = col(i);
+        for k in 0..4 {
+            mean[k] += c[k];
+        }
+    }
+    for k in mean.iter_mut() {
+        *k /= n as f32;
+    }
+    // Seeds: farthest texel from the mean, then farthest from that.
+    let far = |from: [f32; 4]| -> usize {
+        let mut bi = 0;
+        let mut bd = -1.0;
+        for i in 0..n {
+            let d = d2(col(i), from);
+            if d > bd {
+                bd = d;
+                bi = i;
+            }
+        }
+        bi
+    };
+    let a = far(mean);
+    let b = far(col(a));
+    let mut c0 = col(a);
+    let mut c1 = col(b);
+    for _ in 0..4 {
+        let (mut s0, mut s1) = ([0f32; 4], [0f32; 4]);
+        let (mut n0, mut n1) = (0f32, 0f32);
+        for i in 0..n {
+            let c = col(i);
+            if d2(c, c0) <= d2(c, c1) {
+                labels[i] = 0;
+                n0 += 1.0;
+                for k in 0..4 {
+                    s0[k] += c[k];
+                }
+            } else {
+                labels[i] = 1;
+                n1 += 1.0;
+                for k in 0..4 {
+                    s1[k] += c[k];
+                }
+            }
+        }
+        if n0 > 0.0 {
+            c0 = [s0[0] / n0, s0[1] / n0, s0[2] / n0, s0[3] / n0];
+        }
+        if n1 > 0.0 {
+            c1 = [s1[0] / n1, s1[1] / n1, s1[2] / n1, s1[3] / n1];
+        }
+    }
+}
+
+/// Lowest absolute correlation between a channel and the others, and that
+/// channel (for the dual-plane gate).
+fn weakest_channel(src: &Src) -> (usize, f32) {
+    let n = src.n as f32;
+    let mut mean = [0f32; 4];
+    for i in 0..src.n {
+        for c in 0..4 {
+            mean[c] += src.px[i][c] as f32;
+        }
+    }
+    for m in mean.iter_mut() {
+        *m /= n;
+    }
+    let mut cov = [[0f32; 4]; 4];
+    for i in 0..src.n {
+        let d: [f32; 4] = core::array::from_fn(|c| src.px[i][c] as f32 - mean[c]);
+        for a in 0..4 {
+            for b in 0..4 {
+                cov[a][b] += d[a] * d[b];
+            }
+        }
+    }
+    let chans = if src.opaque { 3 } else { 4 };
+    let mut best = (4usize, 1.0f32);
+    for c in 0..chans {
+        if cov[c][c] <= 1.0 {
+            continue;
+        }
+        // Max |corr| with any other varying channel (squared, no sqrt).
+        let mut mx = 0f32;
+        for o in 0..chans {
+            if o == c || cov[o][o] <= 1.0 {
+                continue;
+            }
+            let r2 = cov[c][o] * cov[c][o] / (cov[c][c] * cov[o][o]);
+            mx = mx.max(r2);
+        }
+        if mx < best.1 {
+            best = (c, mx);
+        }
+    }
+    best
+}
+
+/// Encode one block of `n` texels (z, y, x order; edge texels already
+/// clamped). Returns the symbolic block and its exact error.
+pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]]) -> Best {
+    let n = ctx.texels;
+    let first = px[0];
+    if px[..n].iter().all(|&p| p == first) {
+        let mut s = SymbolicBlock::empty_void_ldr();
+        for c in 0..4 {
+            s.void_color[c] = first[c] as u16 * 257;
+        }
+        return Best { err: 0.0, sym: s };
+    }
+    let opaque = px[..n].iter().all(|p| p[3] == 255);
+    let grey = px[..n].iter().all(|p| p[0] == p[1] && p[1] == p[2]);
+    let src = Src {
+        px,
+        n,
+        tgt,
+        opaque,
+        grey,
+    };
+    let mut best = Best {
+        err: f64::MAX,
+        sym: SymbolicBlock::empty_void_ldr(),
+    };
+    let zeros = [0u8; MAX_TEXELS];
+    let fit1 = make_fit(&src, 1, 0, &zeros, 4);
+    search_fit(ctx, prm, &src, &fit1, &mut best);
+    if prm.dual_plane {
+        let (c, r2) = weakest_channel(&src);
+        if c < 4 && r2 < prm.dual_corr_limit * prm.dual_corr_limit {
+            let fitd = make_fit(&src, 1, 0, &zeros, c);
+            search_fit(ctx, prm, &src, &fitd, &mut best);
+        }
+    }
+    let per_texel = best.err / n as f64;
+    if prm.max_partitions >= 2 && prm.part2_candidates > 0 && per_texel > prm.part2_skip_err as f64 {
+        let mut labels = [0u8; MAX_TEXELS];
+        two_means(&src, &mut labels);
+        // Rank patterns by mismatch with the clustering (either labelling).
+        let mut ranked: Vec<(u32, usize)> = ctx
+            .part2
+            .iter()
+            .enumerate()
+            .map(|(pi, p)| {
+                let mis = p.labels.iter().zip(&labels[..n]).filter(|(a, b)| a != b).count() as u32;
+                (mis.min(n as u32 - mis), pi)
+            })
+            .collect();
+        ranked.sort();
+        for &(_, pi) in ranked.iter().take(prm.part2_candidates) {
+            let p = &ctx.part2[pi];
+            let fit2 = make_fit(&src, 2, p.seed, &p.labels, 4);
+            search_fit(ctx, prm, &src, &fit2, &mut best);
+        }
+    }
+    best
+}
+
+impl SymbolicBlock {
+    pub(crate) fn empty_normal() -> Self {
+        Self::empty(BlockKind::Normal, 0)
+    }
+    pub(crate) fn empty_void_ldr() -> Self {
+        Self::empty(BlockKind::VoidLdr, 0)
+    }
+}

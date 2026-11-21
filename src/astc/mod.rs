@@ -34,9 +34,14 @@ mod block_mode;
 mod cem;
 pub mod container;
 pub(crate) mod decode;
+#[cfg(feature = "encode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encode")))]
+pub mod encode;
 mod footprint;
 mod infill;
 mod ise;
+#[cfg(feature = "encode")]
+pub(crate) mod pack;
 mod parse;
 mod partition;
 mod quant;
@@ -52,6 +57,8 @@ mod tests;
 pub use container::ktx::{self, Ktx2View, KtxView};
 pub use container::{AstcFile, AstcSurface};
 pub use footprint::{block_rows, payload_len, AstcFootprint};
+#[cfg(feature = "encode")]
+pub use encode::{encode_block_rows_into, encode_rgba8, encode_rgba8_into, AstcEncodeOptions, AstcPreset};
 pub use parse::IllegalReason;
 pub use reference::{decode_block_f16, decode_block_rgba8, illegal_reason};
 

@@ -190,3 +190,111 @@ mod tests {
         }
     }
 }
+
+// ------------------------------------------------------------------ encode --
+
+const fn build_color_inverse() -> [[u8; 256]; RANGE_COUNT] {
+    // COLOR_INV[r][u] = the raw ISE value whose unquantised value is u, for
+    // each u the range can represent (the maps are bijective, tested above).
+    let mut t = [[0u8; 256]; RANGE_COUNT];
+    let mut r = MIN_COLOR_RANGE;
+    while r < RANGE_COUNT {
+        let levels = super::ise::LEVELS[r] as usize;
+        let mut v = 0;
+        while v < levels {
+            t[r][COLOR_UNQUANT_C[r][v] as usize] = v as u8;
+            v += 1;
+        }
+        r += 1;
+    }
+    t
+}
+
+const COLOR_UNQUANT_C: [[u8; 256]; RANGE_COUNT] = build_color();
+const WEIGHT_UNQUANT_C: [[u8; 32]; 12] = build_weight();
+
+const fn build_color_nearest() -> [[u8; 256]; RANGE_COUNT] {
+    // COLOR_NEAREST[r][x] = the representable unquantised value closest to x
+    // (ties to the lower value).
+    let mut t = [[0u8; 256]; RANGE_COUNT];
+    let mut r = MIN_COLOR_RANGE;
+    while r < RANGE_COUNT {
+        let levels = super::ise::LEVELS[r] as usize;
+        let mut x = 0;
+        while x < 256 {
+            let mut best = 0u8;
+            let mut bd = 1000i32;
+            let mut v = 0;
+            while v < levels {
+                let u = COLOR_UNQUANT_C[r][v] as i32;
+                let d = if u > x as i32 { u - x as i32 } else { x as i32 - u };
+                if d < bd || (d == bd && (u as u8) < best) {
+                    bd = d;
+                    best = u as u8;
+                }
+                v += 1;
+            }
+            t[r][x] = best;
+            x += 1;
+        }
+        r += 1;
+    }
+    t
+}
+
+const fn build_weight_inverse() -> [[u8; 65]; 12] {
+    let mut t = [[0u8; 65]; 12];
+    let mut r = 0;
+    while r < 12 {
+        let levels = super::ise::LEVELS[r] as usize;
+        let mut v = 0;
+        while v < levels {
+            t[r][WEIGHT_UNQUANT_C[r][v] as usize] = v as u8;
+            v += 1;
+        }
+        r += 1;
+    }
+    t
+}
+
+/// Raw ISE value for a representable unquantised colour value.
+pub static COLOR_INV: [[u8; 256]; RANGE_COUNT] = build_color_inverse();
+/// Nearest representable unquantised colour value.
+pub static COLOR_NEAREST: [[u8; 256]; RANGE_COUNT] = build_color_nearest();
+/// Raw ISE value for a representable unquantised weight (0..=64).
+pub static WEIGHT_INV: [[u8; 65]; 12] = build_weight_inverse();
+
+/// Sorted representable unquantised weights of a weight range.
+pub fn weight_levels(range: usize) -> ([u8; 32], usize) {
+    let n = super::ise::LEVELS[range] as usize;
+    let mut v = [0u8; 32];
+    v[..n].copy_from_slice(&WEIGHT_UNQUANT[range][..n]);
+    v[..n].sort_unstable();
+    (v, n)
+}
+
+#[cfg(test)]
+mod inverse_tests {
+    use super::*;
+    use crate::astc::ise::LEVELS;
+
+    #[test]
+    fn inverses_invert() {
+        for r in MIN_COLOR_RANGE..RANGE_COUNT {
+            for v in 0..LEVELS[r] as usize {
+                let u = COLOR_UNQUANT[r][v];
+                assert_eq!(COLOR_INV[r][u as usize] as usize, v);
+                assert_eq!(COLOR_NEAREST[r][u as usize], u);
+            }
+            for x in 0..256usize {
+                let n = COLOR_NEAREST[r][x];
+                assert_eq!(COLOR_UNQUANT[r][COLOR_INV[r][n as usize] as usize], n);
+            }
+        }
+        for r in 0..12 {
+            for v in 0..LEVELS[r] as usize {
+                assert_eq!(WEIGHT_INV[r][WEIGHT_UNQUANT[r][v] as usize] as usize, v);
+            }
+        }
+    }
+}
