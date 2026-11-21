@@ -42,6 +42,12 @@ mod quant;
 pub mod reference;
 mod texel;
 
+#[cfg(any(test, feature = "__astc_internals"))]
+#[doc(hidden)]
+pub mod testgen;
+#[cfg(test)]
+mod tests;
+
 pub use footprint::{block_rows, payload_len, AstcFootprint};
 pub use parse::IllegalReason;
 pub use reference::{decode_block_f16, decode_block_rgba8, illegal_reason};
@@ -99,11 +105,12 @@ decode::surface_api!(decode::Reference);
 #[cfg(feature = "__astc_internals")]
 #[doc(hidden)]
 pub mod internals {
-    pub use super::block_mode::{check, classify, GridMode, ModeClass};
+    pub use super::block_mode::{check, classify, GridIllegal, GridMode, ModeClass};
     pub use super::cem::{decode as cem_decode, expand as cem_expand, value_count, Endpoints, RawEndpoints};
     pub use super::infill::{infill, GRID_PAD};
     pub use super::ise::{decode as ise_decode, sequence_bits, LEVELS};
     pub use super::parse::{parse, BlockKind, SymbolicBlock};
     pub use super::partition::select_partition;
     pub use super::quant::{COLOR_UNQUANT, WEIGHT_UNQUANT};
+    pub use super::testgen;
 }

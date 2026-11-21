@@ -12,6 +12,7 @@
 //! flips of corpus blocks), `file:path.astc` (the file's blocks),
 //! `mix:N` (random blocks biased to legal multi-partition layouts).
 
+mod census;
 mod gen;
 mod oracle;
 
@@ -503,6 +504,216 @@ fn cmd_sweep(src: &str, fps: &[AstcFootprint]) -> bool {
     all_ok
 }
 
+/// Run the six cells on `blocks` (oracle and ours, cells in parallel);
+/// returns per-block pass flags and per-cell differing-block counts.
+fn cells_check(fp: AstcFootprint, blocks: &[[u8; 16]]) -> (Vec<bool>, [u64; 6]) {
+    let a = fp_args(fp);
+    let input: Vec<u8> = blocks.iter().flatten().copied().collect();
+    let tc = fp.texels() as usize;
+    let results: Vec<Vec<bool>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = CELLS
+            .iter()
+            .map(|&(prof, f16)| {
+                let input = &input;
+                let a = &a;
+                sc.spawn(move || {
+                    let o = oracle::run(
+                        &["decode", prof_name(prof), if f16 { "f16" } else { "u8" }, &a[0], &a[1], &a[2]],
+                        input,
+                    );
+                    let per = tc * if f16 { 8 } else { 4 };
+                    assert_eq!(o.len(), blocks.len() * per);
+                    let mut t8 = vec![[0u8; 4]; tc];
+                    let mut t16 = vec![[0u16; 4]; tc];
+                    let mut ours = Vec::with_capacity(per);
+                    blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(k, b)| {
+                            ours.clear();
+                            if f16 {
+                                astc::decode_block_f16(b, fp, prof, &mut t16);
+                                for t in &t16 {
+                                    for c in t {
+                                        ours.extend_from_slice(&c.to_le_bytes());
+                                    }
+                                }
+                            } else {
+                                astc::decode_block_rgba8(b, fp, prof, &mut t8);
+                                for t in &t8 {
+                                    ours.extend_from_slice(t);
+                                }
+                            }
+                            ours[..] == o[k * per..(k + 1) * per]
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut pass = vec![true; blocks.len()];
+    let mut bad = [0u64; 6];
+    for (c, r) in results.iter().enumerate() {
+        for (k, &ok) in r.iter().enumerate() {
+            if !ok {
+                bad[c] += 1;
+                if pass[k] {
+                    println!("  DIFF {fp} cell {c}: block {}", hex(&blocks[k]));
+                }
+                pass[k] = false;
+            }
+        }
+    }
+    (pass, bad)
+}
+
+fn corpus_pool(dir: &str) -> std::collections::BTreeMap<AstcFootprint, Vec<[u8; 16]>> {
+    let mut pool: std::collections::BTreeMap<AstcFootprint, Vec<[u8; 16]>> = Default::default();
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    files.sort();
+    for p in files {
+        if p.extension().and_then(|e| e.to_str()) != Some("astc") {
+            continue;
+        }
+        let d = std::fs::read(&p).unwrap();
+        if d.len() < 16 || d[..4] != [0x13, 0xAB, 0xA1, 0x5C] {
+            continue;
+        }
+        let Some(fp) = AstcFootprint::new_3d(d[4] as u32, d[5] as u32, d[6] as u32) else {
+            continue;
+        };
+        let v = pool.entry(fp).or_default();
+        for c in d[16..].chunks_exact(16) {
+            let mut b = [0u8; 16];
+            b.copy_from_slice(c);
+            v.push(b);
+        }
+    }
+    pool
+}
+
+/// DC1 (natural corpus) + DC2 (random, mutated, mixed) + census, chunked.
+fn cmd_dc2(n: usize, corpus: &str, fps: &[AstcFootprint], report: &str) -> bool {
+    let pool = corpus_pool(corpus);
+    let mut cen = census::Census::default();
+    let mut all_ok = true;
+    let chunk = 16384usize;
+    let mut grand = 0u64;
+    for &fp in fps {
+        let mut rng = gen::Rng::new(0xDC2 ^ ((fp.texels() as u64) << 20) ^ ((fp.width() as u64) << 8) ^ fp.depth() as u64);
+        let lm = gen::legal_modes(fp);
+        let natural = pool.get(&fp).cloned().unwrap_or_default();
+        let mut line = format!("{fp:>7}");
+        let mut nat = natural.clone();
+        nat.sort_unstable();
+        nat.dedup();
+        let mut tot_bad = [0u64; 6];
+        for ch in nat.chunks(chunk) {
+            let (pass, bad) = cells_check(fp, ch);
+            for c in 0..6 {
+                tot_bad[c] += bad[c];
+            }
+            for (b, ok) in ch.iter().zip(pass) {
+                if ok {
+                    cen.add(b, fp);
+                }
+            }
+        }
+        line += &format!(" natural={} bad={:?}", nat.len(), tot_bad);
+        all_ok &= tot_bad.iter().all(|&x| x == 0);
+        grand += nat.len() as u64;
+        for kind in ["random", "mutated", "mix"] {
+            if kind == "mutated" && natural.is_empty() {
+                line += " mutated=skipped(no corpus)";
+                continue;
+            }
+            let mut done = 0usize;
+            let mut tot_bad = [0u64; 6];
+            while done < n {
+                let m = chunk.min(n - done);
+                let blocks: Vec<[u8; 16]> = (0..m)
+                    .map(|_| match kind {
+                        "random" => rng.block(),
+                        "mutated" => {
+                            let mut b = natural[rng.below(natural.len() as u64) as usize];
+                            for _ in 0..1 + rng.below(8) {
+                                let bit = rng.below(128) as usize;
+                                b[bit / 8] ^= 1 << (bit % 8);
+                            }
+                            b
+                        }
+                        _ => gen::mixed(&mut rng, fp, &lm),
+                    })
+                    .collect();
+                let (pass, bad) = cells_check(fp, &blocks);
+                for c in 0..6 {
+                    tot_bad[c] += bad[c];
+                }
+                for (b, ok) in blocks.iter().zip(pass) {
+                    if ok {
+                        cen.add(b, fp);
+                    }
+                }
+                done += m;
+            }
+            grand += n as u64;
+            line += &format!(" {kind}={n} bad={:?}", tot_bad);
+            all_ok &= tot_bad.iter().all(|&x| x == 0);
+        }
+        println!("{line}");
+    }
+    let mut md = String::new();
+    let (cells, full) = cen.report(32, &mut md);
+    let md = format!(
+        "Blocks checked: {grand} (each in all six cells). Census cells: {cells}, with >= 32 exact blocks: {full}.\n\n{md}"
+    );
+    std::fs::write(report, &md).unwrap();
+    println!("census: {full} / {cells} cells at >= 32 exact blocks; report {report}");
+    all_ok
+}
+
+/// Write the golden-vector fixture from the ORACLE's output (never ours):
+/// per footprint (ALL_2D then ALL_3D), per 16-block chunk, per cell, FNV-1a 64
+/// of astcenc's output bytes. Also reports whether our decoder agrees.
+fn cmd_golden(path: &str) -> bool {
+    use ai::testgen;
+    let mut out = b"ASTCGLD1".to_vec();
+    let mut ok = true;
+    for fp in all_fps() {
+        let blocks = testgen::golden_blocks(fp);
+        let a = fp_args(fp);
+        let input: Vec<u8> = blocks.iter().flatten().copied().collect();
+        let tc = fp.texels() as usize;
+        let outs: Vec<Vec<u8>> = CELLS
+            .iter()
+            .map(|&(prof, f16)| {
+                oracle::run(&["decode", prof_name(prof), if f16 { "f16" } else { "u8" }, &a[0], &a[1], &a[2]], &input)
+            })
+            .collect();
+        out.extend_from_slice(&(fp.width() << 16 | fp.height() << 8 | fp.depth()).to_le_bytes());
+        let chunks = blocks.len() / testgen::GOLDEN_CHUNK;
+        out.extend_from_slice(&(chunks as u32).to_le_bytes());
+        for ci in 0..chunks {
+            for (cell, &(_, f16)) in CELLS.iter().enumerate() {
+                let per = tc * if f16 { 8 } else { 4 };
+                let lo = ci * testgen::GOLDEN_CHUNK * per;
+                let hi = lo + testgen::GOLDEN_CHUNK * per;
+                let h = testgen::fnv1a(testgen::FNV_OFFSET, &outs[cell][lo..hi]);
+                out.extend_from_slice(&h.to_le_bytes());
+            }
+        }
+        let (_, bad) = cells_check(fp, &blocks);
+        ok &= bad.iter().all(|&b| b == 0);
+        println!("{fp}: {} blocks, ours vs oracle bad per cell {bad:?}", blocks.len());
+    }
+    std::fs::write(path, &out).unwrap();
+    println!("wrote {path}: {} bytes", out.len());
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -525,6 +736,15 @@ fn main() {
             let (n, bad) = cmd_decode(prof, f16, fp, &blocks, false);
             println!("decode {fp} {} {}: {bad} / {n} differ", args[2], args[3]);
             bad == 0
+        }
+        Some("golden") => cmd_golden(&args[2]),
+        Some("dc2") => {
+            let n: usize = args[2].parse().unwrap();
+            let fps: Vec<AstcFootprint> = match args.get(5) {
+                Some(f) if f != "all" => f.split(',').map(fp_parse).collect(),
+                _ => all_fps(),
+            };
+            cmd_dc2(n, &args[3], &fps, &args[4])
         }
         Some("sweep") => {
             let fps: Vec<AstcFootprint> = match args.get(3) {
