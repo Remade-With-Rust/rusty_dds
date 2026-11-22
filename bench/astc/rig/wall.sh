@@ -2,7 +2,7 @@
 # Final wall check: branch vs 0.11.0, same bench source, rusty_alloc, ABBA,
 # pinned, thread CPU clock, with null arms (0.11.0 vs a byte copy of itself).
 S=$(dirname "$(readlink -f "$0")")
-CP=/root/astcws/cp; W=$CP/wall; mkdir -p $W/arms
+CP=${CP:-/root/astcws/cp}; W=$CP/wall; mkdir -p $W/arms
 cp $CP/tgt-base/release/astc_bench $W/arms/base
 cp $CP/tgt-work/release/astc_bench $W/arms/work
 cp $CP/tgt-base/release/astc_bench $W/arms/null

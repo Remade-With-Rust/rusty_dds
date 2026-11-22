@@ -201,7 +201,7 @@ mod tests {
                 seen.insert((g.w, g.h));
             }
         }
-        assert!(seen.contains(&(12, 12)) == false);
+        assert!(!seen.contains(&(12, 12)));
         assert!(seen.contains(&(6, 10)) && seen.contains(&(10, 6)));
         assert!(seen.contains(&(12, 5)) && seen.contains(&(5, 12)));
     }

@@ -46,7 +46,7 @@ pub const fn select_partition(
     let s9 = ((rnum >> 18) & 0xF) * ((rnum >> 18) & 0xF);
     let s10 = ((rnum >> 22) & 0xF) * ((rnum >> 22) & 0xF);
     let s11 = ((rnum >> 26) & 0xF) * ((rnum >> 26) & 0xF);
-    let s12v = ((rnum >> 30) | (rnum << 2)) & 0xF;
+    let s12v = rnum.rotate_left(2) & 0xF;
     let s12 = s12v * s12v;
 
     let (sh1, sh2) = if seed & 1 != 0 {

@@ -48,6 +48,8 @@ const NAN_F16: [u16; 4] = [0xFFFF; 4];
 /// Decode one block into `out[..fp.texels()]`, texels in (z, y, x) order.
 /// U8 values are 0..=255; F16 values are half bit patterns. Total: any 16
 /// bytes produce defined texels.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn decode_block(
     block: &[u8; 16],
     fp: AstcFootprint,

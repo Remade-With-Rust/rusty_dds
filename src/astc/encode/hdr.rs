@@ -91,6 +91,8 @@ const XDEST: [[(u8, u8); 6]; 8] = [
 ];
 
 /// Candidate value sextets for HDR RGB endpoints `e0`, `e1` (12-bit units).
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn mode11_candidates(e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 6]>) {
     out.clear();
     let r = |x: f32, s: f32, max: i32| ((x / s + 0.5) as i32).clamp(0, max);
@@ -161,6 +163,8 @@ fn mode11_candidates(e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 6]>) {
 /// Encode one HDR block. `t` holds the targets in the interpolation domain
 /// (LNS for HDR lanes, UNORM16 for LDR alpha); `h` the half values (for void
 /// extent); `opaque` means alpha is 1.0 everywhere.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn encode_block_hdr(
     ctx: &Ctx,
     profile: AstcProfile,

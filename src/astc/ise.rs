@@ -44,10 +44,10 @@ pub const fn sequence_bits(count: u32, range: usize) -> u32 {
     let (bits, trits, quints) = FORM[range];
     let mut n = count * bits as u32;
     if trits != 0 {
-        n += (8 * count + 4) / 5;
+        n += (8 * count).div_ceil(5);
     }
     if quints != 0 {
-        n += (7 * count + 2) / 3;
+        n += (7 * count).div_ceil(3);
     }
     n
 }
@@ -392,6 +392,8 @@ mod encode_tests {
     use super::*;
 
     #[test]
+    // One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+    #[allow(clippy::needless_range_loop)]
     fn partial_blocks_leave_unwritten_bits_zero() {
         // A final block of k < 5 trits writes 2, 4, 5, 7 T bits; the chosen T
         // for a tuple whose missing digits are zero must fit in those bits.
@@ -414,6 +416,8 @@ mod encode_tests {
     }
 
     #[test]
+    // One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+    #[allow(clippy::needless_range_loop)]
     fn encode_decode_round_trip_every_range_and_length() {
         let mut x: u32 = 1;
         for r in 0..RANGE_COUNT {

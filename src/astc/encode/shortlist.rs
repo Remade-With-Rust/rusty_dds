@@ -9,7 +9,10 @@
 //! `astc_harness modehist medium <images>`. Do not edit.
 
 /// (footprint width, height, [(raw block mode, per mille of blocks covered before it)]).
-pub(crate) static SHORTLIST: &[(u8, u8, &[(u16, u16)])] = &[
+/// One footprint's entry: width, height, its block modes.
+pub(crate) type ShortlistEntry = (u8, u8, &'static [(u16, u16)]);
+
+pub(crate) static SHORTLIST: &[ShortlistEntry] = &[
     (
         4,
         4,

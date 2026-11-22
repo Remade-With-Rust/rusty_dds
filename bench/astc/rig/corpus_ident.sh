@@ -2,7 +2,7 @@
 # Byte identity vs 0.11.0 over the whole astcenc corpus: all six decode cells
 # (--ir-decode all) and the row seam, per file, both arms. Skips 3D files
 # (the bench's loader is 2D only); prints counts and any mismatch.
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 n=0; same=0; diff=0; skip=0
 for f in /root/astcws/corpus/*.astc /root/astcws/thirdparty/astc-codec/src/decoder/testdata/*.astc; do
   [ -f "$f" ] || continue

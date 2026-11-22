@@ -24,9 +24,9 @@ pub(crate) struct Grid {
     /// contributions as f32 (exact conversions of the u8 values).
     pub tap_i: Vec<[u8; 4]>,
     pub tap_c: Vec<[f32; 4]>,
-    /// Transpose: the texels each stored weight feeds and how much, flattened;
-    /// stored weight j owns `feed[feed_at[j]..feed_at[j + 1]]`.
-    pub feed: Vec<(u8, u8)>,
+    /// Transpose: the texels each stored weight feeds and how much, flattened
+    /// (`feed_t`/`feed_c` below); stored weight j owns entries
+    /// `feed_at[j]..feed_at[j + 1]`.
     pub feed_at: Vec<u16>,
     /// Per stored weight: the sum of its contributions, and the sum of the
     /// squared contributions / 16, each accumulated in `feed` order (the
@@ -40,6 +40,35 @@ pub(crate) struct Grid {
     pub feed_c16: Vec<f32>,
     /// The grid equals the footprint (infill is the identity).
     pub full: bool,
+    /// Padded, transposed copies of `tap_i`/`tap_c` and of the feeds, for the
+    /// encoder's eight-lane twins (`encode::simd`). Texels are padded to
+    /// `tp` (a multiple of 8, at most 216): tap `k` of texel `t` is at
+    /// `k * tp + t`, index (masked to 0..64) as `i32` and contribution as
+    /// `f32`; padding texels have (0, 0.0). Stored weights are padded to
+    /// `jp` (a multiple of 8, at most 64): feed `f` of weight `j` is at
+    /// `f * jp + j` (texel, contribution, contribution / 16), each weight's
+    /// feeds in `feed` order and then (0, 0.0, 0.0) up to `fmax`; the
+    /// per-weight sums `feed_cs`/`feed_den` padded with 0.0.
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub tp: usize,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub tap_iv: Vec<i32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub tap_cv: Vec<f32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub jp: usize,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub fmax: usize,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub feed_tv: Vec<i32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub feed_cv: Vec<f32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub feed_c16v: Vec<f32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub feed_csv: Vec<f32>,
+    #[cfg_attr(not(all(feature = "simd", target_arch = "x86_64")), allow(dead_code))]
+    pub feed_denv: Vec<f32>,
     /// Mean over texels of sum((contribution / 16)^2): how much infill
     /// averages away independent quantisation noise on the stored weights.
     pub noise: f32,
@@ -177,6 +206,34 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         }
     }
     noise /= taps.len().max(1) as f32;
+    let tp = taps.len().div_ceil(8) * 8;
+    let mut tap_iv = alloc::vec![0i32; 4 * tp];
+    let mut tap_cv = alloc::vec![0f32; 4 * tp];
+    for t in 0..taps.len() {
+        for k in 0..4 {
+            tap_iv[k * tp + t] = (tap_i[t][k] & 63) as i32;
+            tap_cv[k * tp + t] = tap_c[t][k];
+        }
+    }
+    let jp = count.div_ceil(8) * 8;
+    let fmax = (0..count)
+        .map(|j| (feed_at[j + 1] - feed_at[j]) as usize)
+        .max()
+        .unwrap_or(0);
+    let mut feed_tv = alloc::vec![0i32; fmax * jp];
+    let mut feed_cv = alloc::vec![0f32; fmax * jp];
+    let mut feed_c16v = alloc::vec![0f32; fmax * jp];
+    let mut feed_csv = alloc::vec![0f32; jp];
+    let mut feed_denv = alloc::vec![0f32; jp];
+    for j in 0..count {
+        for (f, e) in (feed_at[j] as usize..feed_at[j + 1] as usize).enumerate() {
+            feed_tv[f * jp + j] = feed_t[e] as i32;
+            feed_cv[f * jp + j] = feed_c[e];
+            feed_c16v[f * jp + j] = feed_c16[e];
+        }
+        feed_csv[j] = feed_cs[j];
+        feed_denv[j] = feed_den[j];
+    }
     Grid {
         noise,
         w: gw as u8,
@@ -187,7 +244,6 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         taps4,
         tap_i,
         tap_c,
-        feed,
         feed_at,
         feed_cs,
         feed_den,
@@ -195,5 +251,15 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         feed_c,
         feed_c16,
         full,
+        tp,
+        tap_iv,
+        tap_cv,
+        jp,
+        fmax,
+        feed_tv,
+        feed_cv,
+        feed_c16v,
+        feed_csv,
+        feed_denv,
     }
 }

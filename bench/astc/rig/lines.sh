@@ -1,6 +1,6 @@
 #!/bin/bash
 # lines.sh <tag> <inst> <min_ir> <file-substr>...: per-line Ir in the work arm.
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 F=$CP/cg/$1/$2.work.out; MIN=$3; shift 3
 callgrind_annotate --auto=yes --threshold=100 $F 2>/dev/null > /tmp/ann.$$
 for s in "$@"; do

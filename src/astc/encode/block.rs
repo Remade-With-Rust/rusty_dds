@@ -24,7 +24,7 @@
 
 use alloc::vec::Vec;
 
-use super::context::{Ctx, Mode};
+use super::context::{label_bits, Ctx, Mode, PartBits};
 use crate::astc::cem;
 use crate::astc::ise::LEVELS;
 use crate::astc::parse::{BlockKind, SymbolicBlock};
@@ -76,9 +76,10 @@ pub(crate) struct Target {
 pub(super) const MAX_TEXELS: usize = 216;
 
 /// Squared colour quantisation step (255 / (levels - 1))^2 per range
-/// (baked literals: float const fn needs Rust 1.82).
+/// (baked literals: float const fn needs Rust 1.82; each is the shortest
+/// decimal for the f32 nearest the f64 quotient, `qstep2_table` checks).
 #[rustfmt::skip]
-static QSTEP2: [f32; 21] = [65025.0, 16256.25, 7225.0, 4064.0625, 2601.0, 1327.0408163265308, 802.7777777777777, 537.3966942148761, 289.0, 180.12465373961217, 122.92060491493385, 67.66389177939648, 42.751479289940825, 29.4363965595292, 16.383219954648524, 10.419003364845377, 7.204986149584487, 4.031558063116126, 2.5720897116411536, 1.7824346920314682, 1.0];
+static QSTEP2: [f32; 21] = [65025.0, 16256.25, 7225.0, 4064.0625, 2601.0, 1327.0408, 802.7778, 537.39667, 289.0, 180.12465, 122.92061, 67.663895, 42.75148, 29.436396, 16.38322, 10.4190035, 7.204986, 4.031558, 2.5720897, 1.7824347, 1.0];
 
 /// Endpoint classes searched (the value count decides the colour range).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +214,8 @@ fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
 /// Principal-axis line fit of the texels `idx` over the channels in `mask`.
 /// Returns the line and fills `w` (ideal weights) for those texels; returns
 /// the residual error off the line.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -> (Line, f32) {
     let cw = src.tgt.cw;
     let n = idx.len().max(1) as f32;
@@ -425,6 +428,25 @@ pub(super) fn decimate(
         }
         return;
     }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if super::simd::decimate(t, g, ideal, iters, out) {
+            return;
+        }
+    }
+    decimate_scalar(g, ideal, iters, out);
+}
+
+/// The scalar body of [`decimate`] for a grid that is not the identity: the
+/// oracle of `simd::decimate`, and the kernel without AVX2.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
+pub(super) fn decimate_scalar(
+    g: &crate::astc::tables::Grid,
+    ideal: &[f32; MAX_TEXELS],
+    iters: u8,
+    out: &mut [f32; 64],
+) {
     // Start from the contribution-weighted average of the texels each stored
     // weight feeds.
     for j in 0..g.count {
@@ -480,7 +502,7 @@ const fn build_wq_lut() -> [[u8; 257]; 12] {
             while v < n {
                 let l = crate::astc::quant::WEIGHT_UNQUANT_C[r][v] as u32;
                 let x = i as u32;
-                let d = if 4 * l > x { 4 * l - x } else { x - 4 * l };
+                let d = (4 * l).abs_diff(x);
                 if d < bd || (d == bd && (l as u8) < best) {
                     bd = d;
                     best = l as u8;
@@ -506,8 +528,25 @@ pub(super) fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
 }
 
 pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
-    let gw = &gw[..64];
-    for (t, tp) in ctx.grids[grid].taps4.iter().enumerate() {
+    let g = &ctx.grids[grid];
+    let gw: &[u8; 64] = gw[..64].try_into().unwrap();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if super::simd::infill_eff(t, g, gw, out) {
+            return;
+        }
+    }
+    infill_eff_scalar(g, gw, out);
+}
+
+/// The scalar body of [`infill_eff`]: the oracle of `simd::infill_eff`, and
+/// the kernel without AVX2.
+pub(super) fn infill_eff_scalar(
+    g: &crate::astc::tables::Grid,
+    gw: &[u8; 64],
+    out: &mut [u8; MAX_TEXELS],
+) {
+    for (t, tp) in g.taps4.iter().enumerate() {
         let mut s = 0u32;
         for &(k, c) in tp {
             s += gw[(k & 63) as usize] as u32 * c as u32;
@@ -516,20 +555,33 @@ pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_T
     }
 }
 
-/// Least-squares endpoints for each channel of one partition given integer
-/// texel weights (0..=64) per plane.
-fn refit_part(
-    src: &Src,
+/// The least-squares sums of [`refit_part`]: per plane, `a = sum u^2`,
+/// `b = sum u t`, `d = sum t^2` (t = weight / 64, u = 1 - t), and per
+/// channel `x0 = sum u x`, `x1 = sum t x`. Plane 2 sums stay 0 without a
+/// second plane; channels at or past `chans` are not meaningful.
+#[derive(Debug, PartialEq)]
+pub(super) struct RefitSums {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    pub d: [f32; 2],
+    pub x0: [f32; 4],
+    pub x1: [f32; 4],
+}
+
+/// [`RefitSums`] one texel at a time: the oracle of `simd::refit_sums`, and
+/// the kernel without it. The weight sums (a, b, d) depend only on the
+/// plane, not the channel: accumulated once per plane, in the same texel
+/// order as a per-channel fit would, so every result is bit-identical to
+/// fitting each channel on its own.
+#[cfg_attr(all(feature = "simd", target_arch = "x86_64"), allow(dead_code))]
+pub(super) fn refit_sums_scalar(
+    px: &[[u8; 4]],
     idx: &[u8],
     w1: &[u8; MAX_TEXELS],
     w2: &[u8; MAX_TEXELS],
     ccs: usize,
     chans: usize,
-) -> [Option<(f32, f32)>; 4] {
-    // The weight sums (a, b, d) depend only on the plane, not the channel:
-    // accumulated once per plane, in the same texel order as a per-channel
-    // fit would, so every result is bit-identical to fitting each channel
-    // on its own.
+) -> RefitSums {
     let (mut a, mut b, mut d) = ([0f32; 2], [0f32; 2], [0f32; 2]);
     let (mut x0, mut x1) = ([0f32; 4], [0f32; 4]);
     let dual = ccs < 4;
@@ -552,11 +604,28 @@ fn refit_part(
         };
         for c in 0..chans {
             let (t, u) = if c == ccs { (t2, u2) } else { (t1, u1) };
-            let x = src.px[i][c] as f32;
+            let x = px[i][c] as f32;
             x0[c] += u * x;
             x1[c] += t * x;
         }
     }
+    RefitSums { a, b, d, x0, x1 }
+}
+
+/// Least-squares endpoints for each channel of one partition given integer
+/// texel weights (0..=64) per plane.
+fn refit_part(
+    src: &Src,
+    idx: &[u8],
+    w1: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+    chans: usize,
+) -> [Option<(f32, f32)>; 4] {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let RefitSums { a, b, d, x0, x1 } = super::simd::refit_sums(src.px, idx, w1, w2, ccs);
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let RefitSums { a, b, d, x0, x1 } = refit_sums_scalar(src.px, idx, w1, w2, ccs, chans);
     let mut out = [None; 4];
     for c in 0..chans {
         let pl = usize::from(c == ccs);
@@ -683,6 +752,7 @@ fn encode_endpoints(
 /// Exact error of one partition's texels for decoded endpoints `ep` and
 /// texel weights (plane 1, plane 2).
 fn exact_part_err(
+    ctx: &Ctx,
     src: &Src,
     idx: &[u8],
     ep: &cem::Endpoints,
@@ -691,30 +761,64 @@ fn exact_part_err(
     ccs: usize,
 ) -> f64 {
     let cw = src.tgt.cw;
-    let mut acc = [0u64; 4];
     // Opaque blocks are only ever given alpha-free endpoint classes, whose
     // decoded alpha is 0xFFFF: the alpha error is exactly 0, so skip it.
     let chans = if src.opaque { 3 } else { 4 };
-    for &i in idx {
-        let i = i as usize;
-        for c in 0..chans {
-            let w = if c == ccs { w2[i] } else { w1[i] };
-            let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
-            let s = src.px[i][c] as i64;
-            let d = if src.tgt.unorm8 {
-                (v >> 8) - s
-            } else {
-                v - s * 257
-            };
-            acc[c] += (d * d) as u64;
-        }
-    }
+    let (px, unorm8) = (src.px, src.tgt.unorm8);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let acc = super::simd::part_err_acc(
+        ctx.avx2,
+        px,
+        idx,
+        ep,
+        w1,
+        w2,
+        ccs,
+        chans,
+        unorm8,
+        src.tgt.profile == AstcProfile::LdrSrgb,
+    )
+    .unwrap_or_else(|| part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8));
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let acc = {
+        let _ = ctx;
+        part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8)
+    };
     let scale = if src.tgt.unorm8 {
         1.0
     } else {
         1.0 / (257.0 * 257.0)
     };
     (0..4).map(|c| acc[c] as f64 * cw[c] as f64 * scale).sum()
+}
+
+/// Per-channel sums of squared errors (8-bit target domain under
+/// `decode_unorm8`, 16-bit otherwise) of the texels `idx`; channels at or
+/// past `chans` stay 0. The oracle of `simd::part_err_acc`, and the kernel
+/// on targets without it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn part_err_acc_scalar(
+    px: &[[u8; 4]],
+    idx: &[u8],
+    ep: &cem::Endpoints,
+    w1: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+    chans: usize,
+    unorm8: bool,
+) -> [u64; 4] {
+    let mut acc = [0u64; 4];
+    for &i in idx {
+        let i = i as usize;
+        for c in 0..chans {
+            let w = if c == ccs { w2[i] } else { w1[i] };
+            let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
+            let s = px[i][c] as i64;
+            let d = if unorm8 { (v >> 8) - s } else { v - s * 257 };
+            acc[c] += (d * d) as u64;
+        }
+    }
+    acc
 }
 
 /// Candidate classes for this block.
@@ -944,8 +1048,25 @@ fn residual(
     plane2: bool,
 ) -> f32 {
     let g = &ctx.grids[grid];
-    let mut e = 0f32;
     let tw = if plane2 { &fit.tw2 } else { &fit.tw1 };
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if let Some(e) = super::simd::residual(t, g, dec, ideal, tw) {
+            return e;
+        }
+    }
+    residual_scalar(g, dec, ideal, tw)
+}
+
+/// The scalar body of [`residual`]: the oracle of `simd::residual`, and the
+/// kernel without AVX2.
+pub(super) fn residual_scalar(
+    g: &crate::astc::tables::Grid,
+    dec: &[f32; 64],
+    ideal: &[f32; MAX_TEXELS],
+    tw: &[f32; MAX_TEXELS],
+) -> f32 {
+    let mut e = 0f32;
     for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
         let mut v = 0f32;
         for k in 0..4 {
@@ -960,6 +1081,8 @@ fn residual(
 #[allow(clippy::too_many_arguments)]
 /// Encode one candidate exactly with `refine` weight/endpoint passes; updates
 /// `best` and returns the lowest exact error this candidate reached.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn exact_candidate(
     ctx: &Ctx,
     prm: &Params,
@@ -1024,7 +1147,7 @@ fn exact_candidate(
             for &(cemv, v) in encs.iter() {
                 let raw = cem::decode(cemv, &v);
                 let ep = cem::expand(&raw, src.tgt.profile);
-                let e = exact_part_err(src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
+                let e = exact_part_err(ctx, src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
                 seen[cemv as usize] = true;
                 if e < chosen[cemv as usize][p].0 {
                     chosen[cemv as usize][p] = (e, v);
@@ -1088,17 +1211,28 @@ fn exact_candidate(
         for p in 0..parts {
             let v = chosen[cemv][p].1;
             let ep = cem::expand(&cem::decode(cemv as u8, &v), src.tgt.profile);
+            // Per channel: the line direction d and start e0 (in the 16-bit
+            // domain). `den` depends on neither the texel nor x, so it is
+            // summed once per partition, in the per-texel loop's channel
+            // order: the same value the loop computed for every texel.
+            let d: [f32; 4] = core::array::from_fn(|c| ep.e1[c] as f32 - ep.e0[c] as f32);
+            let e0: [f32; 4] = core::array::from_fn(|c| ep.e0[c] as f32);
+            let cw = src.tgt.cw;
+            let mut den = 0f32;
+            for c in 0..4 {
+                if c != fit.ccs {
+                    den += d[c] * d[c] * cw[c];
+                }
+            }
             for &i in fit.part(p) {
                 let i = i as usize;
-                let (mut num, mut den) = (0f32, 0f32);
+                let mut num = 0f32;
                 for c in 0..4 {
                     if c == fit.ccs {
                         continue;
                     }
-                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
-                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
-                    num += d * x * src.tgt.cw[c];
-                    den += d * d * src.tgt.cw[c];
+                    let x = src.px[i][c] as f32 * 257.0 - e0[c];
+                    num += d[c] * x * cw[c];
                 }
                 w1[i] = if den > 0.0 {
                     (num / den).clamp(0.0, 1.0)
@@ -1107,10 +1241,9 @@ fn exact_candidate(
                 };
                 if dual {
                     let c = fit.ccs;
-                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
-                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
-                    w2[i] = if d != 0.0 {
-                        (x / d).clamp(0.0, 1.0)
+                    let x = src.px[i][c] as f32 * 257.0 - e0[c];
+                    w2[i] = if d[c] != 0.0 {
+                        (x / d[c]).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
@@ -1131,6 +1264,8 @@ fn exact_candidate(
 
 /// k-means clustering (k = 2..=4) of the block's colours; deterministic
 /// farthest-point seeding and a fixed iteration count. Returns labels.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn k_means(src: &Src, k: usize, labels: &mut [u8; MAX_TEXELS]) {
     let n = src.n;
     let col = |i: usize| -> [f32; 4] {
@@ -1250,13 +1385,99 @@ const PERM4: [[u8; 4]; 24] = [
 ];
 
 /// Texels a pattern disagrees with a clustering on, under the best label
-/// matching (confusion matrix, all permutations).
+/// matching (confusion matrix, all permutations). The per-texel walk: the
+/// oracle of [`mismatch_bits`].
+#[cfg(test)]
 fn mismatch(pattern: &[u8], labels: &[u8], k: usize) -> u32 {
     let mut cm = [[0u32; 4]; 4];
     for (&a, &b) in pattern.iter().zip(labels) {
         cm[a as usize][b as usize] += 1;
     }
-    let n = pattern.len() as u32;
+    best_matching(&cm, pattern.len() as u32, k)
+}
+
+/// [`mismatch`] from per-label bitsets and counts (pattern, clustering;
+/// `words` 64-bit words of texels, every label < `k`).
+/// Only the leading `(k - 1) x (k - 1)` cells of the confusion matrix are
+/// popcounts; the last row and column follow from the row sums (pattern
+/// partition sizes) and column sums (cluster sizes). Integer counts, so the
+/// matrix, and the result, are exactly the walk's.
+#[inline(always)]
+pub(super) fn mismatch_bits(pat: &PartBits, lab: &PartBits, k: usize, words: usize) -> u32 {
+    let (pb, pc, lb, lc) = (&pat.bits, &pat.cnt, &lab.bits, &lab.cnt);
+    let mut cm = [[0u32; 4]; 4];
+    let last = k - 1;
+    for a in 0..last {
+        let mut row = 0;
+        for b in 0..last {
+            let mut s = 0;
+            for w in 0..words {
+                s += (pb[a][w] & lb[b][w]).count_ones();
+            }
+            cm[a][b] = s;
+            row += s;
+        }
+        cm[a][last] = pc[a] - row;
+    }
+    let mut row = 0;
+    for b in 0..last {
+        let col: u32 = (0..last).map(|a| cm[a][b]).sum();
+        cm[last][b] = lc[b] - col;
+        row += cm[last][b];
+    }
+    cm[last][last] = pc[last] - row;
+    let n = (0..k).map(|a| pc[a]).sum();
+    best_matching(&cm, n, k)
+}
+
+/// The best `m` patterns (three or four partitions) by [`mismatch_bits`]
+/// with the clustering `labels`, ties by pattern index, into `top` (empty on
+/// entry). Kept out of line: inlined, it re-rolled the two-partition ranking
+/// loop beside it (+0.12% Ir at Fast). With the POPCNT instruction it runs
+/// as `simd::rank_patterns` (the same body compiled for it).
+#[inline(never)]
+fn rank_patterns(
+    ctx: &Ctx,
+    bits: &[PartBits],
+    labels: &[u8],
+    k: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.popcnt {
+        return super::simd::rank_patterns(t, bits, labels, k, m, top);
+    }
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let _ = ctx;
+    rank_patterns_body(bits, labels, k, m, top);
+}
+
+/// The body of [`rank_patterns`] (inlined into each instruction-set variant).
+#[inline(always)]
+pub(super) fn rank_patterns_body(
+    bits: &[PartBits],
+    labels: &[u8],
+    k: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    let lab = label_bits(labels);
+    let words = labels.len().div_ceil(64);
+    for (pi, pb) in bits.iter().enumerate() {
+        let key = (mismatch_bits(pb, &lab, k, words), pi);
+        if top.len() == m && key >= top[m - 1] {
+            continue;
+        }
+        let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+        top.insert(pos, key);
+        top.truncate(m);
+    }
+}
+
+/// `n` minus the largest diagonal sum of the confusion matrix over all
+/// label permutations (k = 3 or 4).
+fn best_matching(cm: &[[u32; 4]; 4], n: u32, k: usize) -> u32 {
     let mut best = 0u32;
     if k == 3 {
         for p in PERM3.iter() {
@@ -1277,6 +1498,8 @@ fn mismatch(pattern: &[u8], labels: &[u8], k: usize) -> u32 {
 
 /// Lowest absolute correlation between a channel and the others, and that
 /// channel (for the dual-plane gate).
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn weakest_channel(src: &Src) -> (usize, f32) {
     let n = src.n as f32;
     let mut mean = [0f32; 4];
@@ -1321,6 +1544,8 @@ fn weakest_channel(src: &Src) -> (usize, f32) {
 
 /// Encode one block of `n` texels (z, y, x order; edge texels already
 /// clamped). Returns the symbolic block and its exact error.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]]) -> Best {
     let n = ctx.texels;
     let first = px[0];
@@ -1390,31 +1615,31 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             3 => &ctx.part3,
             _ => &ctx.part4,
         };
-        let mut lb = [0u64; 4];
         if k == 2 {
+            let mut lb = [0u64; 4];
             for i in 0..n {
                 if labels[i] == 1 {
                     lb[i / 64] |= 1 << (i % 64);
                 }
             }
-        }
-        for (pi, p) in pats.iter().enumerate() {
-            let mis = if k == 2 {
+            // Words past the footprint's texels are zero in both bitsets.
+            let words = n.div_ceil(64);
+            for (pi, p) in pats.iter().enumerate() {
                 // popcount of the XOR of bitsets, either labelling.
-                let x = (0..4)
+                let x = (0..words)
                     .map(|w| (p.bits[w] ^ lb[w]).count_ones())
                     .sum::<u32>();
-                x.min(n as u32 - x)
-            } else {
-                mismatch(&p.labels, &labels[..n], k)
-            };
-            let key = (mis, pi);
-            if top.len() == m && key >= top[m - 1] {
-                continue;
+                let key = (x.min(n as u32 - x), pi);
+                if top.len() == m && key >= top[m - 1] {
+                    continue;
+                }
+                let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+                top.insert(pos, key);
+                top.truncate(m);
             }
-            let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
-            top.insert(pos, key);
-            top.truncate(m);
+        } else {
+            let bits = if k == 3 { &ctx.bits3 } else { &ctx.bits4 };
+            rank_patterns(ctx, bits, &labels[..n], k, m, top);
         }
         for (j, &(_, pi)) in top.iter().enumerate() {
             let p = &pats[pi];
@@ -1442,5 +1667,48 @@ impl SymbolicBlock {
     }
     pub(crate) fn empty_void_ldr() -> Self {
         Self::empty(BlockKind::VoidLdr, 0)
+    }
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    use super::*;
+
+    /// QSTEP2 holds (255 / (levels - 1))^2 computed in f64 and rounded to f32.
+    #[test]
+    fn qstep2_table() {
+        for (r, &q) in QSTEP2.iter().enumerate() {
+            let levels = LEVELS[r] as f64;
+            let x = 255.0 / (levels - 1.0);
+            assert_eq!(q.to_bits(), ((x * x) as f32).to_bits(), "range {r}");
+        }
+    }
+    use crate::astc::testgen::Rng;
+
+    /// The bitset mismatch equals the per-texel walk, for every texel count
+    /// (1..=216, so every word count and partial word) and k = 3, 4,
+    /// including labellings that leave some labels empty.
+    #[test]
+    fn mismatch_bits_equals_walk() {
+        let mut rng = Rng::new(0x5EED_3A11);
+        for n in 1..=MAX_TEXELS {
+            for k in [3usize, 4] {
+                for trial in 0..24 {
+                    // Some trials use fewer distinct labels than k.
+                    let used = if trial % 4 == 0 {
+                        1 + rng.below(k as u64)
+                    } else {
+                        k as u64
+                    };
+                    let pat: Vec<u8> = (0..n).map(|_| rng.below(used) as u8).collect();
+                    let lab: Vec<u8> = (0..n).map(|_| rng.below(k as u64) as u8).collect();
+                    assert_eq!(
+                        mismatch_bits(&label_bits(&pat), &label_bits(&lab), k, n.div_ceil(64)),
+                        mismatch(&pat, &lab, k),
+                        "n {n} k {k} trial {trial}"
+                    );
+                }
+            }
+        }
     }
 }
