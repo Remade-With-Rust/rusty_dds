@@ -125,7 +125,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_plane: true,
             dual_corr_limit: 0.85,
             grid_iters: 3,
-            part2_skip_err: 1.0,
+            part2_skip_err: 0.75,
         },
         AstcPreset::Thorough | AstcPreset::Exhaustive => Params {
             refine_top: 3,
@@ -136,7 +136,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_plane: true,
             dual_corr_limit: 0.98,
             grid_iters: 4,
-            part2_skip_err: 0.25,
+            part2_skip_err: 0.2,
         },
     }
 }

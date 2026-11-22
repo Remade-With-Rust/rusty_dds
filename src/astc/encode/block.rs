@@ -51,8 +51,8 @@ pub(crate) struct Params {
     pub dual_corr_limit: f32,
     /// Least-squares iterations when fitting weights to a decimated grid.
     pub grid_iters: u8,
-    /// Skip the two-partition search when the best one-partition error per
-    /// texel (in the 8-bit domain) is already below this.
+    /// Stop after the one-partition search when its per-channel MSE (8-bit
+    /// domain) is at most this times (texels / 16)^2.
     pub part2_skip_err: f32,
 }
 
@@ -351,7 +351,7 @@ fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &
     for j in 0..g.count {
         let mut s = 0f32;
         let mut cs = 0f32;
-        for &(t, c) in &g.feeds[j] {
+        for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
             s += ideal[t as usize] * c as f32;
             cs += c as f32;
         }
@@ -370,7 +370,7 @@ fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &
         for j in 0..g.count {
             let mut num = 0f32;
             let mut den = 0f32;
-            for &(t, c) in &g.feeds[j] {
+            for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
                 let cf = c as f32 * (1.0 / 16.0);
                 num += cf * resid[t as usize];
                 den += cf * cf;
@@ -1054,6 +1054,16 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
     let zeros = [0u8; MAX_TEXELS];
     let fit1 = make_fit(&src, 1, 0, &zeros, 4);
     search_fit(ctx, prm, &src, &fit1, &mut best);
+    // Early out: stop after the one-partition search when the block is
+    // already good enough. The threshold is a per-channel MSE that grows with
+    // the square of the texel count (larger blocks are allowed more error),
+    // set per preset.
+    let chans = if opaque { 3.0 } else { 4.0 };
+    let r = n as f64 / 16.0;
+    let good_enough = prm.part2_skip_err as f64 * r * r;
+    if best.err / (n as f64 * chans) <= good_enough {
+        return best;
+    }
     if prm.dual_plane {
         let (c, r2) = weakest_channel(&src);
         if c < 4 && r2 < prm.dual_corr_limit * prm.dual_corr_limit {
@@ -1061,8 +1071,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             search_fit(ctx, prm, &src, &fitd, &mut best);
         }
     }
-    let per_texel = best.err / n as f64;
-    if prm.max_partitions >= 2 && prm.part2_candidates > 0 && per_texel > prm.part2_skip_err as f64 {
+    if prm.max_partitions >= 2 && prm.part2_candidates > 0 && best.err / (n as f64 * chans) > good_enough {
         let mut labels = [0u8; MAX_TEXELS];
         two_means(&src, &mut labels);
         // Rank patterns by mismatch with the clustering (either labelling):

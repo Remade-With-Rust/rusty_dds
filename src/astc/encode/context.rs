@@ -19,8 +19,10 @@ pub(crate) struct Grid {
     pub count: usize,
     /// `taps[texel]` = (number of taps, [(index, contribution); 4]).
     pub taps: Vec<(u8, [(u8, u8); 4])>,
-    /// Transpose: for each stored weight, the texels it feeds and how much.
-    pub feeds: Vec<Vec<(u8, u8)>>,
+    /// Transpose: the texels each stored weight feeds and how much, flattened;
+    /// stored weight j owns `feed[feed_at[j]..feed_at[j + 1]]`.
+    pub feed: Vec<(u8, u8)>,
+    pub feed_at: Vec<u16>,
     /// The grid equals the footprint (infill is the identity).
     pub full: bool,
     /// Mean over texels of sum((contribution / 16)^2): how much infill
@@ -131,6 +133,13 @@ fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
             feeds[idx as usize].push((t as u8, c));
         }
     }
+    let mut feed = Vec::new();
+    let mut feed_at = Vec::with_capacity(count + 1);
+    for f in &feeds {
+        feed_at.push(feed.len() as u16);
+        feed.extend_from_slice(f);
+    }
+    feed_at.push(feed.len() as u16);
     let mut noise = 0f32;
     for &(n, tp) in taps.iter() {
         for &(_, c) in &tp[..n as usize] {
@@ -146,7 +155,8 @@ fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         d: gd as u8,
         count,
         taps,
-        feeds,
+        feed,
+        feed_at,
         full: gw == bw && gh == bh && gd == bd,
     }
 }

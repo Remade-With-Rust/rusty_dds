@@ -1199,6 +1199,113 @@ fn cmd_blockdbg(args: &[String]) -> bool {
     true
 }
 
+/// Run astcenc on every image at a float quality, single-threaded; returns
+/// (mean PSNR on our decode, total seconds of astcenc's own coding time).
+fn astcenc_at(bin: &str, q: f32, fp: AstcFootprint, imgs: &[(String, u32, u32, Vec<u8>)], tmp: &str) -> (f64, f64) {
+    let mut psnr = 0f64;
+    let mut secs = 0f64;
+    for (path, w, h, img) in imgs {
+        let out = format!("{tmp}/es1.astc");
+        let _ = std::fs::remove_file(&out);
+        let qs = format!("{q}");
+        let fps = fp.to_string();
+        let o = std::process::Command::new(bin)
+            .args(["-cl", path, &out, &fps, &qs, "-j", "1"])
+            .output()
+            .expect("astcenc");
+        // astcenc prints "Coding time:  X.XXXX s" (compression only, no I/O).
+        let text = String::from_utf8_lossy(&o.stdout);
+        let t = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("Coding time"))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(f64::NAN);
+        secs += t;
+        let d = std::fs::read(&out).unwrap();
+        let f = astc::AstcFile::parse(&d).unwrap();
+        let mut dec = vec![0u8; img.len()];
+        astc::decode_rgba8_into(f.data, *w, *h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        psnr += psnr_img(img, &dec);
+    }
+    (psnr / imgs.len() as f64, secs)
+}
+
+/// ES1: equal-quality encode speed. For each footprint, our preset's mean
+/// PSNR and single-thread rate; astcenc's float -quality bisected until its
+/// mean PSNR matches ours within 0.05 dB; then astcenc-none and astcenc-avx2
+/// single-thread rates at that quality.
+///   astch es1 <preset> <fps> <png>...
+fn cmd_es1(args: &[String]) -> bool {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let fps: Vec<AstcFootprint> = args[1].split(',').map(fp_parse).collect();
+    let imgs: Vec<(String, u32, u32, Vec<u8>)> = args[2..]
+        .iter()
+        .map(|p| {
+            let (w, h, img) = load_rgba(p);
+            (p.clone(), w, h, img)
+        })
+        .collect();
+    let tmp = "/root/astcws/out/es1tmp";
+    std::fs::create_dir_all(tmp).unwrap();
+    let none = "/root/astcws/rel571/inst/bin/astcenc-none";
+    let avx2 = "/root/astcws/rel571/inst/bin/astcenc-avx2";
+    let px: f64 = imgs.iter().map(|i| (i.1 * i.2) as f64).sum();
+    println!("preset {:?}; {} images, {:.2} Mpx; single thread; astcenc rates from its own Coding time", preset, imgs.len(), px / 1e6);
+    println!("| footprint | ours dB | ours MT/s | astcenc -quality | astcenc dB | none MT/s | avx2 MT/s | ours / none | ours / avx2 |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for &fp in &fps {
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+        let mut p_ours = 0f64;
+        let mut t_ours = 0f64;
+        for (_, w, h, img) in &imgs {
+            let mut best = f64::MAX;
+            let mut data = Vec::new();
+            for _ in 0..2 {
+                let t = std::time::Instant::now();
+                data = astc::encode_rgba8(img, *w, *h, &opts).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            t_ours += best;
+            let mut dec = vec![0u8; img.len()];
+            astc::decode_rgba8_into(&data, *w, *h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
+            p_ours += psnr_img(img, &dec);
+        }
+        p_ours /= imgs.len() as f64;
+        // Bisect astcenc quality (PSNR is monotone enough in quality for this).
+        let (mut lo, mut hi) = (0f32, 100f32);
+        let mut q = 50f32;
+        let mut p_ref = 0f64;
+        for _ in 0..12 {
+            q = (lo + hi) / 2.0;
+            p_ref = astcenc_at(none, q, fp, &imgs, tmp).0;
+            if (p_ref - p_ours).abs() <= 0.05 {
+                break;
+            }
+            if p_ref < p_ours {
+                lo = q;
+            } else {
+                hi = q;
+            }
+        }
+        let (_, t_none) = astcenc_at(none, q, fp, &imgs, tmp);
+        let (_, t_avx2) = astcenc_at(avx2, q, fp, &imgs, tmp);
+        let (r_ours, r_none, r_avx2) = (px / t_ours / 1e6, px / t_none / 1e6, px / t_avx2 / 1e6);
+        println!(
+            "| {fp} | {p_ours:.3} | {r_ours:.3} | {q:.2} | {p_ref:.3} | {r_none:.3} | {r_avx2:.3} | {:.2} | {:.2} |",
+            r_ours / r_none,
+            r_ours / r_avx2
+        );
+    }
+    true
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -1226,6 +1333,7 @@ fn main() {
         Some("dds") => cmd_dds(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
         Some("quality") => cmd_quality(&args[2..]),
         Some("blockdbg") => cmd_blockdbg(&args[2..]),
+        Some("es1") => cmd_es1(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();
