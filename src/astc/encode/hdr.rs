@@ -409,13 +409,21 @@ fn repair_best(
     if range >= COLOR_NEAREST.len() - 1 {
         return;
     }
-    let mut ranked: Vec<(f64, usize)> = quantized
-        .iter()
-        .enumerate()
-        .map(|(j, v)| (endpoint_err(cem_v, profile, v, target, chans), j))
-        .collect();
-    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    for &(e, j) in ranked.iter().take(2) {
+    // The two lowest (error, index) pairs, in that order: what a stable sort
+    // by error (ties by index) would put first, without sorting the rest.
+    // Indices rise, so an equal error never displaces an earlier entry.
+    let mut two: [Option<(f64, usize)>; 2] = [None, None];
+    for (j, v) in quantized.iter().enumerate() {
+        let e = endpoint_err(cem_v, profile, v, target, chans);
+        let below = |s: Option<(f64, usize)>| s.map_or(true, |(b, _)| e.total_cmp(&b).is_lt());
+        if below(two[0]) {
+            two[1] = two[0];
+            two[0] = Some((e, j));
+        } else if below(two[1]) {
+            two[1] = Some((e, j));
+        }
+    }
+    for &(e, j) in two.iter().flatten() {
         let mut v = quantized[j];
         if repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
             quantized.push(v);

@@ -9,7 +9,7 @@ H=/root/astcws/astc-encoder/Test/Images
 J=${J:-16}
 jobs() {
   for img in Small/HDR-RGB/hdr-rgb-00.hdr HDRIHaven/HDR-RGB/hdr-rgb-arboretum.hdr@512,256,256,256 \
-             HDRIHaven/HDR-RGB/hdr-rgb-bellparkpier.hdr@256,128,256,256 HDRIHaven/HDR-RGB/hdr-rgb-canarywharf.hdr@768,384,256,256; do
+             HDRIHaven/HDR-RGB/hdr-rgb-bellparkpier.hdr@256,128,256,256 HDRIHaven/HDR-RGB/hdr-rgb-canarywharf.hdr@384,384,256,256; do
     for p in fast medium thorough; do for fp in 4x4 6x6 8x8 12x12; do echo "$p $fp $img"; done; done
   done
 }
