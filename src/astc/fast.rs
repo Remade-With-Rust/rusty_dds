@@ -138,6 +138,17 @@ impl FastCtx {
                     w2[t] = s.weights[t * stride + 1];
                 }
             }
+        } else if !s.dual_plane {
+            // One plane: the taps read the stored weights in place (no staging
+            // copy), and plane 2 is not interpolated: `w2` is only read for
+            // channel `ccs`, and `ccs` is 4 (none) here.
+            for (t, &(nt, tp)) in g.taps.iter().enumerate() {
+                let mut a = 8u32;
+                for &(k, c) in &tp[..nt as usize] {
+                    a += s.weights[k as usize] as u32 * c as u32;
+                }
+                w1[t] = (a >> 4) as u8;
+            }
         } else {
             let mut g1 = [0u8; 64];
             let mut g2 = [0u8; 64];
