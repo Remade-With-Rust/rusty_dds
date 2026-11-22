@@ -18,7 +18,7 @@ use super::footprint::AstcFootprint;
 use super::parse::{self, BlockKind};
 use super::partition::select_partition;
 use super::reference::{decode_block, Out};
-use super::tables::{build_grid, Grid};
+use super::tables::{build_taps, Taps};
 use super::texel::{lerp, lns_to_f16, unorm16_to_f16};
 use super::{AstcBlockStatus, AstcProfile};
 
@@ -47,12 +47,21 @@ pub(crate) fn u8_from_8bit(c0: u16, c1: u16, w: u8, srgb: bool) -> u16 {
 pub(crate) struct FastCtx {
     fp: AstcFootprint,
     texels: usize,
-    /// Grids seen so far, keyed by (w, h, d).
-    grids: Vec<((u8, u8, u8), Grid)>,
+    /// Grids seen so far, keyed by (w, h, d): only their taps (the encoder's
+    /// derived tables are never built here).
+    grids: Vec<((u8, u8, u8), Taps)>,
     /// Partition maps for counts 2..=4, seed 0..1024, built on first use.
     parts: Vec<Option<Box<[u8]>>>,
-    /// Every block mode classified for the footprint.
-    modes: Box<[parse::ModeInfo]>,
+    /// Block modes classified for the footprint, each on first use: a
+    /// surface (or one block row of it) meets a few dozen of the 2048, and
+    /// classifying all of them dominated the setup of a short decode.
+    modes: Box<[Option<parse::ModeInfo>]>,
+    /// Per-texel weights of the block being decoded, planes 1 and 2. Kept
+    /// across blocks instead of zero-filled per block: every cell a block
+    /// reads is written by that block (`w1` for texels `0..n` always, `w2`
+    /// whenever there is a second plane); with one plane `w2` is read but
+    /// never selected (`ccs` is 4), so a stale value cannot reach the output.
+    wts: Box<[[u8; 216]; 2]>,
 }
 
 impl FastCtx {
@@ -62,7 +71,8 @@ impl FastCtx {
             texels: fp.texels() as usize,
             grids: Vec::new(),
             parts: (0..3 * 1024).map(|_| None).collect(),
-            modes: (0..2048u16).map(|m| parse::mode_info(m, fp)).collect(),
+            modes: alloc::vec![None; 2048].into_boxed_slice(),
+            wts: Box::new([[0; 216]; 2]),
         }
     }
 
@@ -70,11 +80,12 @@ impl FastCtx {
         if let Some(i) = self.grids.iter().position(|(k, _)| *k == (w, h, d)) {
             return i;
         }
-        self.grids.push(((w, h, d), build_grid(self.fp, w as u32, h as u32, d as u32)));
+        self.grids.push(((w, h, d), build_taps(self.fp, w as u32, h as u32, d as u32)));
         self.grids.len() - 1
     }
 
-    fn partition_map(&mut self, count: u32, seed: u32) -> &[u8] {
+    /// Build the partition map for (count, seed) if needed; returns its slot.
+    fn partition_map(&mut self, count: u32, seed: u32) -> usize {
         let k = (count as usize - 2) * 1024 + (seed as usize & 1023);
         if self.parts[k].is_none() {
             let fp = self.fp;
@@ -89,7 +100,7 @@ impl FastCtx {
             }
             self.parts[k] = Some(v.into_boxed_slice());
         }
-        self.parts[k].as_deref().unwrap_or(&[])
+        k
     }
 
     /// Decode one block; identical to [`decode_block`].
@@ -103,7 +114,15 @@ impl FastCtx {
         let fp = self.fp;
         let b = u128::from_le_bytes(*block);
         let mode = (b & 0x7FF) as u16;
-        let s = parse::parse_with(b, mode, fp, self.modes[mode as usize]);
+        let info = match self.modes[mode as usize] {
+            Some(i) => i,
+            None => {
+                let i = parse::mode_info(mode, fp);
+                self.modes[mode as usize] = Some(i);
+                i
+            }
+        };
+        let s = parse::parse_with(b, mode, fp, info);
         if s.kind != BlockKind::Normal {
             return decode_block(block, fp, profile, out_kind, out);
         }
@@ -126,10 +145,20 @@ impl FastCtx {
         }
         // Texel weights through the grid's taps.
         let gi = self.grid(s.grid[0], s.grid[1], s.grid[2]);
-        let g = &self.grids[gi].1;
+        let pk = if parts > 1 {
+            Some(self.partition_map(parts as u32, s.partition_seed as u32))
+        } else {
+            None
+        };
+        let FastCtx {
+            grids,
+            parts: maps,
+            wts,
+            ..
+        } = self;
+        let [w1, w2] = &mut **wts;
+        let g = &grids[gi].1;
         let pw = g.count;
-        let mut w1 = [0u8; 216];
-        let mut w2 = [0u8; 216];
         let stride = if s.dual_plane { 2 } else { 1 };
         if g.full {
             for t in 0..n {
@@ -137,6 +166,17 @@ impl FastCtx {
                 if s.dual_plane {
                     w2[t] = s.weights[t * stride + 1];
                 }
+            }
+        } else if !s.dual_plane {
+            // One plane: the taps read the stored weights in place (no staging
+            // copy), and plane 2 is not interpolated: `w2` is only read for
+            // channel `ccs`, and `ccs` is 4 (none) here.
+            for (t, &(nt, tp)) in g.taps.iter().enumerate() {
+                let mut a = 8u32;
+                for &(k, c) in &tp[..nt as usize] {
+                    a += s.weights[k as usize] as u32 * c as u32;
+                }
+                w1[t] = (a >> 4) as u8;
             }
         } else {
             let mut g1 = [0u8; 64];
@@ -159,10 +199,9 @@ impl FastCtx {
             }
         }
         let ccs = if s.dual_plane { s.plane2_component as usize } else { 4 };
-        let pmap: &[u8] = if parts > 1 {
-            self.partition_map(parts as u32, s.partition_seed as u32)
-        } else {
-            &[]
+        let pmap: &[u8] = match pk {
+            Some(k) => maps[k].as_deref().unwrap_or(&[]),
+            None => &[],
         };
         let out = &mut out[..n];
         match out_kind {
@@ -175,9 +214,9 @@ impl FastCtx {
                 let ends: Ends = core::array::from_fn(|p| (eps[p].e0.map(|v| v >> 8), eps[p].e1.map(|v| v >> 8)));
                 let pm: &[u8] = if parts > 1 { pmap } else { &[] };
                 #[cfg(feature = "simd")]
-                super::simd::u8_texels(&ends, pm, &w1, &w2, ccs, srgb, n, out);
+                super::simd::u8_texels(&ends, pm, w1, w2, ccs, srgb, n, out);
                 #[cfg(not(feature = "simd"))]
-                u8_texels_scalar(&ends, pm, &w1, &w2, ccs, srgb, n, out);
+                u8_texels_scalar(&ends, pm, w1, w2, ccs, srgb, n, out);
             }
             Out::U8 => {
                 for t in 0..n {
@@ -240,8 +279,14 @@ mod tests {
 /// Endpoint pairs (8-bit values, four channels) per partition.
 pub(crate) type Ends = [([u16; 4], [u16; 4]); 4];
 
-/// Scalar oracle: 8-bit output for `n` texels.
+/// Scalar oracle: 8-bit output for `n` texels. The SSE2 twin is gated
+/// against it in tests; it runs in shipping code without `simd` and off
+/// x86_64 / aarch64.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    all(feature = "simd", target_arch = "x86_64", not(test)),
+    allow(dead_code)
+)]
 pub(crate) fn u8_texels_scalar(
     ends: &Ends,
     pmap: &[u8],
@@ -263,7 +308,7 @@ pub(crate) fn u8_texels_scalar(
 
 /// Weights of texel `t` per channel (plane 2 on channel `ccs`).
 #[inline(always)]
-#[cfg_attr(not(feature = "simd"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "simd", target_arch = "aarch64")), allow(dead_code))]
 pub(crate) fn wv(w1: &[u8; 216], w2: &[u8; 216], ccs: usize, t: usize) -> [u16; 4] {
     let a = w1[t] as u16;
     let b = w2[t] as u16;

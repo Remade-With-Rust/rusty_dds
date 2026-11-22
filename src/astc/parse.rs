@@ -225,22 +225,27 @@ pub(crate) fn parse_with(b: u128, mode: u16, fp: AstcFootprint, info: ModeInfo) 
         s.plane2_component = read_bits(b, below - 2, 2) as u8;
     }
 
-    // Colour values, LSB first from bit 17 or 29.
-    let mut raw = [0u8; 18];
+    // Colour values, LSB first from bit 17 or 29, unquantised as they are
+    // decoded (every value is below the range's level count, at most 256).
     let n = color_count as usize;
-    ise::decode(b, s.color_start as u32, color_range, &mut raw[..n]);
-    for i in 0..n {
-        s.color_values[i] = COLOR_UNQUANT[color_range][raw[i] as usize];
-    }
+    let cu = &COLOR_UNQUANT[color_range];
+    ise::decode_map(
+        b,
+        s.color_start as u32,
+        color_range,
+        &mut s.color_values[..n],
+        |v| cu[v as u8 as usize],
+    );
 
-    // Weights: the 128 bits reversed, read LSB first.
+    // Weights: the 128 bits reversed, read LSB first, unquantised as they are
+    // decoded (every value is below the range's level count, at most 32, so
+    // the mask never changes it).
     let rev = b.reverse_bits();
     let wn = g.weight_count() as usize;
-    let mut raww = [0u8; 64];
-    ise::decode(rev, 0, g.range as usize, &mut raww[..wn]);
-    for i in 0..wn {
-        s.weights[i] = WEIGHT_UNQUANT[g.range as usize][raww[i] as usize];
-    }
+    let wu = &WEIGHT_UNQUANT[g.range as usize];
+    ise::decode_map(rev, 0, g.range as usize, &mut s.weights[..wn], |v| {
+        wu[(v & 31) as usize]
+    });
     s
 }
 

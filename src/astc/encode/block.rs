@@ -120,8 +120,12 @@ struct Line {
     len2b: f32,
 }
 
-/// One partitioning with its ideal fit.
-struct Fit {
+/// One partitioning with its ideal fit. Lives in [`FitPool`] and is
+/// refilled in place for each block: only the cells a reader can reach are
+/// written (`labels`, `w1`, `tw1`, `tw2` for texels `0..n`, each partition's
+/// `idx` row up to its count, and `w2` when there is a second plane, the only
+/// case that reads it).
+pub(crate) struct Fit {
     parts: u8,
     seed: u16,
     labels: [u8; MAX_TEXELS],
@@ -145,6 +149,47 @@ impl Fit {
     fn part(&self, p: usize) -> &[u8] {
         &self.idx[p][..self.cnt[p]]
     }
+
+    fn new() -> Self {
+        Fit {
+            parts: 0,
+            seed: 0,
+            labels: [0; MAX_TEXELS],
+            lines: [Line::default(); 4],
+            w1: [0.0; MAX_TEXELS],
+            w2: [0.0; MAX_TEXELS],
+            ccs: 4,
+            perp: 0.0,
+            tw1: [0.0; MAX_TEXELS],
+            tw2: [0.0; MAX_TEXELS],
+            idx: [[0; MAX_TEXELS]; 4],
+            cnt: [0; 4],
+        }
+    }
+}
+
+/// Fits reused across the blocks of one encode call (the context owns it),
+/// so a fit is neither zero-filled nor moved per block: slot 0 is the
+/// one-partition fit, slot 1 the dual-plane one, slots 2.. the candidate
+/// partitionings. `order` and `top` are the partition ranking's scratch.
+#[derive(Default)]
+pub(crate) struct FitPool {
+    fits: Vec<Fit>,
+    order: Vec<usize>,
+    top: Vec<(u32, usize)>,
+    search: SearchScratch,
+}
+
+/// The mode search's working vectors, reused across calls (cleared, never
+/// shrunk): one allocation each per encode call instead of per fit / per
+/// candidate.
+#[derive(Default)]
+struct SearchScratch {
+    cands: Vec<Cand>,
+    top: Vec<usize>,
+    keep: Vec<usize>,
+    tried: Vec<(f64, usize, [u8; 64], [u8; 64])>,
+    encs: Vec<(u8, [u8; 8])>,
 }
 
 /// The best block found so far.
@@ -311,21 +356,15 @@ fn fit_channel(src: &Src, idx: &[u8], c: usize, line: &mut Line, w: &mut [f32; M
     line.len2b = d * d;
 }
 
-fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
-    let mut f = Fit {
-        parts,
-        seed,
-        labels: [0; MAX_TEXELS],
-        lines: [Line::default(); 4],
-        w1: [0.0; MAX_TEXELS],
-        w2: [0.0; MAX_TEXELS],
-        ccs,
-        perp: 0.0,
-        tw1: [0.0; MAX_TEXELS],
-        tw2: [0.0; MAX_TEXELS],
-        idx: [[0; MAX_TEXELS]; 4],
-        cnt: [0; 4],
-    };
+/// Fill `f` with the ideal fit of one partitioning (see [`Fit`] for which
+/// cells are written).
+fn make_fit(f: &mut Fit, src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) {
+    f.parts = parts;
+    f.seed = seed;
+    f.ccs = ccs;
+    f.perp = 0.0;
+    f.lines = [Line::default(); 4];
+    f.cnt = [0; 4];
     f.labels[..src.n].copy_from_slice(&labels[..src.n]);
     for i in 0..src.n {
         let p = f.labels[i] as usize;
@@ -336,22 +375,29 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
     if ccs < 4 {
         mask[ccs] = false;
     }
-    for p in 0..parts {
-        let (idx, cnt) = (f.idx[p as usize], f.cnt[p as usize]);
-        let idx = &idx[..cnt];
-        let (mut line, perp) = fit_line(src, idx, mask, &mut f.w1);
+    let Fit {
+        idx,
+        cnt,
+        w1,
+        w2,
+        lines,
+        perp: total,
+        ..
+    } = f;
+    for p in 0..parts as usize {
+        let idx = &idx[p][..cnt[p]];
+        let (mut line, perp) = fit_line(src, idx, mask, w1);
         if ccs < 4 {
-            fit_channel(src, idx, ccs, &mut line, &mut f.w2);
+            fit_channel(src, idx, ccs, &mut line, w2);
         }
-        f.lines[p as usize] = line;
-        f.perp += perp;
+        lines[p] = line;
+        *total += perp;
     }
     for i in 0..src.n {
         let l = &f.lines[f.labels[i] as usize];
         f.tw1[i] = l.len2;
         f.tw2[i] = l.len2b;
     }
-    f
 }
 
 /// Least-squares fit of per-texel ideal weights (scaled to 0..=64) to a
@@ -375,7 +421,11 @@ pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters:
         let cs = g.feed_cs[j];
         out[j] = if cs > 0.0 { 64.0 * s / cs } else { 32.0 };
     }
-    // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2.
+    // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2. The ranking
+    // call asks for none: return before zero-filling the residual buffer.
+    if iters == 0 {
+        return;
+    }
     let mut resid = [0f32; MAX_TEXELS];
     for _ in 0..iters {
         for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
@@ -643,7 +693,14 @@ struct Cand {
 /// grid) plus the expected quantisation noise of its weight range (scaled by
 /// how much the grid's infill averages it away) plus the expected endpoint
 /// quantisation error at the colour range the remaining bits allow.
-fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
+fn search_fit(
+    ctx: &Ctx,
+    prm: &Params,
+    src: &Src,
+    fit: &Fit,
+    best: &mut Best,
+    ss: &mut SearchScratch,
+) {
     let dual = fit.ccs < 4;
     let n = src.n;
     let cls = classes(src);
@@ -688,7 +745,14 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     sc.dec_err.iter_mut().for_each(|v| *v = -1.0);
     sc.refined.iter_mut().for_each(|v| *v = false);
     let (dec_err, dec1, dec2, refined) = (&mut sc.dec_err, &mut sc.dec1, &mut sc.dec2, &mut sc.refined);
-    let mut cands: Vec<Cand> = Vec::with_capacity(ctx.modes.len() * 2);
+    let SearchScratch {
+        cands,
+        top,
+        keep,
+        tried,
+        encs,
+    } = ss;
+    cands.clear();
     let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
     // The best k by estimate, ties by candidate index (a total order; index
     // order is mode order), kept while the candidates are generated. The grid
@@ -698,7 +762,7 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     // that rest the candidate cannot get in (the k-th estimate only falls).
     // The selected set is exactly the one a full evaluation selects.
     let k = prm.exact_candidates.max(1);
-    let mut top: Vec<usize> = Vec::with_capacity(k + 1);
+    top.clear();
     for (mi, m) in ctx.modes.iter().enumerate() {
         if m.dual != dual {
             continue;
@@ -748,8 +812,9 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     // Each kept mode also gets its other endpoint classes (adjacent entries:
     // candidates are pushed per mode, class after class), each at the colour
     // range its own value count allows.
-    let mut keep: Vec<usize> = top.clone();
-    for &t in &top {
+    keep.clear();
+    keep.extend_from_slice(top);
+    for &t in top.iter() {
         let m = cands[t].mode;
         let mut j = t;
         while j > 0 && cands[j - 1].mode == m {
@@ -762,8 +827,8 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             j += 1;
         }
     }
-    let mut tried: Vec<(f64, usize, [u8; 64], [u8; 64])> = Vec::with_capacity(keep.len());
-    for &i in &keep {
+    tried.clear();
+    for &i in keep.iter() {
         let c = &cands[i];
         let g = ctx.modes[c.mode].grid as usize;
         if !refined[g] && prm.grid_iters > 0 {
@@ -781,14 +846,14 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             quantize_weights(ctx.modes[c.mode].range as usize, &dec2[g][..count], &mut gw2[..count]);
         }
         // One unrefined pass for every kept candidate ...
-        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best);
+        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best, encs);
         tried.push((e, i, gw1, gw2));
     }
     // ... and the refinement passes only for the best few.
     if prm.refine > 0 {
         tried.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         for &(_, i, gw1, gw2) in tried.iter().take(prm.refine_top.max(1)) {
-            exact_candidate(ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best);
+            exact_candidate(ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best, encs);
         }
     }
 }
@@ -823,6 +888,7 @@ fn exact_candidate(
     gw2: [u8; 64],
     refine: u8,
     best: &mut Best,
+    encs: &mut Vec<(u8, [u8; 8])>,
 ) -> f64 {
     let mut mine = f64::MAX;
     let m: Mode = ctx.modes[cand.mode];
@@ -832,7 +898,6 @@ fn exact_candidate(
     let parts = fit.parts as usize;
     let mut gw1 = gw1;
     let mut gw2 = gw2;
-    let mut encs: Vec<(u8, [u8; 8])> = Vec::new();
     let mut eff1 = [0u8; MAX_TEXELS];
     let mut eff2 = [0u8; MAX_TEXELS];
     for _pass in 0..=refine {
@@ -863,7 +928,7 @@ fn exact_candidate(
         let mut total_by_cem: [(f64, bool); 16] = [(0.0, true); 16];
         let mut chosen: [[(f64, [u8; 8]); 4]; 16] = [[(f64::MAX, [0; 8]); 4]; 16];
         for p in 0..parts {
-            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, &mut encs);
+            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, encs);
             // Same-budget alternatives: a class with no more values fits the
             // candidate's colour range too.
             let mut extra: Vec<(u8, [u8; 8])> = Vec::new();
@@ -1155,8 +1220,20 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
         sym: SymbolicBlock::empty_void_ldr(),
     };
     let zeros = [0u8; MAX_TEXELS];
-    let fit1 = make_fit(&src, 1, 0, &zeros, 4);
-    search_fit(ctx, prm, &src, &fit1, &mut best);
+    let mut pool = ctx.fits.borrow_mut();
+    let FitPool {
+        fits,
+        order,
+        top,
+        search,
+    } = &mut *pool;
+    let most = prm.part_candidates.iter().copied().max().unwrap_or(0);
+    // Grows once per encode call (the slot count depends only on the preset).
+    while fits.len() < 2 + most {
+        fits.push(Fit::new());
+    }
+    make_fit(&mut fits[0], &src, 1, 0, &zeros, 4);
+    search_fit(ctx, prm, &src, &fits[0], &mut best, search);
     // Early out: stop after the one-partition search when the block is
     // already good enough. The threshold is a per-channel MSE that grows with
     // the square of the texel count (larger blocks are allowed more error),
@@ -1170,8 +1247,8 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
     if prm.dual_plane {
         let (c, r2) = weakest_channel(&src);
         if c < 4 && r2 < prm.dual_corr_limit * prm.dual_corr_limit {
-            let fitd = make_fit(&src, 1, 0, &zeros, c);
-            search_fit(ctx, prm, &src, &fitd, &mut best);
+            make_fit(&mut fits[1], &src, 1, 0, &zeros, c);
+            search_fit(ctx, prm, &src, &fits[1], &mut best, search);
         }
     }
     for k in 2..=prm.max_partitions.min(4) as usize {
@@ -1182,7 +1259,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
         let mut labels = [0u8; MAX_TEXELS];
         k_means(&src, k, &mut labels);
         // Rank patterns by mismatch with the clustering; best M by insertion.
-        let mut top: Vec<(u32, usize)> = Vec::with_capacity(m + 1);
+        top.clear();
         let pats = match k {
             2 => &ctx.part2,
             3 => &ctx.part3,
@@ -1212,20 +1289,21 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             top.insert(pos, key);
             top.truncate(m);
         }
-        let mut fits: Vec<Fit> = top
-            .iter()
-            .map(|&(_, pi)| {
-                let p = &pats[pi];
-                make_fit(&src, k as u8, p.seed, &p.labels, 4)
-            })
-            .collect();
-        // Stable sort: ties keep the clustering-match order.
-        fits.sort_by(|a, b| a.perp.total_cmp(&b.perp));
-        for fitk in fits.iter().take(prm.part_search[k - 2].max(1)) {
+        for (j, &(_, pi)) in top.iter().enumerate() {
+            let p = &pats[pi];
+            make_fit(&mut fits[2 + j], &src, k as u8, p.seed, &p.labels, 4);
+        }
+        // Order the fits by line error without moving them. Stable sort:
+        // ties keep the clustering-match order.
+        order.clear();
+        order.extend(2..2 + top.len());
+        order.sort_by(|&a, &b| fits[a].perp.total_cmp(&fits[b].perp));
+        for &j in order.iter().take(prm.part_search[k - 2].max(1)) {
+            let fitk = &fits[j];
             if fitk.perp as f64 >= best.err {
                 break;
             }
-            search_fit(ctx, prm, &src, fitk, &mut best);
+            search_fit(ctx, prm, &src, fitk, &mut best, search);
         }
     }
     best

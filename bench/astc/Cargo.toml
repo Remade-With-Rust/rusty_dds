@@ -27,3 +27,5 @@ debug = 1
 tuning = ["rusty_dds/tuning"]
 # Dev-only: expose the decoder stages for parse-only timing.
 internals = ["rusty_dds/__astc_internals"]
+# KTX 2.0 zstd inflate in `--ir-container`.
+zstd = ["rusty_dds/ktx2-zstd"]

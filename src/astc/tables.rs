@@ -45,7 +45,18 @@ pub(crate) struct Grid {
     pub noise: f32,
 }
 
-pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
+/// The part of a [`Grid`] the decoder reads: the taps, the stored-weight
+/// count and whether infill is the identity.
+pub(crate) struct Taps {
+    pub count: usize,
+    /// `taps[texel]` = (number of taps, [(index, contribution); 4]).
+    pub taps: Vec<(u8, [(u8, u8); 4])>,
+    pub full: bool,
+}
+
+/// The infill taps of one weight grid, without the encoder's derived tables
+/// (the decoder builds only this, once per grid it meets).
+pub(crate) fn build_taps(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Taps {
     let (bw, bh, bd) = (fp.width(), fp.height(), fp.depth());
     let ds = (1024 + bw / 2) / (bw - 1);
     let dt = (1024 + bh / 2) / (bh - 1);
@@ -113,6 +124,16 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
             }
         }
     }
+    Taps {
+        count,
+        taps,
+        full: gw == bw && gh == bh && gd == bd,
+    }
+}
+
+/// [`build_taps`] plus the encoder's derived tables.
+pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
+    let Taps { count, taps, full } = build_taps(fp, gw, gh, gd);
     let taps4: Vec<[(u8, u8); 4]> = taps.iter().map(|&(_, tp)| tp).collect();
     let tap_i: Vec<[u8; 4]> = taps4.iter().map(|tp| tp.map(|e| e.0)).collect();
     let tap_c: Vec<[f32; 4]> = taps4.iter().map(|tp| tp.map(|e| e.1 as f32)).collect();
@@ -169,7 +190,7 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         feed_t,
         feed_c,
         feed_c16,
-        full: gw == bw && gh == bh && gd == bd,
+        full,
     }
 }
 

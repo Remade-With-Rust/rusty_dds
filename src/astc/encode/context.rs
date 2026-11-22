@@ -43,6 +43,8 @@ pub(crate) struct Ctx {
     /// Per-fit working buffers, reused across blocks (the context is owned
     /// by one encode call; nothing here outlives it).
     pub scratch: core::cell::RefCell<Scratch>,
+    /// The block fits, reused across blocks the same way.
+    pub fits: core::cell::RefCell<super::block::FitPool>,
 }
 
 /// Reusable per-fit buffers of the mode search.
@@ -202,6 +204,7 @@ impl Ctx {
                 dec2: alloc::vec![[0.0; 64]; ng],
                 refined: alloc::vec![false; ng],
             }),
+            fits: core::cell::RefCell::new(Default::default()),
         }
     }
 }
