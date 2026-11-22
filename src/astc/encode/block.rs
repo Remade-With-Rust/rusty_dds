@@ -368,8 +368,9 @@ pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters:
     // weight feeds.
     for j in 0..g.count {
         let mut s = 0f32;
-        for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
-            s += ideal[t as usize] * c as f32;
+        let r = g.feed_at[j] as usize..g.feed_at[j + 1] as usize;
+        for (&t, &c) in g.feed_t[r.clone()].iter().zip(&g.feed_c[r]) {
+            s += ideal[t as usize] * c;
         }
         let cs = g.feed_cs[j];
         out[j] = if cs > 0.0 { 64.0 * s / cs } else { 32.0 };
@@ -377,18 +378,18 @@ pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters:
     // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2.
     let mut resid = [0f32; MAX_TEXELS];
     for _ in 0..iters {
-        for (t, tp) in g.taps4.iter().enumerate() {
+        for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
             let mut v = 0f32;
-            for &(k, c) in tp {
+            for k in 0..4 {
                 // Grid indices are < 64 (mask: no bounds check).
-                v += out[(k & 63) as usize] * c as f32;
+                v += out[(ti[k] & 63) as usize] * tc[k];
             }
             resid[t] = v * (1.0 / 16.0) - 64.0 * ideal[t];
         }
         for j in 0..g.count {
             let mut num = 0f32;
-            for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
-                let cf = c as f32 * (1.0 / 16.0);
+            let r = g.feed_at[j] as usize..g.feed_at[j + 1] as usize;
+            for (&t, &cf) in g.feed_t[r.clone()].iter().zip(&g.feed_c16[r]) {
                 num += cf * resid[t as usize];
             }
             let den = g.feed_den[j];
@@ -798,10 +799,10 @@ fn residual(ctx: &Ctx, grid: usize, dec: &[f32; 64], ideal: &[f32; MAX_TEXELS], 
     let g = &ctx.grids[grid];
     let mut e = 0f32;
     let tw = if plane2 { &fit.tw2 } else { &fit.tw1 };
-    for (t, tp) in g.taps4.iter().enumerate() {
+    for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
         let mut v = 0f32;
-        for &(k, c) in tp {
-            v += dec[(k & 63) as usize] * c as f32;
+        for k in 0..4 {
+            v += dec[(ti[k] & 63) as usize] * tc[k];
         }
         let d = v * (1.0 / (16.0 * 64.0)) - ideal[t];
         e += d * d * tw[t];

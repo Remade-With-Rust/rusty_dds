@@ -20,6 +20,10 @@ pub(crate) struct Grid {
     /// `taps` padded to exactly four entries with (0, 0): fixed-length loops
     /// for the encoder (a zero contribution adds exactly nothing).
     pub taps4: Vec<[(u8, u8); 4]>,
+    /// `taps4` split for the encoder's float loops: indices, and the
+    /// contributions as f32 (exact conversions of the u8 values).
+    pub tap_i: Vec<[u8; 4]>,
+    pub tap_c: Vec<[f32; 4]>,
     /// Transpose: the texels each stored weight feeds and how much, flattened;
     /// stored weight j owns `feed[feed_at[j]..feed_at[j + 1]]`.
     pub feed: Vec<(u8, u8)>,
@@ -29,6 +33,11 @@ pub(crate) struct Grid {
     /// encoder's decimation uses them bit for bit as it would recompute them).
     pub feed_cs: Vec<f32>,
     pub feed_den: Vec<f32>,
+    /// `feed` split: texel index, contribution as f32, and contribution / 16
+    /// as f32 (both exact).
+    pub feed_t: Vec<u8>,
+    pub feed_c: Vec<f32>,
+    pub feed_c16: Vec<f32>,
     /// The grid equals the footprint (infill is the identity).
     pub full: bool,
     /// Mean over texels of sum((contribution / 16)^2): how much infill
@@ -105,6 +114,8 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         }
     }
     let taps4: Vec<[(u8, u8); 4]> = taps.iter().map(|&(_, tp)| tp).collect();
+    let tap_i: Vec<[u8; 4]> = taps4.iter().map(|tp| tp.map(|e| e.0)).collect();
+    let tap_c: Vec<[f32; 4]> = taps4.iter().map(|tp| tp.map(|e| e.1 as f32)).collect();
     let mut feeds = alloc::vec![Vec::new(); count];
     for (t, &(n, tp)) in taps.iter().enumerate() {
         for &(idx, c) in &tp[..n as usize] {
@@ -118,6 +129,9 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         feed.extend_from_slice(f);
     }
     feed_at.push(feed.len() as u16);
+    let feed_t: Vec<u8> = feed.iter().map(|e| e.0).collect();
+    let feed_c: Vec<f32> = feed.iter().map(|e| e.1 as f32).collect();
+    let feed_c16: Vec<f32> = feed.iter().map(|e| e.1 as f32 * (1.0 / 16.0)).collect();
     let mut feed_cs = Vec::with_capacity(count);
     let mut feed_den = Vec::with_capacity(count);
     for j in 0..count {
@@ -146,10 +160,15 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         count,
         taps,
         taps4,
+        tap_i,
+        tap_c,
         feed,
         feed_at,
         feed_cs,
         feed_den,
+        feed_t,
+        feed_c,
+        feed_c16,
         full: gw == bw && gh == bh && gd == bd,
     }
 }
