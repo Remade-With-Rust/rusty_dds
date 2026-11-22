@@ -1,6 +1,7 @@
 # ASTC encode speed vs astcenc (equal quality)
 
-Encoder under test: `rusty_dds::astc::encode_rgba8` (scalar), branch `feat/astc` at `f0ed691`.
+Encoder under test: `rusty_dds::astc::encode_rgba8` (scalar), branch `feat/astc-perf` at `687b7d3`
+(Medium with the block-mode shortlist; the `feat/astc` numbers at `f0ed691` are kept below).
 Reference: ARM astcenc 5.7.1, `astcenc-none` and `astcenc-avx2`, with `-j 1`. Machine:
 Intel Core i7-14650HX, WSL2, single thread pinned with `taskset -c 2`. Date: 2026-11-21.
 
@@ -20,25 +21,28 @@ Intel Core i7-14650HX, WSL2, single thread pinned with `taskset -c 2`. Date: 202
 
 | Preset | Footprint | ours dB | ours MT/s | astcenc `-quality` | astcenc dB | none MT/s | avx2 MT/s | ours / none | ours / avx2 |
 |---|---|---|---|---|---|---|---|---|---|
-| Fast | 4x4 | 44.582 | 1.185 | 6.25 | 44.557 | 1.532 | 3.918 | **0.77** | 0.30 |
-| Fast | 6x6 | 37.402 | 0.869 | 12.50 | 37.370 | 1.176 | 3.878 | **0.74** | 0.22 |
-| Fast | 8x8 | 33.291 | 1.021 | 12.50 | 33.278 | 1.204 | 4.106 | **0.85** | 0.25 |
-| Fast | 12x12 | 29.356 | 1.040 | 18.75 | 29.313 | 1.684 | 4.535 | **0.62** | 0.23 |
-| Medium | 4x4 | 44.841 | 0.588 | 25.00 | 44.856 | 1.017 | 2.609 | **0.58** | 0.23 |
-| Medium | 6x6 | 37.598 | 0.509 | 25.00 | 37.569 | 1.045 | 3.375 | **0.49** | 0.15 |
-| Medium | 8x8 | 33.478 | 0.521 | 21.88 | 33.490 | 1.012 | 3.469 | **0.51** | 0.15 |
-| Medium | 12x12 | 29.528 | 0.572 | 28.12 | 29.503 | 1.277 | 3.576 | **0.45** | 0.16 |
+| Fast | 4x4 | 44.582 | 1.103 | 6.25 | 44.557 | 1.421 | 3.605 | **0.78** | 0.31 |
+| Fast | 6x6 | 37.402 | 0.926 | 12.50 | 37.370 | 1.244 | 4.077 | **0.74** | 0.23 |
+| Fast | 8x8 | 33.291 | 0.820 | 12.50 | 33.278 | 1.008 | 3.232 | **0.81** | 0.25 |
+| Fast | 12x12 | 29.356 | 0.879 | 18.75 | 29.313 | 1.261 | 3.532 | **0.70** | 0.25 |
+| Medium | 4x4 | 44.824 | 0.594 | 25.00 | 44.856 | 0.953 | 2.396 | **0.62** | 0.25 |
+| Medium | 6x6 | 37.593 | 0.514 | 25.00 | 37.569 | 0.825 | 2.671 | **0.62** | 0.19 |
+| Medium | 8x8 | 33.477 | 0.535 | 21.88 | 33.490 | 0.865 | 3.000 | **0.62** | 0.18 |
+| Medium | 12x12 | 29.520 | 0.533 | 28.12 | 29.503 | 1.064 | 3.071 | **0.50** | 0.17 |
 
-A repeat of the Medium run gave 0.58, 0.52, 0.53 and 0.46. The ratios repeat to within 0.03,
-although the absolute rates moved by up to 15% with load on the hyperthread sibling.
+A second run gave Fast 0.74 / 0.73 / 0.86 / 0.65 and Medium 0.64 / 0.57 / 0.57 / 0.50.
+The ratios repeat to within 0.05, although the absolute rates moved by up to 15% with load on
+the hyperthread sibling.
+
+At `feat/astc` `f0ed691`, before the shortlist and the float-contribution change, Medium
+measured 0.58 / 0.49 / 0.51 / 0.45 (12x12 below the floor). Fast measured 0.77 / 0.74 / 0.85 / 0.62.
 
 ## Gates
 
 | Gate | Criterion | Result |
 |---|---|---|
-| ES1 | ours / `astcenc-none` at least 0.5 at `Fast` and `Medium` | Fast **pass** (0.62 to 0.85). Medium **fails at 12x12** (0.45 to 0.46) and is borderline at 6x6 (0.49 to 0.52); 4x4 and 8x8 pass |
+| ES1 | ours / `astcenc-none` at least 0.5 at `Fast` and `Medium` | **pass**. Fast 0.65 to 0.86. Medium 0.57 to 0.64, and **0.50 at 12x12**, exactly at the floor in both runs |
 | ES2 (performance phase) | at least 1.0 vs `astcenc-none`, and at least 0.5 vs `astcenc-avx2` | not met (0.15 to 0.30 vs avx2; the encoder has no SIMD yet) |
 
-The encoder speed claim is therefore limited to Fast. Closing Medium at 12x12 is open work:
-most of the cost is the per-grid mode ranking, and the planned lever is a block-mode shortlist
-per footprint harvested from our own encodes (`docs/plans/astc-ledger.md`).
+Medium at 12x12 has no margin. Most of its remaining cost is the per-grid mode ranking
+(decimation plus residual) and the exact candidate evaluation (`docs/plans/astc-ledger.md`).
