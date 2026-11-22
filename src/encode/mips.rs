@@ -426,7 +426,7 @@ mod tests {
     /// and the degenerate 1-pixel axes.
     #[test]
     fn downsample_matches_reference() {
-        let mut state = 0x5eed_0f_1e_a1_b0c5u64;
+        let mut state = 0x005e_ed0f_1ea1_b0c5_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;
@@ -495,7 +495,7 @@ mod tests {
     /// allocating chain, across parities and volumes.
     #[test]
     fn into_chain_matches_allocating_chain() {
-        let mut state = 0xc4a1_9_0f_2b5du64;
+        let mut state = 0x0c4a_190f_2b5d_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

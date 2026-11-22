@@ -545,7 +545,7 @@ mod alpha_select_oracle {
             f32::MIN_POSITIVE,
             -f32::MIN_POSITIVE,
         ];
-        let mut state = 0xce11_a51d_2026_08_26u64;
+        let mut state = 0xce11_a51d_2026_0826_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

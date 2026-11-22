@@ -247,7 +247,12 @@ fn hdr_block_rows_reject_bad_ranges() {
     assert!(dds
         .decode_block_rows_f32_into(id, 0..rows + 1, &mut out)
         .is_err());
-    assert!(dds.decode_block_rows_f32_into(id, 2..1, &mut out).is_err());
+    // The reversed range is the input under test.
+    #[allow(clippy::reversed_empty_ranges)]
+    let reversed = 2..1;
+    assert!(dds
+        .decode_block_rows_f32_into(id, reversed, &mut out)
+        .is_err());
     // A destination that does not match the requested rows is refused, not
     // silently truncated.
     let mut small = vec![0f32; 8];

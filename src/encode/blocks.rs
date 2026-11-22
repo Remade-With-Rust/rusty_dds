@@ -81,7 +81,7 @@ pub enum EncodeQuality {
 }
 
 thread_local! {
-    static QUALITY: Cell<EncodeQuality> = Cell::new(EncodeQuality::Quality);
+    static QUALITY: Cell<EncodeQuality> = const { Cell::new(EncodeQuality::Quality) };
 }
 
 pub(crate) fn with_quality<R>(q: EncodeQuality, f: impl FnOnce() -> R) -> R {

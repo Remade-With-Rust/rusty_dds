@@ -383,9 +383,8 @@ fn summarize_vs_dxtex(rows: &[serde_json::Value]) -> serde_json::Value {
 }
 
 fn time_result(f: impl Fn() -> Result<usize, String>) -> (f64, bool) {
-    match f() {
-        Err(_) => return (0.0, false),
-        Ok(_) => {}
+    if f().is_err() {
+        return (0.0, false);
     }
     for _ in 0..2 {
         let _ = f();

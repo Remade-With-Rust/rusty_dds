@@ -572,7 +572,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// mip size); changing that would move existing subresource offsets.
     pub(crate) fn has_exact_mip_chain(&self) -> bool {
         self.get_dxgi_format()
-            .map_or(false, |f| f.astc_info().is_some())
+            .is_some_and(|f| f.astc_info().is_some())
     }
 
     /// Exact bytes of mip `level` of one slice: block columns x block rows x
@@ -621,11 +621,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 
     pub fn get_num_mipmap_levels(&self) -> u32 {
-        if let Some(mmc) = self.header.mip_map_count {
-            mmc
-        } else {
-            1 // just the main image
-        }
+        self.header.mip_map_count.unwrap_or(1) // 1: just the main image
     }
 
     pub fn get_min_mipmap_size_in_bytes(&self) -> u32 {

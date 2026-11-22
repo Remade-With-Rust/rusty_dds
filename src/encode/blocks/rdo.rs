@@ -1723,7 +1723,7 @@ fn polish_mode6_endpoints(
                 for d in [-1i32, 1] {
                     let cur = if which == 0 { (*q0)[c] } else { (*q1)[c] };
                     let nv = cur as i32 + d;
-                    if nv < 0 || nv > 127 {
+                    if !(0..=127).contains(&nv) {
                         continue;
                     }
                     let cand = match (d, if d < 0 { cand_lo } else { cand_hi }) {

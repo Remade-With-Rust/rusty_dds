@@ -413,9 +413,7 @@ impl AlphaSelect {
             let m = sum >> 1;
             // s > thr[k] selects the HIGH side. Odd sum: no exact tie.
             // Even sum: tie at m goes to the lower ORIGINAL index.
-            thr[k] = if sum & 1 == 1 {
-                m
-            } else if idxs[k] < idxs[k + 1] {
+            thr[k] = if sum & 1 == 1 || idxs[k] < idxs[k + 1] {
                 m
             } else {
                 m - 1

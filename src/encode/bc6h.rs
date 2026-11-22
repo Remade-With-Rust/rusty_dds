@@ -17,6 +17,8 @@ const W4: [i32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 
 
 /// f32 -> half bits, clamped for UF16: negatives/NaN -> 0, +inf/overflow ->
 /// 65504 (max finite half).
+// `!(v > 0.0)` below is deliberate: it is true for NaN as well as v <= 0.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) fn f32_to_half_uf16(v: f32) -> u16 {
     if !(v > 0.0) {
         return 0; // negatives and NaN clamp to zero in an unsigned format
