@@ -455,11 +455,14 @@ fn fit_indices_alpha4(alpha: &[u8; 16], pal: &[u8; 4]) -> ([u8; 16], i32) {
     fit_indices_alpha8(alpha, &pal8)
 }
 
+/// Quantised mode-4 colour endpoints and indices: (q0, q1, indices).
+type Mode4ColorFit = ([u8; 3], [u8; 3], [u8; 16]);
+
 pub(super) fn fit_color_mode4(
     pixels: &[[u8; 4]; 16],
     e0: [u8; 3],
     e1: [u8; 3],
-) -> (([u8; 3], [u8; 3], [u8; 16]), i32) {
+) -> (Mode4ColorFit, i32) {
     let mut q0 = [0u8; 3];
     let mut q1 = [0u8; 3];
     for c in 0..3 {

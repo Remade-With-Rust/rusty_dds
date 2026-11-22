@@ -92,7 +92,9 @@ mod ceiling_probe {
     #[ignore]
     fn signed_sweep_harvest() {
         let root = env!("CARGO_MANIFEST_DIR");
-        let mut sources: Vec<(String, Vec<(usize, usize, Vec<u8>)>)> = Vec::new();
+        // (width, height, plane) per channel of one source.
+        type Planes = Vec<(usize, usize, Vec<u8>)>;
+        let mut sources: Vec<(String, Planes)> = Vec::new();
         // Normals (R+G channels -> bc5s) and roughness masks (R -> bc4s).
         for asset in ["Bricks097", "Metal063", "Rock064", "Wood095"] {
             let p = format!("{root}/corpus/raw/{asset}/{asset}_1K-PNG_NormalGL.png");

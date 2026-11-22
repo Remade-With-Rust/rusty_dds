@@ -152,6 +152,9 @@ pub fn encode_image(
     Ok(())
 }
 
+// Internal driver: the arguments are the image geometry plus the per-block
+// kernel; bundling them in a struct buys nothing.
+#[allow(clippy::too_many_arguments)]
 fn encode_image_serial(
     rgba: &[u8],
     w: usize,
@@ -181,6 +184,9 @@ fn encode_image_serial(
     }
 }
 
+// Internal driver: the arguments are the image geometry plus the per-block
+// kernel; bundling them in a struct buys nothing.
+#[allow(clippy::too_many_arguments)]
 fn encode_image_parallel(
     rgba: &[u8],
     w: usize,

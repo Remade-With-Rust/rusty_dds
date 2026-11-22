@@ -1552,8 +1552,11 @@ fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
     )
 }
 
+/// Mode-6 block fields: (q0, p0, q1, p1, indices).
+type Mode6Fields = ([u8; 4], u8, [u8; 4], u8, [u8; 16]);
+
 /// Parse a mode-6 block back to (q0, p0, q1, p1, indices).
-fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])> {
+fn parse_mode6(block: &[u8; 16]) -> Option<Mode6Fields> {
     if block[0] & 0x7F != 0x40 {
         return None;
     }
