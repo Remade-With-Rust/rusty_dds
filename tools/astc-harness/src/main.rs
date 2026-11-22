@@ -1613,6 +1613,197 @@ fn cmd_ec1x(args: &[String]) -> bool {
     ok
 }
 
+/// astcenc's mPSNR tone map (`mpsnr_operator` in astcenccli_error_metrics.cpp):
+/// `clamp(255 * (v * 2^fstop)^(1/2.2), 0, 255)`, in f32 as astcenc computes it.
+fn mpsnr_op(v: f32, fstop: i32) -> f32 {
+    let scale = 2f32.powi(fstop);
+    ((v * scale).powf(1.0 / 2.2) * 255.0).clamp(0.0, 255.0)
+}
+
+/// mPSNR over RGB as astcenc reports it (fstops `lo..=hi`; inputs clamped to
+/// `0..=65504` as astcenc clamps its F16 images).
+fn mpsnr(src: &[f32], dec: &[f32], lo: i32, hi: i32) -> f64 {
+    let mut num = 0f64;
+    let mut px = 0f64;
+    for (a, b) in src.chunks_exact(4).zip(dec.chunks_exact(4)) {
+        px += 1.0;
+        for c in 0..3 {
+            let (x, y) = (a[c].clamp(0.0, 65504.0), b[c].clamp(0.0, 65504.0));
+            for f in lo..=hi {
+                let d = mpsnr_op(x, f) - mpsnr_op(y, f);
+                num += (d * d) as f64;
+            }
+        }
+    }
+    let den = px * 3.0 * (hi - lo + 1) as f64 * 255.0 * 255.0;
+    if num == 0.0 {
+        999.0
+    } else {
+        10.0 * (den / num).log10()
+    }
+}
+
+/// Binary16 texels of an uncompressed KTX 1.1 file written by `astcenc -dh`
+/// (glType HALF_FLOAT, RGB or RGBA, one 2D level): (width, height, channels,
+/// texels).
+fn ktx1_f16(path: &str) -> Option<(u32, u32, usize, Vec<u16>)> {
+    let d = std::fs::read(path).ok()?;
+    let u = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+    if &d[1..4] != b"KTX" || u(16) != 0x140B {
+        return None;
+    }
+    let ch = match u(24) {
+        0x1907 => 3,
+        0x1908 => 4,
+        _ => return None,
+    };
+    let (w, h, kv) = (u(36), u(40), u(60) as usize);
+    let o = 64 + kv;
+    let size = u(o) as usize;
+    if size != (w * h) as usize * ch * 2 {
+        return None;
+    }
+    let px = d[o + 4..o + 4 + size].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some((w, h, ch, px))
+}
+
+/// HDR encode quality against astcenc at its `-ch` profile (HDR RGB, LDR
+/// alpha), per image: log2 RMSE over RGB (`log_rmse`) and mPSNR (fstops -10
+/// to +10, astcenc's operator), ours and astcenc's at the same preset name.
+/// Gates per encode: EC1 (every block decodes identically in astcenc's six
+/// decode cells, via the oracle) and `astcenc -dh` of our file equal to our
+/// own half-float decode, texel for texel. `ASTCENC` picks the astcenc binary.
+///   astch hdrq <preset,...> <fp,...> <hdr files...>
+fn cmd_hdrq(args: &[String]) -> bool {
+    let tmp = "/root/astcws/out/hdrq";
+    std::fs::create_dir_all(tmp).unwrap();
+    let presets: Vec<&str> = args[0].split(',').collect();
+    let fps: Vec<AstcFootprint> = args[1].split(',').map(fp_parse).collect();
+    let prof = AstcProfile::HdrRgbLdrA;
+    let mut ok = true;
+    println!("| image | fp | preset | ours log2 RMSE | astcenc log2 RMSE | ours mPSNR | astcenc mPSNR | EC1 bad | -dh diff | ours s |");
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    for path in &args[2..] {
+        let (w, h, px) = load_hdr(path);
+        let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+        for &fp in &fps {
+            for &pre in &presets {
+                let preset = match pre {
+                    "fastest" => astc::AstcPreset::Fastest,
+                    "fast" => astc::AstcPreset::Fast,
+                    "medium" => astc::AstcPreset::Medium,
+                    "thorough" => astc::AstcPreset::Thorough,
+                    _ => astc::AstcPreset::Exhaustive,
+                };
+                let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(preset);
+                let t = std::time::Instant::now();
+                let data = astc::encode_rgba_f32(&px, w, h, &opts).unwrap();
+                let secs = t.elapsed().as_secs_f64();
+                let blocks: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+                let (_, bad) = cells_check(fp, &blocks);
+                let ec1: u64 = bad.iter().sum();
+                let mut dec = vec![0f32; px.len()];
+                astc::decode_rgba_f32_into(&data, w, h, 1, fp, prof, &mut dec).unwrap();
+                let mut d16 = vec![0u16; px.len()];
+                astc::decode_rgba_f16_into(&data, w, h, 1, fp, prof, &mut d16).unwrap();
+                // astcenc -dh of our encode.
+                let fps_s = fp.to_string();
+                let ours_astc = format!("{tmp}/{name}_{fps_s}_{pre}_ours.astc");
+                let mut file = Vec::new();
+                file.extend_from_slice(&[0x13, 0xAB, 0xA1, 0x5C, fp.width() as u8, fp.height() as u8, 1]);
+                for v in [w, h, 1] {
+                    file.extend_from_slice(&v.to_le_bytes()[..3]);
+                }
+                file.extend_from_slice(&data);
+                std::fs::write(&ours_astc, &file).unwrap();
+                let ours_ktx = format!("{tmp}/{name}_{fps_s}_{pre}_ours_dh.ktx");
+                let _ = std::fs::remove_file(&ours_ktx);
+                let dh = if run_astcenc(&["-dh", &ours_astc, &ours_ktx, "-silent"]) {
+                    match ktx1_f16(&ours_ktx) {
+                        Some((kw, kh, ch, k)) if kw == w && kh == h => {
+                            // Texels whose RGB (and alpha, if written) differ.
+                            k.chunks_exact(ch)
+                                .zip(d16.chunks_exact(4))
+                                .filter(|(a, b)| a[..] != b[..ch])
+                                .count()
+                                .to_string()
+                        }
+                        _ => "unreadable".into(),
+                    }
+                } else {
+                    "astcenc failed".into()
+                };
+                ok &= ec1 == 0 && dh == "0";
+                let ours_l = log_rmse(&px, &dec);
+                let ours_m = mpsnr(&px, &dec, -10, 10);
+                let out = format!("{tmp}/{name}_{fps_s}_{pre}_astcenc.astc");
+                let _ = std::fs::remove_file(&out);
+                let flag = format!("-{pre}");
+                let (tl, tm) = if run_astcenc(&["-ch", path, &out, &fps_s, &flag, "-j", "8", "-silent"]) {
+                    let d = std::fs::read(&out).unwrap();
+                    let f = astc::AstcFile::parse(&d).unwrap();
+                    let mut dec2 = vec![0f32; px.len()];
+                    astc::decode_rgba_f32_into(f.data, w, h, 1, fp, prof, &mut dec2).unwrap();
+                    (log_rmse(&px, &dec2), mpsnr(&px, &dec2, -10, 10))
+                } else {
+                    (f64::NAN, f64::NAN)
+                };
+                println!("| {name} | {fp} | {pre} | {ours_l:.4} | {tl:.4} | {ours_m:.3} | {tm:.3} | {ec1} | {dh} | {secs:.2} |");
+            }
+        }
+    }
+    ok
+}
+
+/// Block statistics of .astc files (partitions, endpoint modes, dual plane,
+/// colour levels, weight levels): what an encoder chose.
+///   astch blockstat <file.astc>...
+fn cmd_blockstat(args: &[String]) -> bool {
+    for path in args {
+        let d = std::fs::read(path).unwrap();
+        let f = astc::AstcFile::parse(&d).unwrap();
+        let fp = f.footprint;
+        let mut hist = std::collections::BTreeMap::<String, u64>::new();
+        let mut n = 0u64;
+        for b in f.data.chunks_exact(16) {
+            let info = astc::inspect_block(b.try_into().unwrap(), fp);
+            n += 1;
+            let key = if info.partitions == 0 {
+                format!("{:?}", info.kind)
+            } else {
+                let mut cems: Vec<u8> = info.endpoint_modes[..info.partitions as usize].to_vec();
+                cems.dedup();
+                format!(
+                    "p{} cem{:?} dual{} cl{} wl{} grid{}x{}",
+                    info.partitions, cems, info.dual_plane as u8, info.color_levels, info.weight_levels, info.weight_grid[0], info.weight_grid[1]
+                )
+            };
+            *hist.entry(key).or_default() += 1;
+        }
+        let mut v: Vec<_> = hist.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("{path}: {n} blocks");
+        let mut by_parts = [0u64; 5];
+        let mut by_cem = std::collections::BTreeMap::<String, u64>::new();
+        for (k, c) in &v {
+            if let Some(p) = k.strip_prefix('p') {
+                by_parts[(p.as_bytes()[0] - b'0') as usize] += c;
+                let cem = k.split(' ').nth(1).unwrap().to_string();
+                let dual = k.split(' ').nth(2).unwrap().to_string();
+                *by_cem.entry(format!("{cem} {dual}")).or_default() += c;
+            }
+        }
+        println!("  partitions 1..4: {:?}", &by_parts[1..]);
+        for (k, c) in &by_cem {
+            println!("  {k}: {c} ({:.1}%)", 100.0 * *c as f64 / n as f64);
+        }
+        for (k, c) in v.iter().take(12) {
+            println!("  {k}: {c}");
+        }
+    }
+    true
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -1645,6 +1836,8 @@ fn main() {
         Some("modehist") => cmd_modehist(&args[2..]),
         Some("ktx2out") => cmd_ktx2out(&args[2..]),
         Some("ec1x") => cmd_ec1x(&args[2..]),
+        Some("hdrq") => cmd_hdrq(&args[2..]),
+        Some("blockstat") => cmd_blockstat(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();
