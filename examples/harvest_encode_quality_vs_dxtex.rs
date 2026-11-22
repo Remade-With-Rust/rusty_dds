@@ -229,8 +229,7 @@ fn peer_json(r: &Result<PeerResult, String>) -> serde_json::Value {
 }
 
 fn rusty_roundtrip(pixels: &[u8], content: DecodeContent, ctx: &Ctx) -> Result<PeerResult, String> {
-    let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
-                .with_depth(ctx.depth);
+    let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height).with_depth(ctx.depth);
     let dds = Dds::encode_from_rgba8(pixels, layout).map_err(|e| e.to_string())?;
     let img = dds
         .decode_rgba8(SubresourceId::mip_layer(0, 0))
@@ -241,9 +240,7 @@ fn rusty_roundtrip(pixels: &[u8], content: DecodeContent, ctx: &Ctx) -> Result<P
     // whose C++ tool already emits UNORM) — without this the board
     // under-scores our signed formats by ~35 dB.
     let recon = match content {
-        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm => {
-            snorm_bits_rgba_to_unorm(&img.pixels)
-        }
+        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm => snorm_bits_rgba_to_unorm(&img.pixels),
         _ => img.pixels.clone(),
     };
     let psnr = match content {

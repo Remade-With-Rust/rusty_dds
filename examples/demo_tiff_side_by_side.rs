@@ -12,9 +12,7 @@
 //! Microsoft column. Drag-drop or Open… accepts `.tif` / `.tiff`.
 
 use eframe::egui;
-use rusty_dds::{
-    max_abs_diff, psnr_rgba8, DecodeContent, Dds, EncodeLayout, SubresourceId,
-};
+use rusty_dds::{max_abs_diff, psnr_rgba8, Dds, DecodeContent, EncodeLayout, SubresourceId};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -147,7 +145,10 @@ impl DemoApp {
             Ok((w, h, rgba)) => {
                 self.source_path = Some(path.to_path_buf());
                 self.source = Some(Panel {
-                    title: format!("Source TIFF — {}", path.file_name().unwrap().to_string_lossy()),
+                    title: format!(
+                        "Source TIFF — {}",
+                        path.file_name().unwrap().to_string_lossy()
+                    ),
                     rgba,
                     width: w,
                     height: h,
@@ -230,15 +231,7 @@ impl DemoApp {
         });
 
         // --- DirectXTex (optional) ---
-        self.dxtex = run_dxtex_roundtrip(
-            &self.root,
-            &out_dir,
-            &pixels,
-            w,
-            h,
-            self.fmt,
-            &pixels,
-        );
+        self.dxtex = run_dxtex_roundtrip(&self.root, &out_dir, &pixels, w, h, self.fmt, &pixels);
 
         self.dirty = false;
         let rusty_rt = encode_ns + decode_ns;
@@ -252,7 +245,11 @@ impl DemoApp {
                     dx_rt / rusty_rt
                 )
             } else {
-                format!("rusty_dds round-trip {:.2} ms — DirectXTex: {}", rusty_rt / 1e6, dx.note)
+                format!(
+                    "rusty_dds round-trip {:.2} ms — DirectXTex: {}",
+                    rusty_rt / 1e6,
+                    dx.note
+                )
             }
         } else {
             format!(
@@ -309,10 +306,7 @@ impl eframe::App for DemoApp {
                     FmtChoice::Bc1,
                     FmtChoice::Rgba8,
                 ] {
-                    if ui
-                        .selectable_label(self.fmt == f, f.label())
-                        .clicked()
-                    {
+                    if ui.selectable_label(self.fmt == f, f.label()).clicked() {
                         self.fmt = f;
                         self.dirty = true;
                     }
@@ -381,7 +375,9 @@ fn show_panel(
                         if let Some(psnr) = p.psnr_db {
                             ui.monospace(format!(
                                 "PSNR vs source {psnr:.2} dB   max|Δ|={}",
-                                p.max_abs.map(|m| m.to_string()).unwrap_or_else(|| "—".into())
+                                p.max_abs
+                                    .map(|m| m.to_string())
+                                    .unwrap_or_else(|| "—".into())
                             ));
                         } else if p.encode_ns.is_none() && p.decode_ns.is_none() {
                             // source panel
@@ -537,14 +533,15 @@ fn write_sample_tiff(path: &Path) -> Result<(), String> {
             let stripe = (((x + y) / 32) % 2) as f32;
             let vig = 1.0 - 0.35 * ((fx - 0.5).powi(2) + (fy - 0.5).powi(2)).sqrt() * 2.0;
             let r = ((0.15 + 0.75 * fx + 0.1 * stripe) * vig * 255.0).clamp(0.0, 255.0) as u8;
-            let g = ((0.20 + 0.55 * fy + 0.15 * (1.0 - stripe)) * vig * 255.0).clamp(0.0, 255.0)
-                as u8;
+            let g =
+                ((0.20 + 0.55 * fy + 0.15 * (1.0 - stripe)) * vig * 255.0).clamp(0.0, 255.0) as u8;
             let b = ((0.55 + 0.35 * (1.0 - fx) + 0.1 * fy) * vig * 255.0).clamp(0.0, 255.0) as u8;
             rgb.extend_from_slice(&[r, g, b]);
         }
     }
     let file = File::create(path).map_err(|e| e.to_string())?;
-    let mut enc = tiff::encoder::TiffEncoder::new(BufWriter::new(file)).map_err(|e| e.to_string())?;
+    let mut enc =
+        tiff::encoder::TiffEncoder::new(BufWriter::new(file)).map_err(|e| e.to_string())?;
     enc.write_image::<tiff::encoder::colortype::RGB8>(W, H, &rgb)
         .map_err(|e| e.to_string())?;
     Ok(())

@@ -69,7 +69,10 @@ pub fn decode_bgra8_into(
     if crate::swizzle::swap_rb(&data[..expected], out) {
         return Ok(());
     }
-    for (src, dst) in data[..expected].chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+    for (src, dst) in data[..expected]
+        .chunks_exact(4)
+        .zip(out.chunks_exact_mut(4))
+    {
         dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]); // BGRA -> RGBA
     }
     Ok(())

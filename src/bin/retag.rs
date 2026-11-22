@@ -28,11 +28,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&filename)
-    {
+    let mut file = match OpenOptions::new().read(true).write(true).open(&filename) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("open {filename}: {e}");

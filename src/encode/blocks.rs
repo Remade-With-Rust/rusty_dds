@@ -9,11 +9,11 @@
 
 use std::cell::Cell;
 
-use crate::error::Error;
 use super::tuning::{
-    alpha_sel_enabled, bc1_lattice_min_err, bc1_pca_seed_enabled, bc1_lattice_rounds, bc7_m1_min_err,
-    signed_window_enabled, unsigned_window_enabled,
+    alpha_sel_enabled, bc1_lattice_min_err, bc1_lattice_rounds, bc1_pca_seed_enabled,
+    bc7_m1_min_err, signed_window_enabled, unsigned_window_enabled,
 };
+use crate::error::Error;
 
 mod m1;
 mod rdo;
@@ -127,9 +127,27 @@ pub fn encode_image(
 
     let nblocks = blocks_x.saturating_mul(blocks_y);
     if blocks_y >= 2 && nblocks >= ENCODE_PARALLEL_MIN_BLOCKS {
-        encode_image_parallel(rgba, w, h, blocks_x, blocks_y, block_bytes, encode_block, out);
+        encode_image_parallel(
+            rgba,
+            w,
+            h,
+            blocks_x,
+            blocks_y,
+            block_bytes,
+            encode_block,
+            out,
+        );
     } else {
-        encode_image_serial(rgba, w, h, blocks_x, blocks_y, block_bytes, encode_block, out);
+        encode_image_serial(
+            rgba,
+            w,
+            h,
+            blocks_x,
+            blocks_y,
+            block_bytes,
+            encode_block,
+            out,
+        );
     }
     Ok(())
 }
@@ -323,10 +341,7 @@ pub fn channel_span2(rgba: &[u8], width: u32, height: u32) -> (u8, u8) {
         let h = height as usize;
         if rgba.len() >= w * h * 4 {
             let s = simd::channel_spans_sse2(rgba, w * h);
-            return (
-                s[0].1.saturating_sub(s[0].0),
-                s[1].1.saturating_sub(s[1].0),
-            );
+            return (s[0].1.saturating_sub(s[0].0), s[1].1.saturating_sub(s[1].0));
         }
     }
     (
@@ -353,7 +368,6 @@ mod oracles;
 pub(crate) use alpha::*;
 pub(crate) use bc1::*;
 pub(crate) use bc7::*;
-
 
 fn to_565(c: [u8; 3]) -> u16 {
     // No masks: the inputs are bytes, so `255 >> 3` is 31 and `255 >> 2` is 63.
@@ -407,9 +421,7 @@ pub(super) fn from_565_packed(c: u16) -> u32 {
 /// array index. Same const-generic divisor, same rounding, no array touched.
 #[inline]
 pub(super) fn lerp_packed<const AW: u32, const BW: u32>(a: u32, b: u32) -> u32 {
-    let f = |sh: u32| {
-        (AW * ((a >> sh) & 0xFF) + BW * ((b >> sh) & 0xFF)) / (AW + BW)
-    };
+    let f = |sh: u32| (AW * ((a >> sh) & 0xFF) + BW * ((b >> sh) & 0xFF)) / (AW + BW);
     f(0) | f(8) << 8 | f(16) << 16
 }
 
@@ -497,11 +509,7 @@ struct BitWriter {
 impl BitWriter {
     fn write_bits(&mut self, value: u32, n: u32) {
         debug_assert!(n <= 32);
-        let mask = if n == 32 {
-            u64::MAX
-        } else {
-            (1u64 << n) - 1
-        };
+        let mask = if n == 32 { u64::MAX } else { (1u64 << n) - 1 };
         let v = (value as u64) & mask;
         if self.pos < 64 {
             self.low |= v << self.pos;

@@ -184,10 +184,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 }
 
-#[cfg_attr(
-    not(any(feature = "decode", feature = "encode")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(feature = "decode", feature = "encode")), allow(dead_code))]
 pub(crate) fn slice_payload_bytes(
     kind: DecodeContent,
     width: u32,

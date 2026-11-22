@@ -126,10 +126,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             depth: surf.depth,
             data_offset: 0,
             data_len: pixels,
-            bytes_per_row: surf
-                .width
-                .checked_mul(4)
-                .ok_or(Error::OutOfBounds)?,
+            bytes_per_row: surf.width.checked_mul(4).ok_or(Error::OutOfBounds)?,
             rows_per_image: surf.height,
         })
     }
@@ -184,37 +181,27 @@ fn gpu_format_from_dxgi(format: DxgiFormat) -> Result<GpuFormat, Error> {
             "VK_FORMAT_BC1_RGBA_SRGB_BLOCK",
             8,
         ),
-        BC2_Typeless | BC2_UNorm => bc(
-            "BC2_UNorm",
-            "Bc2RgbaUnorm",
-            "VK_FORMAT_BC2_UNORM_BLOCK",
-            16,
-        ),
+        BC2_Typeless | BC2_UNorm => {
+            bc("BC2_UNorm", "Bc2RgbaUnorm", "VK_FORMAT_BC2_UNORM_BLOCK", 16)
+        }
         BC2_UNorm_sRGB => bc(
             "BC2_UNorm_sRGB",
             "Bc2RgbaUnormSrgb",
             "VK_FORMAT_BC2_SRGB_BLOCK",
             16,
         ),
-        BC3_Typeless | BC3_UNorm => bc(
-            "BC3_UNorm",
-            "Bc3RgbaUnorm",
-            "VK_FORMAT_BC3_UNORM_BLOCK",
-            16,
-        ),
+        BC3_Typeless | BC3_UNorm => {
+            bc("BC3_UNorm", "Bc3RgbaUnorm", "VK_FORMAT_BC3_UNORM_BLOCK", 16)
+        }
         BC3_UNorm_sRGB => bc(
             "BC3_UNorm_sRGB",
             "Bc3RgbaUnormSrgb",
             "VK_FORMAT_BC3_SRGB_BLOCK",
             16,
         ),
-        BC4_Typeless | BC4_UNorm => {
-            bc("BC4_UNorm", "Bc4RUnorm", "VK_FORMAT_BC4_UNORM_BLOCK", 8)
-        }
+        BC4_Typeless | BC4_UNorm => bc("BC4_UNorm", "Bc4RUnorm", "VK_FORMAT_BC4_UNORM_BLOCK", 8),
         BC4_SNorm => bc("BC4_SNorm", "Bc4RSnorm", "VK_FORMAT_BC4_SNORM_BLOCK", 8),
-        BC5_Typeless | BC5_UNorm => {
-            bc("BC5_UNorm", "Bc5RgUnorm", "VK_FORMAT_BC5_UNORM_BLOCK", 16)
-        }
+        BC5_Typeless | BC5_UNorm => bc("BC5_UNorm", "Bc5RgUnorm", "VK_FORMAT_BC5_UNORM_BLOCK", 16),
         BC5_SNorm => bc("BC5_SNorm", "Bc5RgSnorm", "VK_FORMAT_BC5_SNORM_BLOCK", 16),
         // BC6H was missing from this table entirely, which meant a format this
         // crate can both decode and encode could not be handed to a GPU at all.
@@ -232,12 +219,9 @@ fn gpu_format_from_dxgi(format: DxgiFormat) -> Result<GpuFormat, Error> {
             "VK_FORMAT_BC6H_SFLOAT_BLOCK",
             16,
         ),
-        BC7_Typeless | BC7_UNorm => bc(
-            "BC7_UNorm",
-            "Bc7RgbaUnorm",
-            "VK_FORMAT_BC7_UNORM_BLOCK",
-            16,
-        ),
+        BC7_Typeless | BC7_UNorm => {
+            bc("BC7_UNorm", "Bc7RgbaUnorm", "VK_FORMAT_BC7_UNORM_BLOCK", 16)
+        }
         BC7_UNorm_sRGB => bc(
             "BC7_UNorm_sRGB",
             "Bc7RgbaUnormSrgb",
@@ -282,34 +266,230 @@ fn gpu_format_from_dxgi(format: DxgiFormat) -> Result<GpuFormat, Error> {
 /// `(block w, block h, sRGB, DXGI name, wgpu name, Vulkan name)` for the 2D
 /// ASTC formats a DDS can carry.
 const ASTC_GPU: [(u32, u32, bool, &str, &str, &str); 28] = [
-    (4, 4, false, "ASTC_4X4_UNorm", "Astc { block: B4x4, channel: Unorm }", "VK_FORMAT_ASTC_4x4_UNORM_BLOCK"),
-    (4, 4, true, "ASTC_4X4_UNorm_sRGB", "Astc { block: B4x4, channel: UnormSrgb }", "VK_FORMAT_ASTC_4x4_SRGB_BLOCK"),
-    (5, 4, false, "ASTC_5X4_UNorm", "Astc { block: B5x4, channel: Unorm }", "VK_FORMAT_ASTC_5x4_UNORM_BLOCK"),
-    (5, 4, true, "ASTC_5X4_UNorm_sRGB", "Astc { block: B5x4, channel: UnormSrgb }", "VK_FORMAT_ASTC_5x4_SRGB_BLOCK"),
-    (5, 5, false, "ASTC_5X5_UNorm", "Astc { block: B5x5, channel: Unorm }", "VK_FORMAT_ASTC_5x5_UNORM_BLOCK"),
-    (5, 5, true, "ASTC_5X5_UNorm_sRGB", "Astc { block: B5x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_5x5_SRGB_BLOCK"),
-    (6, 5, false, "ASTC_6X5_UNorm", "Astc { block: B6x5, channel: Unorm }", "VK_FORMAT_ASTC_6x5_UNORM_BLOCK"),
-    (6, 5, true, "ASTC_6X5_UNorm_sRGB", "Astc { block: B6x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_6x5_SRGB_BLOCK"),
-    (6, 6, false, "ASTC_6X6_UNorm", "Astc { block: B6x6, channel: Unorm }", "VK_FORMAT_ASTC_6x6_UNORM_BLOCK"),
-    (6, 6, true, "ASTC_6X6_UNorm_sRGB", "Astc { block: B6x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_6x6_SRGB_BLOCK"),
-    (8, 5, false, "ASTC_8X5_UNorm", "Astc { block: B8x5, channel: Unorm }", "VK_FORMAT_ASTC_8x5_UNORM_BLOCK"),
-    (8, 5, true, "ASTC_8X5_UNorm_sRGB", "Astc { block: B8x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x5_SRGB_BLOCK"),
-    (8, 6, false, "ASTC_8X6_UNorm", "Astc { block: B8x6, channel: Unorm }", "VK_FORMAT_ASTC_8x6_UNORM_BLOCK"),
-    (8, 6, true, "ASTC_8X6_UNorm_sRGB", "Astc { block: B8x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x6_SRGB_BLOCK"),
-    (8, 8, false, "ASTC_8X8_UNorm", "Astc { block: B8x8, channel: Unorm }", "VK_FORMAT_ASTC_8x8_UNORM_BLOCK"),
-    (8, 8, true, "ASTC_8X8_UNorm_sRGB", "Astc { block: B8x8, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x8_SRGB_BLOCK"),
-    (10, 5, false, "ASTC_10X5_UNorm", "Astc { block: B10x5, channel: Unorm }", "VK_FORMAT_ASTC_10x5_UNORM_BLOCK"),
-    (10, 5, true, "ASTC_10X5_UNorm_sRGB", "Astc { block: B10x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x5_SRGB_BLOCK"),
-    (10, 6, false, "ASTC_10X6_UNorm", "Astc { block: B10x6, channel: Unorm }", "VK_FORMAT_ASTC_10x6_UNORM_BLOCK"),
-    (10, 6, true, "ASTC_10X6_UNorm_sRGB", "Astc { block: B10x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x6_SRGB_BLOCK"),
-    (10, 8, false, "ASTC_10X8_UNorm", "Astc { block: B10x8, channel: Unorm }", "VK_FORMAT_ASTC_10x8_UNORM_BLOCK"),
-    (10, 8, true, "ASTC_10X8_UNorm_sRGB", "Astc { block: B10x8, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x8_SRGB_BLOCK"),
-    (10, 10, false, "ASTC_10X10_UNorm", "Astc { block: B10x10, channel: Unorm }", "VK_FORMAT_ASTC_10x10_UNORM_BLOCK"),
-    (10, 10, true, "ASTC_10X10_UNorm_sRGB", "Astc { block: B10x10, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x10_SRGB_BLOCK"),
-    (12, 10, false, "ASTC_12X10_UNorm", "Astc { block: B12x10, channel: Unorm }", "VK_FORMAT_ASTC_12x10_UNORM_BLOCK"),
-    (12, 10, true, "ASTC_12X10_UNorm_sRGB", "Astc { block: B12x10, channel: UnormSrgb }", "VK_FORMAT_ASTC_12x10_SRGB_BLOCK"),
-    (12, 12, false, "ASTC_12X12_UNorm", "Astc { block: B12x12, channel: Unorm }", "VK_FORMAT_ASTC_12x12_UNORM_BLOCK"),
-    (12, 12, true, "ASTC_12X12_UNorm_sRGB", "Astc { block: B12x12, channel: UnormSrgb }", "VK_FORMAT_ASTC_12x12_SRGB_BLOCK"),
+    (
+        4,
+        4,
+        false,
+        "ASTC_4X4_UNorm",
+        "Astc { block: B4x4, channel: Unorm }",
+        "VK_FORMAT_ASTC_4x4_UNORM_BLOCK",
+    ),
+    (
+        4,
+        4,
+        true,
+        "ASTC_4X4_UNorm_sRGB",
+        "Astc { block: B4x4, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_4x4_SRGB_BLOCK",
+    ),
+    (
+        5,
+        4,
+        false,
+        "ASTC_5X4_UNorm",
+        "Astc { block: B5x4, channel: Unorm }",
+        "VK_FORMAT_ASTC_5x4_UNORM_BLOCK",
+    ),
+    (
+        5,
+        4,
+        true,
+        "ASTC_5X4_UNorm_sRGB",
+        "Astc { block: B5x4, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_5x4_SRGB_BLOCK",
+    ),
+    (
+        5,
+        5,
+        false,
+        "ASTC_5X5_UNorm",
+        "Astc { block: B5x5, channel: Unorm }",
+        "VK_FORMAT_ASTC_5x5_UNORM_BLOCK",
+    ),
+    (
+        5,
+        5,
+        true,
+        "ASTC_5X5_UNorm_sRGB",
+        "Astc { block: B5x5, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_5x5_SRGB_BLOCK",
+    ),
+    (
+        6,
+        5,
+        false,
+        "ASTC_6X5_UNorm",
+        "Astc { block: B6x5, channel: Unorm }",
+        "VK_FORMAT_ASTC_6x5_UNORM_BLOCK",
+    ),
+    (
+        6,
+        5,
+        true,
+        "ASTC_6X5_UNorm_sRGB",
+        "Astc { block: B6x5, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_6x5_SRGB_BLOCK",
+    ),
+    (
+        6,
+        6,
+        false,
+        "ASTC_6X6_UNorm",
+        "Astc { block: B6x6, channel: Unorm }",
+        "VK_FORMAT_ASTC_6x6_UNORM_BLOCK",
+    ),
+    (
+        6,
+        6,
+        true,
+        "ASTC_6X6_UNorm_sRGB",
+        "Astc { block: B6x6, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_6x6_SRGB_BLOCK",
+    ),
+    (
+        8,
+        5,
+        false,
+        "ASTC_8X5_UNorm",
+        "Astc { block: B8x5, channel: Unorm }",
+        "VK_FORMAT_ASTC_8x5_UNORM_BLOCK",
+    ),
+    (
+        8,
+        5,
+        true,
+        "ASTC_8X5_UNorm_sRGB",
+        "Astc { block: B8x5, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_8x5_SRGB_BLOCK",
+    ),
+    (
+        8,
+        6,
+        false,
+        "ASTC_8X6_UNorm",
+        "Astc { block: B8x6, channel: Unorm }",
+        "VK_FORMAT_ASTC_8x6_UNORM_BLOCK",
+    ),
+    (
+        8,
+        6,
+        true,
+        "ASTC_8X6_UNorm_sRGB",
+        "Astc { block: B8x6, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_8x6_SRGB_BLOCK",
+    ),
+    (
+        8,
+        8,
+        false,
+        "ASTC_8X8_UNorm",
+        "Astc { block: B8x8, channel: Unorm }",
+        "VK_FORMAT_ASTC_8x8_UNORM_BLOCK",
+    ),
+    (
+        8,
+        8,
+        true,
+        "ASTC_8X8_UNorm_sRGB",
+        "Astc { block: B8x8, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_8x8_SRGB_BLOCK",
+    ),
+    (
+        10,
+        5,
+        false,
+        "ASTC_10X5_UNorm",
+        "Astc { block: B10x5, channel: Unorm }",
+        "VK_FORMAT_ASTC_10x5_UNORM_BLOCK",
+    ),
+    (
+        10,
+        5,
+        true,
+        "ASTC_10X5_UNorm_sRGB",
+        "Astc { block: B10x5, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_10x5_SRGB_BLOCK",
+    ),
+    (
+        10,
+        6,
+        false,
+        "ASTC_10X6_UNorm",
+        "Astc { block: B10x6, channel: Unorm }",
+        "VK_FORMAT_ASTC_10x6_UNORM_BLOCK",
+    ),
+    (
+        10,
+        6,
+        true,
+        "ASTC_10X6_UNorm_sRGB",
+        "Astc { block: B10x6, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_10x6_SRGB_BLOCK",
+    ),
+    (
+        10,
+        8,
+        false,
+        "ASTC_10X8_UNorm",
+        "Astc { block: B10x8, channel: Unorm }",
+        "VK_FORMAT_ASTC_10x8_UNORM_BLOCK",
+    ),
+    (
+        10,
+        8,
+        true,
+        "ASTC_10X8_UNorm_sRGB",
+        "Astc { block: B10x8, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_10x8_SRGB_BLOCK",
+    ),
+    (
+        10,
+        10,
+        false,
+        "ASTC_10X10_UNorm",
+        "Astc { block: B10x10, channel: Unorm }",
+        "VK_FORMAT_ASTC_10x10_UNORM_BLOCK",
+    ),
+    (
+        10,
+        10,
+        true,
+        "ASTC_10X10_UNorm_sRGB",
+        "Astc { block: B10x10, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_10x10_SRGB_BLOCK",
+    ),
+    (
+        12,
+        10,
+        false,
+        "ASTC_12X10_UNorm",
+        "Astc { block: B12x10, channel: Unorm }",
+        "VK_FORMAT_ASTC_12x10_UNORM_BLOCK",
+    ),
+    (
+        12,
+        10,
+        true,
+        "ASTC_12X10_UNorm_sRGB",
+        "Astc { block: B12x10, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_12x10_SRGB_BLOCK",
+    ),
+    (
+        12,
+        12,
+        false,
+        "ASTC_12X12_UNorm",
+        "Astc { block: B12x12, channel: Unorm }",
+        "VK_FORMAT_ASTC_12x12_UNORM_BLOCK",
+    ),
+    (
+        12,
+        12,
+        true,
+        "ASTC_12X12_UNorm_sRGB",
+        "Astc { block: B12x12, channel: UnormSrgb }",
+        "VK_FORMAT_ASTC_12x12_SRGB_BLOCK",
+    ),
 ];
 
 fn astc_gpu_format(w: u32, h: u32, srgb: bool) -> Result<GpuFormat, Error> {
@@ -337,18 +517,8 @@ fn gpu_format_from_d3d(format: D3DFormat) -> Result<GpuFormat, Error> {
             "VK_FORMAT_BC1_RGBA_UNORM_BLOCK",
             8,
         ),
-        DXT2 | DXT3 => bc(
-            "BC2_UNorm",
-            "Bc2RgbaUnorm",
-            "VK_FORMAT_BC2_UNORM_BLOCK",
-            16,
-        ),
-        DXT4 | DXT5 => bc(
-            "BC3_UNorm",
-            "Bc3RgbaUnorm",
-            "VK_FORMAT_BC3_UNORM_BLOCK",
-            16,
-        ),
+        DXT2 | DXT3 => bc("BC2_UNorm", "Bc2RgbaUnorm", "VK_FORMAT_BC2_UNORM_BLOCK", 16),
+        DXT4 | DXT5 => bc("BC3_UNorm", "Bc3RgbaUnorm", "VK_FORMAT_BC3_UNORM_BLOCK", 16),
         _ => return Err(Error::UnsupportedFormat),
     })
 }

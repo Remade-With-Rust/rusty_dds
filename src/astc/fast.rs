@@ -80,7 +80,8 @@ impl FastCtx {
         if let Some(i) = self.grids.iter().position(|(k, _)| *k == (w, h, d)) {
             return i;
         }
-        self.grids.push(((w, h, d), build_taps(self.fp, w as u32, h as u32, d as u32)));
+        self.grids
+            .push(((w, h, d), build_taps(self.fp, w as u32, h as u32, d as u32)));
         self.grids.len() - 1
     }
 
@@ -198,7 +199,11 @@ impl FastCtx {
                 w2[t] = (b >> 4) as u8;
             }
         }
-        let ccs = if s.dual_plane { s.plane2_component as usize } else { 4 };
+        let ccs = if s.dual_plane {
+            s.plane2_component as usize
+        } else {
+            4
+        };
         let pmap: &[u8] = match pk {
             Some(k) => maps[k].as_deref().unwrap_or(&[]),
             None => &[],
@@ -211,7 +216,9 @@ impl FastCtx {
                 // so the interpolation reduces exactly to 16-bit integers (see
                 // `u8_from_8bit`); the SIMD twin runs two texels per register.
                 let srgb = profile == AstcProfile::LdrSrgb;
-                let ends: Ends = core::array::from_fn(|p| (eps[p].e0.map(|v| v >> 8), eps[p].e1.map(|v| v >> 8)));
+                let ends: Ends = core::array::from_fn(|p| {
+                    (eps[p].e0.map(|v| v >> 8), eps[p].e1.map(|v| v >> 8))
+                });
                 let pm: &[u8] = if parts > 1 { pmap } else { &[] };
                 #[cfg(feature = "simd")]
                 super::simd::u8_texels(&ends, pm, w1, w2, ccs, srgb, n, out);
@@ -319,4 +326,3 @@ pub(crate) fn wv(w1: &[u8; 216], w2: &[u8; 216], ccs: usize, t: usize) -> [u16; 
         if ccs == 3 { b } else { a },
     ]
 }
-

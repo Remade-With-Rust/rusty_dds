@@ -49,17 +49,13 @@ fn bench_parse_ab(c: &mut Criterion) {
     for (name, bytes) in &fixtures {
         group.throughput(Throughput::Bytes(bytes.len() as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("rusty_dds", name),
-            bytes,
-            |b, bytes| {
-                b.iter(|| {
-                    let dds = rusty_dds::Dds::read(Cursor::new(bytes.as_slice()))
-                        .expect("rusty_dds parse");
-                    black_box(dds.data.len())
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("rusty_dds", name), bytes, |b, bytes| {
+            b.iter(|| {
+                let dds =
+                    rusty_dds::Dds::read(Cursor::new(bytes.as_slice())).expect("rusty_dds parse");
+                black_box(dds.data.len())
+            })
+        });
 
         group.bench_with_input(BenchmarkId::new("ddsfile", name), bytes, |b, bytes| {
             b.iter(|| {

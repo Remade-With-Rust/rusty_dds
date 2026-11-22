@@ -218,9 +218,9 @@ fn fit_partition(pixels: &[[u8; 4]; 16], part: u8, err_limit: i64) -> Option<([u
         if indices[anchor & 15] >= 4 {
             q[s].swap(0, 1);
             // `n` counts members of one subset of a sixteen-pixel block, so the
-        // clamp is a no-op — and it is what lets every `idxs[..n]` below drop
-        // its slice bounds check.
-        let (idxs, n) = (members[s].0, members[s].1.min(16));
+            // clamp is a no-op — and it is what lets every `idxs[..n]` below drop
+            // its slice bounds check.
+            let (idxs, n) = (members[s].0, members[s].1.min(16));
             for &i in idxs.iter().take(n) {
                 debug_assert!(i < 16);
                 indices[i & 15] = 7 - indices[i & 15];

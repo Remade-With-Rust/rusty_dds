@@ -331,7 +331,6 @@ impl Dds {
             data,
         })
     }
-
 }
 
 impl<'a> DdsView<'a> {
@@ -572,7 +571,8 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// each level is a quarter of the previous one (clamped to the minimum
     /// mip size); changing that would move existing subresource offsets.
     pub(crate) fn has_exact_mip_chain(&self) -> bool {
-        self.get_dxgi_format().map_or(false, |f| f.astc_info().is_some())
+        self.get_dxgi_format()
+            .map_or(false, |f| f.astc_info().is_some())
     }
 
     /// Exact bytes of mip `level` of one slice: block columns x block rows x
@@ -650,7 +650,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         let offset = offset as usize;
         let size = size as usize;
         let end = offset.checked_add(size).ok_or(Error::OutOfBounds)?;
-        self.data.as_ref().get(offset..end).ok_or(Error::OutOfBounds)
+        self.data
+            .as_ref()
+            .get(offset..end)
+            .ok_or(Error::OutOfBounds)
     }
 
     fn get_offset_and_size(&self, array_layer: u32) -> Result<(u32, u32), Error> {
@@ -707,7 +710,11 @@ fn read_headers<R: Read>(r: &mut R) -> Result<(Header, Option<Header10>), Error>
 /// `data` is cleared, not reallocated: a caller that reuses one buffer across
 /// many textures keeps its pages resident, which is the entire point of
 /// [`DdsView::read_into`].
-fn read_payload<R: Read>(r: R, data: &mut Vec<u8>, max_data_len: Option<usize>) -> Result<(), Error> {
+fn read_payload<R: Read>(
+    r: R,
+    data: &mut Vec<u8>,
+    max_data_len: Option<usize>,
+) -> Result<(), Error> {
     data.clear();
     match max_data_len {
         None => {

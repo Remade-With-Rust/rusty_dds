@@ -9,7 +9,9 @@
 //!
 //! Regenerate only on purpose: `UPDATE_LAYOUT_SNAPSHOT=1 cargo test --test layout_snapshot`.
 
-use rusty_dds::{AlphaMode, D3D10ResourceDimension, Dds, DdsView, DxgiFormat, NewDxgiParams, SubresourceId};
+use rusty_dds::{
+    AlphaMode, D3D10ResourceDimension, Dds, DdsView, DxgiFormat, NewDxgiParams, SubresourceId,
+};
 use std::fmt::Write as _;
 
 fn describe<D: AsRef<[u8]>>(d: &rusty_dds::DdsBase<D>, out: &mut String) {
@@ -82,7 +84,12 @@ fn snapshot() -> String {
             continue;
         };
         for &(w, h, depth) in sizes {
-            for (mips, layers, cube) in [(None, None, false), (Some(0), None, false), (Some(4), Some(3), false), (Some(3), None, true)] {
+            for (mips, layers, cube) in [
+                (None, None, false),
+                (Some(0), None, false),
+                (Some(4), Some(3), false),
+                (Some(3), None, true),
+            ] {
                 if cube && (depth.is_some() || w != h) {
                     continue;
                 }
@@ -102,7 +109,10 @@ fn snapshot() -> String {
                     },
                     alpha_mode: AlphaMode::Straight,
                 };
-                let _ = write!(out, "dxgi {v} {w}x{h}x{depth:?} mips={mips:?} layers={layers:?} cube={cube}");
+                let _ = write!(
+                    out,
+                    "dxgi {v} {w}x{h}x{depth:?} mips={mips:?} layers={layers:?} cube={cube}"
+                );
                 match Dds::new_dxgi(params) {
                     Ok(d) => {
                         let _ = write!(out, " data={}", d.data.len());
@@ -132,10 +142,21 @@ fn fnv1a(s: &str) -> u64 {
 /// the line as the current code computes it.
 #[test]
 fn layout_is_unchanged() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/layout_snapshot.txt");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/layout_snapshot.txt"
+    );
     let now = snapshot();
-    let hashes: String = now.lines().map(|l| format!("{:016x}
-", fnv1a(l))).collect();
+    let hashes: String = now
+        .lines()
+        .map(|l| {
+            format!(
+                "{:016x}
+",
+                fnv1a(l)
+            )
+        })
+        .collect();
     if std::env::var_os("UPDATE_LAYOUT_SNAPSHOT").is_some() {
         std::fs::write(path, &hashes).unwrap();
         return;
@@ -145,6 +166,11 @@ fn layout_is_unchanged() {
     let lines: Vec<&str> = now.lines().collect();
     assert_eq!(want.len(), lines.len(), "snapshot line count");
     for (i, (w, l)) in want.iter().zip(&lines).enumerate() {
-        assert_eq!(*w, format!("{:016x}", fnv1a(l)), "layout snapshot line {} differs; now: {l}", i + 1);
+        assert_eq!(
+            *w,
+            format!("{:016x}", fnv1a(l)),
+            "layout snapshot line {} differs; now: {l}",
+            i + 1
+        );
     }
 }

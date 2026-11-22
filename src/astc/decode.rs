@@ -102,7 +102,9 @@ fn validate(
     kind: Out,
 ) -> Result<(), Error> {
     if width == 0 || height == 0 || depth == 0 {
-        return Err(Error::InvalidField("ASTC surface has a zero dimension".into()));
+        return Err(Error::InvalidField(
+            "ASTC surface has a zero dimension".into(),
+        ));
     }
     if kind == Out::U8 && matches!(profile, AstcProfile::Hdr | AstcProfile::HdrRgbLdrA) {
         // 8-bit decode in HDR operation is invalid per the specification.
@@ -160,7 +162,8 @@ fn decode_region<D: BlockDecoder, T: Sink>(
     for bz in 0..nbz {
         for by in rows.clone() {
             for bx in 0..nbx {
-                let idx = ((bz as usize * nby as usize + by as usize) * nbx as usize + bx as usize) * 16;
+                let idx =
+                    ((bz as usize * nby as usize + by as usize) * nbx as usize + bx as usize) * 16;
                 let mut blk = [0u8; 16];
                 blk.copy_from_slice(&data[idx..idx + 16]);
                 let st = dec.decode(&blk, fp, profile, T::KIND, &mut tmp);
@@ -210,7 +213,9 @@ pub(crate) fn surface_into<D: BlockDecoder, T: Sink>(
         return Err(Error::OutOfBounds);
     }
     let rows = 0..block_rows(height, fp);
-    Ok(decode_region::<D, T>(data, width, height, depth, fp, profile, rows, out))
+    Ok(decode_region::<D, T>(
+        data, width, height, depth, fp, profile, rows, out,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -236,7 +241,9 @@ pub(crate) fn rows_into<D: BlockDecoder, T: Sink>(
     if out.len() != texel_count(width, y1 - y0, 1)? {
         return Err(Error::OutOfBounds);
     }
-    Ok(decode_region::<D, T>(data, width, height, 1, fp, profile, rows, out))
+    Ok(decode_region::<D, T>(
+        data, width, height, 1, fp, profile, rows, out,
+    ))
 }
 
 /// Generates the public surface API bound to one block decoder.
@@ -298,7 +305,9 @@ macro_rules! surface_api {
             profile: AstcProfile,
             out: &mut [u8],
         ) -> Result<AstcDecodeReport, Error> {
-            $crate::astc::decode::surface_into::<$dec, u8>(data, width, height, depth, fp, profile, out)
+            $crate::astc::decode::surface_into::<$dec, u8>(
+                data, width, height, depth, fp, profile, out,
+            )
         }
 
         /// Decode a surface to binary16 RGBA bit patterns (`decode_float16`).
@@ -314,7 +323,9 @@ macro_rules! surface_api {
             profile: AstcProfile,
             out: &mut [u16],
         ) -> Result<AstcDecodeReport, Error> {
-            $crate::astc::decode::surface_into::<$dec, u16>(data, width, height, depth, fp, profile, out)
+            $crate::astc::decode::surface_into::<$dec, u16>(
+                data, width, height, depth, fp, profile, out,
+            )
         }
 
         /// [`decode_rgba_f16_into`] widened exactly to `f32`.
@@ -328,7 +339,9 @@ macro_rules! surface_api {
             profile: AstcProfile,
             out: &mut [f32],
         ) -> Result<AstcDecodeReport, Error> {
-            $crate::astc::decode::surface_into::<$dec, f32>(data, width, height, depth, fp, profile, out)
+            $crate::astc::decode::surface_into::<$dec, f32>(
+                data, width, height, depth, fp, profile, out,
+            )
         }
 
         /// The job-system seam: decode block rows `rows` of a 2D surface into
@@ -358,7 +371,9 @@ macro_rules! surface_api {
             rows: core::ops::Range<u32>,
             out: &mut [u16],
         ) -> Result<AstcDecodeReport, Error> {
-            $crate::astc::decode::rows_into::<$dec, u16>(data, width, height, fp, profile, rows, out)
+            $crate::astc::decode::rows_into::<$dec, u16>(
+                data, width, height, fp, profile, rows, out,
+            )
         }
 
         /// [`decode_block_rows_into`] with `f32` output.
@@ -372,7 +387,9 @@ macro_rules! surface_api {
             rows: core::ops::Range<u32>,
             out: &mut [f32],
         ) -> Result<AstcDecodeReport, Error> {
-            $crate::astc::decode::rows_into::<$dec, f32>(data, width, height, fp, profile, rows, out)
+            $crate::astc::decode::rows_into::<$dec, f32>(
+                data, width, height, fp, profile, rows, out,
+            )
         }
     };
 }

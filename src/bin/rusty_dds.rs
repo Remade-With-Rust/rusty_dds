@@ -75,16 +75,17 @@ fn cmd_info(args: &[String]) -> ExitCode {
             println!("{dds:?}");
             #[cfg(feature = "astc")]
             if let Ok(c) = dds.astc_content() {
-                println!("  ASTC content: {} {}", c.footprint, if c.srgb { "sRGB" } else { "linear" });
+                println!(
+                    "  ASTC content: {} {}",
+                    c.footprint,
+                    if c.srgb { "sRGB" } else { "linear" }
+                );
             }
             if let Ok(c) = dds.decode_content() {
                 println!("  LDR content: {}", c.name());
             }
             if let Ok(g) = dds.gpu_format() {
-                println!(
-                    "  GPU: wgpu={} vulkan={}",
-                    g.wgpu_name, g.vulkan_name
-                );
+                println!("  GPU: wgpu={} vulkan={}", g.wgpu_name, g.vulkan_name);
             }
             ExitCode::SUCCESS
         }
@@ -366,11 +367,7 @@ fn cmd_retag(args: &[String]) -> ExitCode {
         }
     };
 
-    let mut file = match fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-    {
+    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("open {path}: {e}");
@@ -471,7 +468,14 @@ fn astc_info(path: &str) -> Option<ExitCode> {
             ExitCode::FAILURE
         }
         Ok(AstcInput::File(f)) => {
-            println!(".astc: {} block, {}x{}x{}, {} bytes of blocks", f.footprint, f.width, f.height, f.depth, f.data.len());
+            println!(
+                ".astc: {} block, {}x{}x{}, {} bytes of blocks",
+                f.footprint,
+                f.width,
+                f.height,
+                f.depth,
+                f.data.len()
+            );
             ExitCode::SUCCESS
         }
         Ok(AstcInput::Ktx(k)) => {
@@ -492,7 +496,13 @@ fn astc_info(path: &str) -> Option<ExitCode> {
             println!(
                 "KTX 2.0: ASTC {} {}, {}x{}x{}, layers {}, faces {}, levels {}",
                 k.footprint,
-                if k.hdr { "SFLOAT" } else if k.srgb { "sRGB" } else { "UNORM" },
+                if k.hdr {
+                    "SFLOAT"
+                } else if k.srgb {
+                    "sRGB"
+                } else {
+                    "UNORM"
+                },
                 k.width,
                 k.height,
                 k.depth,
@@ -507,7 +517,14 @@ fn astc_info(path: &str) -> Option<ExitCode> {
 
 /// `decode` for .astc / .ktx / .ktx2 to raw RGBA8.
 #[cfg(feature = "astc")]
-fn astc_decode(path: &str, mip: u32, layer: u32, face: u32, profile: Option<astc::AstcProfile>, out: &str) -> Option<ExitCode> {
+fn astc_decode(
+    path: &str,
+    mip: u32,
+    layer: u32,
+    face: u32,
+    profile: Option<astc::AstcProfile>,
+    out: &str,
+) -> Option<ExitCode> {
     let bytes = fs::read(path).ok()?;
     let r = astc_input(&bytes)?;
     let surf = match r {
@@ -537,16 +554,34 @@ fn astc_decode(path: &str, mip: u32, layer: u32, face: u32, profile: Option<astc
         eprintln!("write {out}: {e}");
         return Some(ExitCode::FAILURE);
     }
-    println!("wrote {out} ({}x{}x{} RGBA8, {} bytes)", img.width, img.height, img.depth, img.pixels.len());
+    println!(
+        "wrote {out} ({}x{}x{} RGBA8, {} bytes)",
+        img.width,
+        img.height,
+        img.depth,
+        img.pixels.len()
+    );
     Some(ExitCode::SUCCESS)
 }
 
 /// `encode --format astc`: the container follows the output extension
 /// (.astc, .ktx or .dds).
 #[cfg(feature = "astc")]
-fn astc_encode(pixels: &[u8], w: u32, h: u32, block: &str, preset: &str, profile: &str, out: &str) -> ExitCode {
+fn astc_encode(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    block: &str,
+    preset: &str,
+    profile: &str,
+    out: &str,
+) -> ExitCode {
     let dims: Vec<u32> = block.split('x').filter_map(|t| t.parse().ok()).collect();
-    let Some(fp) = (if dims.len() == 2 { astc::AstcFootprint::new_2d(dims[0], dims[1]) } else { None }) else {
+    let Some(fp) = (if dims.len() == 2 {
+        astc::AstcFootprint::new_2d(dims[0], dims[1])
+    } else {
+        None
+    }) else {
         eprintln!("--block {block}: not a 2D ASTC footprint (4x4 ... 12x12)");
         return ExitCode::from(2);
     };
@@ -566,17 +601,35 @@ fn astc_encode(pixels: &[u8], w: u32, h: u32, block: &str, preset: &str, profile
         return ExitCode::from(2);
     };
     let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(preset);
-    let ext = std::path::Path::new(out).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = std::path::Path::new(out)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let mut bytes = Vec::new();
     let r = match ext.as_str() {
         "dds" => Dds::encode_astc_from_rgba8(pixels, w, h, &opts).and_then(|d| d.write(&mut bytes)),
         "ktx2" => astc::encode_rgba8(pixels, w, h, &opts).and_then(|p| {
-            let kind = if prof == astc::AstcProfile::LdrSrgb { astc::ktx::VkAstcKind::Srgb } else { astc::ktx::VkAstcKind::Unorm };
+            let kind = if prof == astc::AstcProfile::LdrSrgb {
+                astc::ktx::VkAstcKind::Srgb
+            } else {
+                astc::ktx::VkAstcKind::Unorm
+            };
             astc::Ktx2View::write(&mut bytes, fp, w, h, 1, kind, &[&p])
         }),
-        "ktx" => astc::encode_rgba8(pixels, w, h, &opts)
-            .and_then(|p| astc::KtxView::write(&mut bytes, fp, w, h, 1, prof == astc::AstcProfile::LdrSrgb, &[&p])),
-        _ => astc::encode_rgba8(pixels, w, h, &opts).and_then(|p| astc::AstcFile::write(&mut bytes, fp, w, h, 1, &p)),
+        "ktx" => astc::encode_rgba8(pixels, w, h, &opts).and_then(|p| {
+            astc::KtxView::write(
+                &mut bytes,
+                fp,
+                w,
+                h,
+                1,
+                prof == astc::AstcProfile::LdrSrgb,
+                &[&p],
+            )
+        }),
+        _ => astc::encode_rgba8(pixels, w, h, &opts)
+            .and_then(|p| astc::AstcFile::write(&mut bytes, fp, w, h, 1, &p)),
     };
     if let Err(e) = r {
         eprintln!("encode: {e}");

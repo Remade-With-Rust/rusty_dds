@@ -15,7 +15,7 @@
 //! against their scalar twins by unit oracles, and this test proves it end to
 //! end, since the same hashes must hold with the feature on or off.
 
-use rusty_dds::{DecodeContent, Dds, EncodeLayout, EncodeQuality, Rdo};
+use rusty_dds::{Dds, DecodeContent, EncodeLayout, EncodeQuality, Rdo};
 
 /// FNV-1a 64. Inlined rather than pulled in as a dependency — the house rule
 /// is that a test helper does not grow the dependency graph.
@@ -150,7 +150,9 @@ fn check(label: &str, expected: &[(&str, u64)], got: &[(&str, u64)]) {
             .map(|(_, h)| *h)
             .unwrap_or_else(|| panic!("{label}: no hash produced for {name}"));
         if *want != have {
-            mismatches.push(format!("  (\"{name}\", 0x{have:016x}), // was 0x{want:016x}"));
+            mismatches.push(format!(
+                "  (\"{name}\", 0x{have:016x}), // was 0x{want:016x}"
+            ));
         }
     }
     assert!(
@@ -184,7 +186,11 @@ fn rdo_payloads_are_frozen() {
     let got = vec![
         (
             "bc1",
-            encode_hash(DecodeContent::Bc1, EncodeQuality::Quality, Rdo::lambda(50.0)),
+            encode_hash(
+                DecodeContent::Bc1,
+                EncodeQuality::Quality,
+                Rdo::lambda(50.0),
+            ),
         ),
         (
             "bc7",
@@ -201,7 +207,10 @@ fn rdo_lambda_zero_is_byte_identical() {
     for content in [DecodeContent::Bc1, DecodeContent::Bc7] {
         let off = encode_hash(content, EncodeQuality::Quality, Rdo::Off);
         let zero = encode_hash(content, EncodeQuality::Quality, Rdo::lambda(0.0));
-        assert_eq!(off, zero, "{content:?}: Rdo::lambda(0.0) is not byte-identical");
+        assert_eq!(
+            off, zero,
+            "{content:?}: Rdo::lambda(0.0) is not byte-identical"
+        );
     }
 }
 

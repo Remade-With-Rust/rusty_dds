@@ -236,7 +236,6 @@ impl PlainFormat {
             P::R8Un | P::R8Sn | P::A8Un | P::L8 | P::A4L4 => 1,
         }
     }
-
 }
 
 /// What `decode_rgba_f32` dispatches on.
@@ -389,7 +388,8 @@ fn single<T: Copy>(src: &[T], dst: &mut [f32], grey: bool, f: impl Fn(T) -> f32)
 
 /// Little-endian `u16`s / `u32`s / `f32`s of a byte row.
 fn words16(src: &[u8]) -> impl Iterator<Item = u16> + '_ {
-    src.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]))
+    src.chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
 }
 
 /// Convert `dst.len() / 4` consecutive pixels (any number of whole rows).
@@ -420,7 +420,11 @@ pub(crate) fn convert_row(fmt: PlainFormat, src: &[u8], dst: &mut [f32], grey: b
                 // bit pattern is a valid `f32`, and a byte copy has no
                 // alignment requirement on either side.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), bytes);
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        dst.as_mut_ptr().cast::<u8>(),
+                        bytes,
+                    );
                 }
                 return;
             }
@@ -491,7 +495,12 @@ pub(crate) fn convert_row(fmt: PlainFormat, src: &[u8], dst: &mut [f32], grey: b
         }
         P::Rg16F => {
             for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                d.copy_from_slice(&[half_to_f32(u16_at(s, 0)), half_to_f32(u16_at(s, 2)), 0.0, 1.0]);
+                d.copy_from_slice(&[
+                    half_to_f32(u16_at(s, 0)),
+                    half_to_f32(u16_at(s, 2)),
+                    0.0,
+                    1.0,
+                ]);
             }
         }
         P::R16F => single_words(src, dst, grey, half_to_f32),
@@ -664,7 +673,8 @@ impl Bc4Tables {
     pub(crate) fn get() -> &'static Bc4Tables {
         static T: std::sync::OnceLock<Bc4Tables> = std::sync::OnceLock::new();
         T.get_or_init(|| {
-            let q = |lo: i32, hi: i32, d: f32| (lo..=hi).map(|n| n as f32 / d).collect::<Vec<f32>>();
+            let q =
+                |lo: i32, hi: i32, d: f32| (lo..=hi).map(|n| n as f32 / d).collect::<Vec<f32>>();
             Bc4Tables {
                 u7: q(0, 1785, 1785.0),
                 u5: q(0, 1275, 1275.0),
@@ -696,7 +706,16 @@ pub(crate) fn bc4_palette_f32(a0: u8, a1: u8, signed: bool, t: &Bc4Tables) -> [f
     };
     if e0 > e1 {
         let l = |w0: i32, w1: i32| t7[(w0 * e0 + w1 * e1 + off7) as usize];
-        [l(7, 0), l(0, 7), l(6, 1), l(5, 2), l(4, 3), l(3, 4), l(2, 5), l(1, 6)]
+        [
+            l(7, 0),
+            l(0, 7),
+            l(6, 1),
+            l(5, 2),
+            l(4, 3),
+            l(3, 4),
+            l(2, 5),
+            l(1, 6),
+        ]
     } else {
         let l = |w0: i32, w1: i32| t5[(w0 * e0 + w1 * e1 + off5) as usize];
         [
@@ -716,16 +735,38 @@ pub(crate) fn bc4_palette_f32(a0: u8, a1: u8, signed: bool, t: &Bc4Tables) -> [f
 #[cfg(test)]
 fn bc4_palette_f32_div(a0: u8, a1: u8, signed: bool) -> [f32; 8] {
     let (e0, e1, scale) = if signed {
-        ((a0 as i8 as i32).max(-127), (a1 as i8 as i32).max(-127), 127.0f32)
+        (
+            (a0 as i8 as i32).max(-127),
+            (a1 as i8 as i32).max(-127),
+            127.0f32,
+        )
     } else {
         (a0 as i32, a1 as i32, 255.0f32)
     };
     let lerp = |w0: i32, w1: i32, n: f32| (w0 * e0 + w1 * e1) as f32 / (n * scale);
     let (f0, f1) = (e0 as f32 / scale, e1 as f32 / scale);
     if e0 > e1 {
-        [f0, f1, lerp(6, 1, 7.0), lerp(5, 2, 7.0), lerp(4, 3, 7.0), lerp(3, 4, 7.0), lerp(2, 5, 7.0), lerp(1, 6, 7.0)]
+        [
+            f0,
+            f1,
+            lerp(6, 1, 7.0),
+            lerp(5, 2, 7.0),
+            lerp(4, 3, 7.0),
+            lerp(3, 4, 7.0),
+            lerp(2, 5, 7.0),
+            lerp(1, 6, 7.0),
+        ]
     } else {
-        [f0, f1, lerp(4, 1, 5.0), lerp(3, 2, 5.0), lerp(2, 3, 5.0), lerp(1, 4, 5.0), if signed { -1.0 } else { 0.0 }, 1.0]
+        [
+            f0,
+            f1,
+            lerp(4, 1, 5.0),
+            lerp(3, 2, 5.0),
+            lerp(2, 3, 5.0),
+            lerp(1, 4, 5.0),
+            if signed { -1.0 } else { 0.0 },
+            1.0,
+        ]
     }
 }
 
@@ -752,7 +793,11 @@ pub(crate) fn decode_bc45_f32(
     if data.len() < need {
         return Err(Error::TruncatedData);
     }
-    if dst.len() != w.checked_mul(h).and_then(|n| n.checked_mul(4)).ok_or(Error::OutOfBounds)? {
+    if dst.len()
+        != w.checked_mul(h)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?
+    {
         return Err(Error::OutOfBounds);
     }
     let pitch = w * 4;

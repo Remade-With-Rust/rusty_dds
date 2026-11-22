@@ -114,8 +114,16 @@ fn main() {
         "summary": summarize(&rows),
     });
 
-    write_json_md(&artifacts, "decode-vs-baselines", &report, "Decode (corpus) vs Microsoft DirectXTex");
-    println!("{}", serde_json::to_string_pretty(&report["summary"]).unwrap());
+    write_json_md(
+        &artifacts,
+        "decode-vs-baselines",
+        &report,
+        "Decode (corpus) vs Microsoft DirectXTex",
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report["summary"]).unwrap()
+    );
 }
 
 fn time_decode(bytes: &[u8]) -> (f64, bool) {

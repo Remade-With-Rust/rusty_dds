@@ -38,7 +38,10 @@ pub enum Error {
     /// A caller-supplied byte budget was exceeded while reading
     /// (see [`crate::Dds::read_limited`]). `at_least` is a lower bound: the
     /// read stops at the budget rather than measuring the whole stream.
-    SizeLimitExceeded { limit: usize, at_least: usize },
+    SizeLimitExceeded {
+        limit: usize,
+        at_least: usize,
+    },
 }
 
 impl fmt::Display for Error {

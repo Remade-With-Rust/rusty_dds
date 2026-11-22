@@ -2,7 +2,7 @@
 //! D3 alpha-palette-in-register A/B (inline-exe §5.2f.1). BC3 is the target
 //! (its alpha palette build ceiling-probes at ~22% of decode); BC1 and BC2
 //! anchor the same surface-kernel family.
-use rusty_dds::{DecodeContent, Dds, EncodeLayout, SubresourceId};
+use rusty_dds::{Dds, DecodeContent, EncodeLayout, SubresourceId};
 use std::time::Instant;
 
 fn main() {
@@ -25,8 +25,7 @@ fn main() {
                 v(0.5 + 0.5 * ((x * 160.0).sin() * (y * 96.0).cos())),
             ]);
         }
-        let dds =
-            Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side)).unwrap();
+        let dds = Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side)).unwrap();
         let id = SubresourceId::mip_layer(0, 0);
         let mut buf: Vec<u8> = Vec::new();
         dds.decode_rgba8_into(id, &mut buf).unwrap();

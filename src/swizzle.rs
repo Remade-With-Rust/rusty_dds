@@ -69,7 +69,11 @@ pub(crate) fn has_ssse3() -> bool {
     static F: AtomicU8 = AtomicU8::new(0);
     match F.load(Ordering::Relaxed) {
         0 => {
-            let v = if std::is_x86_feature_detected!("ssse3") { 2 } else { 1 };
+            let v = if std::is_x86_feature_detected!("ssse3") {
+                2
+            } else {
+                1
+            };
             F.store(v, Ordering::Relaxed);
             v == 2
         }
@@ -112,7 +116,10 @@ mod tests {
             }
             let mut fast = vec![0u8; px * 4];
             let mut slow = vec![0u8; px * 4];
-            assert!(super::swap_rb(&src, &mut fast), "dispatch declined, case {case}");
+            assert!(
+                super::swap_rb(&src, &mut fast),
+                "dispatch declined, case {case}"
+            );
             swap_rb_scalar(&src, &mut slow);
             assert_eq!(fast, slow, "case {case}, {px} px");
         }

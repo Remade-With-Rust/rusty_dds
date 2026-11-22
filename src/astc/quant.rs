@@ -37,9 +37,16 @@ const fn unquant_color(range: usize, v: u32) -> u8 {
             2 => (bt(m, 1) * 0x116, 93),
             3 => (bt(m, 2) * 0x10A + bt(m, 1) * 0x085, 44),
             4 => (bt(m, 3) * 0x104 + bt(m, 2) * 0x082 + bt(m, 1) * 0x041, 22),
-            5 => (bt(m, 4) * 0x102 + bt(m, 3) * 0x081 + bt(m, 2) * 0x040 + bt(m, 1) * 0x020, 11),
+            5 => (
+                bt(m, 4) * 0x102 + bt(m, 3) * 0x081 + bt(m, 2) * 0x040 + bt(m, 1) * 0x020,
+                11,
+            ),
             _ => (
-                bt(m, 5) * 0x101 + bt(m, 4) * 0x080 + bt(m, 3) * 0x040 + bt(m, 2) * 0x020 + bt(m, 1) * 0x010,
+                bt(m, 5) * 0x101
+                    + bt(m, 4) * 0x080
+                    + bt(m, 3) * 0x040
+                    + bt(m, 2) * 0x020
+                    + bt(m, 1) * 0x010,
                 5,
             ),
         }
@@ -49,7 +56,10 @@ const fn unquant_color(range: usize, v: u32) -> u8 {
             2 => (bt(m, 1) * 0x10C, 54),
             3 => (bt(m, 2) * 0x105 + bt(m, 1) * 0x082, 26),
             4 => (bt(m, 3) * 0x102 + bt(m, 2) * 0x081 + bt(m, 1) * 0x040, 13),
-            _ => (bt(m, 4) * 0x101 + bt(m, 3) * 0x080 + bt(m, 2) * 0x040 + bt(m, 1) * 0x020, 6),
+            _ => (
+                bt(m, 4) * 0x101 + bt(m, 3) * 0x080 + bt(m, 2) * 0x040 + bt(m, 1) * 0x020,
+                6,
+            ),
         }
     };
     let mut unq = d * c + b;
@@ -215,7 +225,11 @@ mod tests {
     fn color_range_table_equals_the_iterative_rule() {
         for values in 1..=20u32 {
             for bits in 0..200u32 {
-                assert_eq!(color_range_lut(values, bits), color_range(values, bits), "{values} {bits}");
+                assert_eq!(
+                    color_range_lut(values, bits),
+                    color_range(values, bits),
+                    "{values} {bits}"
+                );
             }
         }
     }
@@ -270,7 +284,11 @@ const fn build_color_nearest() -> [[u8; 256]; RANGE_COUNT] {
             let mut v = 0;
             while v < levels {
                 let u = COLOR_UNQUANT_C[r][v] as i32;
-                let d = if u > x as i32 { u - x as i32 } else { x as i32 - u };
+                let d = if u > x as i32 {
+                    u - x as i32
+                } else {
+                    x as i32 - u
+                };
                 if d < bd || (d == bd && (u as u8) < best) {
                     bd = d;
                     best = u as u8;
@@ -306,7 +324,6 @@ pub static COLOR_INV: [[u8; 256]; RANGE_COUNT] = build_color_inverse();
 pub static COLOR_NEAREST: [[u8; 256]; RANGE_COUNT] = build_color_nearest();
 /// Raw ISE value for a representable unquantised weight (0..=64).
 pub static WEIGHT_INV: [[u8; 65]; 12] = build_weight_inverse();
-
 
 #[cfg(test)]
 mod inverse_tests {

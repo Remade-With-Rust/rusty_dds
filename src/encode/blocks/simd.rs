@@ -51,14 +51,8 @@ unsafe fn alpha_fixed_sse_avx2_impl(samples: &[u8; 16], palette: &[u8; 8], bits:
         seven,
     );
     // Down to sixteen index bytes in sample order.
-    let i0 = _mm_packs_epi32(
-        _mm256_castsi256_si128(lo),
-        _mm256_extracti128_si256(lo, 1),
-    );
-    let i1 = _mm_packs_epi32(
-        _mm256_castsi256_si128(hi),
-        _mm256_extracti128_si256(hi, 1),
-    );
+    let i0 = _mm_packs_epi32(_mm256_castsi256_si128(lo), _mm256_extracti128_si256(lo, 1));
+    let i1 = _mm_packs_epi32(_mm256_castsi256_si128(hi), _mm256_extracti128_si256(hi, 1));
     let idx = _mm_packs_epi16(i0, i1);
     // One shuffle reconstructs all sixteen samples from the palette.
     let pal = _mm_loadl_epi64(palette.as_ptr() as *const __m128i);
@@ -243,29 +237,29 @@ unsafe fn fit_indices_mode6_avx2_impl(
     let one = _mm256_set1_epi32(1);
     let mut kv = _mm256_setzero_si256();
     for kk in 0..4usize {
-      for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
-        let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
+        for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
+            let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
 
-        // The permute that puts lanes back in pixel order is NOT done here.
-        // Everything downstream of it — the compare, both blends, and the
-        // running minima — is lane-wise, so a consistent permutation of all
-        // lanes commutes with the whole loop. Two permutes a pass become two at
-        // the end, and the error sum does not need one at all.
-        let da = _mm256_sub_epi16(q0, pv);
-        let db = _mm256_sub_epi16(q1, pv);
-        let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
-        let dc = _mm256_sub_epi16(q2, pv);
-        let dd = _mm256_sub_epi16(q3, pv);
-        let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
+            // The permute that puts lanes back in pixel order is NOT done here.
+            // Everything downstream of it — the compare, both blends, and the
+            // running minima — is lane-wise, so a consistent permutation of all
+            // lanes commutes with the whole loop. Two permutes a pass become two at
+            // the end, and the error sum does not need one at all.
+            let da = _mm256_sub_epi16(q0, pv);
+            let db = _mm256_sub_epi16(q1, pv);
+            let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
+            let dc = _mm256_sub_epi16(q2, pv);
+            let dd = _mm256_sub_epi16(q3, pv);
+            let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
 
-        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
-        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
-        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
-        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
-        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
-        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
-        kv = _mm256_add_epi32(kv, one);
-      }
+            let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
+            let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
+            best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
+            best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
+            idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
+            idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
+            kv = _mm256_add_epi32(kv, one);
+        }
     }
 
     // The tail stored 128 bytes and read them back scalar; LLVM rendered that as
@@ -387,10 +381,7 @@ unsafe fn prep_palette_regs(
     // code writing memory that scalar code immediately reads back — the
     // store-forwarding shape this file has removed six times.
     let hp = _mm256_hadd_epi32(_mm256_madd_epi16(w, w), _mm256_madd_epi16(w, w));
-    let q4 = _mm_unpacklo_epi64(
-        _mm256_castsi256_si128(hp),
-        _mm256_extracti128_si256(hp, 1),
-    );
+    let q4 = _mm_unpacklo_epi64(_mm256_castsi256_si128(hp), _mm256_extracti128_si256(hp, 1));
     (
         _mm256_slli_epi16(w, 3),
         _mm_add_epi32(_mm_slli_epi32(q4, 2), _mm_setr_epi32(0, 1, 2, 3)),
@@ -463,7 +454,6 @@ pub(super) fn bc1_fit_4color_avx2(
     unsafe { bc1_fit_4color_avx2_impl(pixels, colors, err_limit) }
 }
 
-
 /// BC1 four-colour fit, entirely in registers.
 ///
 /// Same defect as the mode-6 kernel had before 0.3.24, one file over: the
@@ -509,15 +499,10 @@ unsafe fn alpha_channel_avx2_impl(pixels: &[[u8; 4]; 16]) -> [u8; 16] {
     use std::arch::x86_64::*;
     let base = pixels.as_ptr() as *const u8;
     let m = _mm_setr_epi8(3, 7, 11, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
-    let row = |off: usize| {
-        _mm_shuffle_epi8(_mm_loadu_si128(base.add(off) as *const __m128i), m)
-    };
+    let row = |off: usize| _mm_shuffle_epi8(_mm_loadu_si128(base.add(off) as *const __m128i), m);
     let (r0, r1, r2, r3) = (row(0), row(16), row(32), row(48));
     // Each row left its four bytes in dword 0; stack them in order.
-    let v = _mm_unpacklo_epi64(
-        _mm_unpacklo_epi32(r0, r1),
-        _mm_unpacklo_epi32(r2, r3),
-    );
+    let v = _mm_unpacklo_epi64(_mm_unpacklo_epi32(r0, r1), _mm_unpacklo_epi32(r2, r3));
     let mut out = [0u8; 16];
     _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, v);
     out
@@ -580,9 +565,8 @@ pub(super) fn bc1_psq_rgb_avx2(pixels: &[[u8; 4]; 16]) -> i32 {
 unsafe fn bc1_psq_rgb_avx2_impl(pixels: &[[u8; 4]; 16]) -> i32 {
     use std::arch::x86_64::*;
     let base = pixels.as_ptr() as *const u8;
-    let keep = _mm256_set1_epi64x(
-        u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
-    );
+    let keep =
+        _mm256_set1_epi64x(u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64);
     let ld = |off: usize| {
         _mm256_and_si256(
             _mm256_cvtepu8_epi16(_mm_loadu_si128(base.add(off) as *const __m128i)),
@@ -793,9 +777,6 @@ unsafe fn bc1_fit_core_avx2(
     bc1_fit_core_body!(p0, p1, p2, p3, p8, cst4, psq, err_limit)
 }
 
-
-
-
 /// Nearest-palette selection for one BC4/BC5 alpha block: sixteen samples
 /// against an eight-entry palette, in registers.
 ///
@@ -848,7 +829,6 @@ unsafe fn alpha_fit_avx2_impl(palette: &[u8; 8], samples: &[u8; 16]) -> ([u8; 16
     }
     (out, err)
 }
-
 
 /// Search a BC7 alpha endpoint neighbourhood — all 24 offsets — inside **one**
 /// `#[target_feature]` call.
@@ -952,7 +932,6 @@ unsafe fn alpha_nbhd_avx2_impl<const N: usize>(
     best
 }
 
-
 /// SSE of a BC1 block against source pixels, with the index table FIXED.
 ///
 /// The RDO path scores candidate blocks against the source constantly — 17.7
@@ -1028,10 +1007,7 @@ unsafe fn bc1_palette_565_avx2(c0: u16, c1: u16) -> std::arch::x86_64::__m128i {
     // two halves down to the sixteen bytes wanted. Three instructions where
     // four `pshufb` and three `or` were used, and nothing saturates because
     // every value already fits a byte.
-    _mm_packus_epi16(
-        _mm_packus_epi32(e, f),
-        _mm_packus_epi32(p2, p3),
-    )
+    _mm_packus_epi16(_mm_packus_epi32(e, f), _mm_packus_epi32(p2, p3))
 }
 
 /// The BC1 palette for two 565 words, in the `[i16; 16]` form the index fit
@@ -1061,12 +1037,7 @@ unsafe fn bc1_palette_565_i16_avx2_impl(c0: u16, c1: u16) -> Bc1Pal {
 /// crosses no new `#[target_feature]` boundary, because this kernel already is
 /// one.
 #[cfg(target_arch = "x86_64")]
-pub(super) fn bc1_fixed_sse_565_avx2(
-    pixels: &[[u8; 4]; 16],
-    c0: u16,
-    c1: u16,
-    table: u32,
-) -> i32 {
+pub(super) fn bc1_fixed_sse_565_avx2(pixels: &[[u8; 4]; 16], c0: u16, c1: u16, table: u32) -> i32 {
     debug_assert!(has_avx2());
     // SAFETY: AVX2 guaranteed by dispatch (debug-asserted above).
     unsafe { bc1_fixed_sse_565_avx2_impl(pixels, c0, c1, table) }
@@ -1074,16 +1045,9 @@ pub(super) fn bc1_fixed_sse_565_avx2(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn bc1_fixed_sse_565_avx2_impl(
-    pixels: &[[u8; 4]; 16],
-    c0: u16,
-    c1: u16,
-    table: u32,
-) -> i32 {
+unsafe fn bc1_fixed_sse_565_avx2_impl(pixels: &[[u8; 4]; 16], c0: u16, c1: u16, table: u32) -> i32 {
     bc1_sse_from_pal(pixels, bc1_palette_565_avx2(c0, c1), table)
 }
-
-
 
 /// The fixed-table scoring loop, shared by both entry points.
 #[cfg(target_arch = "x86_64")]
@@ -1096,9 +1060,8 @@ unsafe fn bc1_sse_from_pal(
     use std::arch::x86_64::*;
     let src = pixels.as_ptr() as *const u8;
     // Keep R, G, B; drop A. Four 16-bit lanes per pixel.
-    let keep = _mm256_set1_epi64x(
-        u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64,
-    );
+    let keep =
+        _mm256_set1_epi64x(u64::from_le_bytes([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0]) as i64);
     let mut acc = _mm256_setzero_si256();
     for g in 0..4usize {
         let sel = _mm_loadu_si128(
@@ -1123,7 +1086,6 @@ unsafe fn bc1_sse_from_pal(
         _mm256_extracti128_si256(h, 1),
     ))
 }
-
 
 /// Mode-6 SSE for one channel of a block: sixteen pixels, one AVX2 register.
 ///
@@ -1163,10 +1125,7 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
     let base = _mm256_set1_epi16(v0 as i16 * 64 + 32);
     let delta = _mm256_set1_epi16(v1 as i16 - v0 as i16);
     let wv = _mm256_loadu_si256(w.as_ptr() as *const __m256i);
-    let v = _mm256_srai_epi16(
-        _mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)),
-        6,
-    );
+    let v = _mm256_srai_epi16(_mm256_add_epi16(base, _mm256_mullo_epi16(delta, wv)), 6);
     let pv = _mm256_cvtepu8_epi16(_mm_loadu_si128(px.as_ptr() as *const __m128i));
     let d = _mm256_sub_epi16(v, pv);
     // Each square is at most 255^2 and `madd` folds pairs, so the eight lanes
@@ -1179,7 +1138,6 @@ unsafe fn mode6_chan_sse_avx2_impl(px: &[u8; 16], w: &[i16; 16], v0: u8, v1: u8)
         _mm256_extracti128_si256(h, 1),
     )) as i64
 }
-
 
 /// The pixel-dependent half of BC1's LS refit: sixteen pixels accumulated into
 /// two four-lane float sums.
@@ -1236,10 +1194,7 @@ pub(super) fn ls_accum_sse(pxv: &[[f32; 8]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[cfg(test)]
-unsafe fn ls_accum_sse_impl(
-    pxv: &[[f32; 8]; 16],
-    uw: &[[f32; 8]; 16],
-) -> ([f32; 4], [f32; 4]) {
+unsafe fn ls_accum_sse_impl(pxv: &[[f32; 8]; 16], uw: &[[f32; 8]; 16]) -> ([f32; 4], [f32; 4]) {
     use std::arch::x86_64::*;
     let mut acc = _mm256_setzero_ps();
     for i in 0..16usize {
@@ -1285,7 +1240,7 @@ unsafe fn ls_pixels_mode6_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
     let mut out = [[0f32; 8]; 16];
     for i in (0..16usize).step_by(2) {
         let two = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_loadl_epi64(
-            src.add(i * 4) as *const __m128i,
+            src.add(i * 4) as *const __m128i
         )));
         _mm256_storeu_ps(out[i].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup0));
         _mm256_storeu_ps(out[i + 1].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup1));
@@ -1315,15 +1270,13 @@ unsafe fn ls_pixels_impl(pixels: &[[u8; 4]; 16]) -> [[f32; 8]; 16] {
     let mut out = [[0f32; 8]; 16];
     for i in (0..16usize).step_by(2) {
         let two = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_loadl_epi64(
-            src.add(i * 4) as *const __m128i,
+            src.add(i * 4) as *const __m128i
         )));
         _mm256_storeu_ps(out[i].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup0));
         _mm256_storeu_ps(out[i + 1].as_mut_ptr(), _mm256_permutevar8x32_ps(two, dup1));
     }
     out
 }
-
-
 
 /// Four index bytes per table byte, for expanding BC1's 2-bit indices.
 ///
@@ -1385,7 +1338,6 @@ unsafe fn bc1_chan_sse_avx2_impl(px: &[u8; 16], cols: [u8; 4], table: u32) -> i3
     ))
 }
 
-
 /// The BC1 LS solve: six `(A*b0 - B*b1) / det` in four vector ops.
 ///
 /// `refit_with_ls` is BC1 RDO's largest function, and its solve performs **six
@@ -1427,11 +1379,17 @@ unsafe fn solve_pair(
     let v1 = _mm_loadu_ps(b1.as_ptr());
     let dv = _mm_set1_ps(det);
     let e0 = _mm_div_ps(
-        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a11), v0), _mm_mul_ps(_mm_set1_ps(a01), v1)),
+        _mm_sub_ps(
+            _mm_mul_ps(_mm_set1_ps(a11), v0),
+            _mm_mul_ps(_mm_set1_ps(a01), v1),
+        ),
         dv,
     );
     let e1 = _mm_div_ps(
-        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
+        _mm_sub_ps(
+            _mm_mul_ps(_mm_set1_ps(a00), v1),
+            _mm_mul_ps(_mm_set1_ps(a01), v0),
+        ),
         dv,
     );
     (e0, e1)
@@ -1456,7 +1414,6 @@ unsafe fn bc1_ls_solve_impl(
     let (e0, e1) = solve_pair(b0, b1, a00, a01, a11, det);
     (round_pack(e0), round_pack(e1))
 }
-
 
 /// `round_clamp_u8` for four lanes at once: clamp to `[0, 255]` in f32, widen to
 /// f64, add a half, truncate.
@@ -1486,7 +1443,6 @@ unsafe fn round_lanes(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128
     _mm256_cvttpd_epi32(d)
 }
 
-
 /// `(1 - w, w)` per mode-6 index. Every value is `k/64` for `k` in the mode-6
 /// weight table, so all sixteen are exact binary fractions and these literals
 /// are the f32 the runtime `W[i]` / `1.0 - w` computation produces, bit for bit.
@@ -1507,7 +1463,7 @@ static UW6: [[f32; 2]; 16] = [
     [0.203125, 0.796875],
     [0.140625, 0.859375],
     [0.0625, 0.9375],
-    [0.0, 1.0]
+    [0.0, 1.0],
 ];
 
 /// `(u*u, u*w, w*w)` per mode-6 index — the three normal-equation terms, which
@@ -1552,7 +1508,7 @@ static AW6: [[f32; 4]; 16] = [
     [0.041259765625, 0.161865234375, 0.635009765625, 0.0],
     [0.019775390625, 0.120849609375, 0.738525390625, 0.0],
     [0.00390625, 0.05859375, 0.87890625, 0.0],
-    [0.0, 0.0, 1.0, 0.0]
+    [0.0, 0.0, 1.0, 0.0],
 ];
 
 /// Mode-6 least-squares accumulation: the three normal-equation terms and both
@@ -1625,7 +1581,6 @@ unsafe fn ls_accum_mode6_impl(
     (a, o0, o1)
 }
 
-
 /// Two mode-6 candidates for ONE channel in a single call, sharing the pixel
 /// and weight loads.
 ///
@@ -1689,22 +1644,24 @@ unsafe fn mode6_chan_sse_pair_avx2_impl(
         _mm256_hadd_epi32(sq(base0, delta0), sq(base1, delta1)),
         _mm256_setzero_si256(),
     );
-    let t = _mm_add_epi32(
-        _mm256_castsi256_si128(h),
-        _mm256_extracti128_si256(h, 1),
-    );
+    let t = _mm_add_epi32(_mm256_castsi256_si128(h), _mm256_extracti128_si256(h, 1));
     (_mm_cvtsi128_si32(t) as i64, _mm_extract_epi32(t, 1) as i64)
 }
-
 
 /// The mode-6 weight table, each entry repeated four times (once per channel),
 /// in groups of four palette entries — the shape [`palette_mode6_avx2`] wants.
 #[cfg(target_arch = "x86_64")]
 static W6M_REP: [[i16; 16]; 4] = [
     [0, 0, 0, 0, 4, 4, 4, 4, 9, 9, 9, 9, 13, 13, 13, 13],
-    [17, 17, 17, 17, 21, 21, 21, 21, 26, 26, 26, 26, 30, 30, 30, 30],
-    [34, 34, 34, 34, 38, 38, 38, 38, 43, 43, 43, 43, 47, 47, 47, 47],
-    [51, 51, 51, 51, 55, 55, 55, 55, 60, 60, 60, 60, 64, 64, 64, 64]
+    [
+        17, 17, 17, 17, 21, 21, 21, 21, 26, 26, 26, 26, 30, 30, 30, 30,
+    ],
+    [
+        34, 34, 34, 34, 38, 38, 38, 38, 43, 43, 43, 43, 47, 47, 47, 47,
+    ],
+    [
+        51, 51, 51, 51, 55, 55, 55, 55, 60, 60, 60, 60, 64, 64, 64, 64,
+    ],
 ];
 
 /// Build a full mode-6 palette: sixteen entries, four channels.
@@ -1771,7 +1728,6 @@ unsafe fn palette_mode6_avx2_impl(base: [i32; 4], c0: [u8; 4], c1: [u8; 4]) -> [
     out
 }
 
-
 /// All four channel errors for one endpoint pair, in a single call.
 ///
 /// Unlike the four-candidate polish fusion — which was refuted because it had to
@@ -1817,15 +1773,11 @@ unsafe fn mode6_chan_errs_avx2_impl(
         _mm256_hadd_epi32(sq(0), sq(1)),
         _mm256_hadd_epi32(sq(2), sq(3)),
     );
-    let t = _mm_add_epi32(
-        _mm256_castsi256_si128(h),
-        _mm256_extracti128_si256(h, 1),
-    );
+    let t = _mm_add_epi32(_mm256_castsi256_si128(h), _mm256_extracti128_si256(h, 1));
     let mut o = [0i32; 4];
     _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, t);
     [o[0] as i64, o[1] as i64, o[2] as i64, o[3] as i64]
 }
-
 
 /// Build a mode-6 palette AND fit the block's indices to it, in one call.
 ///
@@ -1913,22 +1865,22 @@ unsafe fn palette_fit_mode6_avx2_impl(
     let mut kv = _mm256_setzero_si256();
 
     for kk in 0..4usize {
-      for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
-        let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
-        let da = _mm256_sub_epi16(q0, pv);
-        let db = _mm256_sub_epi16(q1, pv);
-        let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
-        let dc = _mm256_sub_epi16(q2, pv);
-        let dd = _mm256_sub_epi16(q3, pv);
-        let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
-        let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
-        let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
-        best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
-        best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
-        idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
-        idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
-        kv = _mm256_add_epi32(kv, one);
-      }
+        for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
+            let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
+            let da = _mm256_sub_epi16(q0, pv);
+            let db = _mm256_sub_epi16(q1, pv);
+            let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
+            let dc = _mm256_sub_epi16(q2, pv);
+            let dd = _mm256_sub_epi16(q3, pv);
+            let cur_hi = _mm256_hadd_epi32(_mm256_madd_epi16(dc, dc), _mm256_madd_epi16(dd, dd));
+            let m_lo = _mm256_cmpgt_epi32(best_lo, cur_lo);
+            let m_hi = _mm256_cmpgt_epi32(best_hi, cur_hi);
+            best_lo = _mm256_blendv_epi8(best_lo, cur_lo, m_lo);
+            best_hi = _mm256_blendv_epi8(best_hi, cur_hi, m_hi);
+            idx_lo = _mm256_blendv_epi8(idx_lo, kv, m_lo);
+            idx_hi = _mm256_blendv_epi8(idx_hi, kv, m_hi);
+            kv = _mm256_add_epi32(kv, one);
+        }
     }
 
     let sum = _mm256_add_epi32(best_lo, best_hi);
@@ -1953,7 +1905,6 @@ unsafe fn palette_fit_mode6_avx2_impl(
     _mm_storeu_si128(best_i.as_mut_ptr() as *mut __m128i, _mm_packs_epi16(i0, i1));
     (best_i, err)
 }
-
 
 /// Accumulate the BC1 normal equations AND solve them, in one call.
 ///
@@ -2017,11 +1968,17 @@ unsafe fn ls_accum_solve_565_impl(
     // --- solve (see `bc1_ls_solve`) ---
     let dv = _mm_set1_ps(det);
     let e0 = _mm_div_ps(
-        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a11), v0), _mm_mul_ps(_mm_set1_ps(a01), v1)),
+        _mm_sub_ps(
+            _mm_mul_ps(_mm_set1_ps(a11), v0),
+            _mm_mul_ps(_mm_set1_ps(a01), v1),
+        ),
         dv,
     );
     let e1 = _mm_div_ps(
-        _mm_sub_ps(_mm_mul_ps(_mm_set1_ps(a00), v1), _mm_mul_ps(_mm_set1_ps(a01), v0)),
+        _mm_sub_ps(
+            _mm_mul_ps(_mm_set1_ps(a00), v1),
+            _mm_mul_ps(_mm_set1_ps(a01), v0),
+        ),
         dv,
     );
 
@@ -2046,7 +2003,6 @@ unsafe fn ls_accum_solve_565_impl(
     };
     (p565(r0), p565(r1))
 }
-
 
 /// As [`extrema_opaque_avx2`], but over `r + g + b + a` and returning whole
 /// RGBA pixels — BC7's form of the same search.
@@ -2087,11 +2043,23 @@ unsafe fn extrema_rgba_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4]) {
     let fold = |v: __m256i, is_min: bool| -> i32 {
         let a = _mm256_castsi256_si128(v);
         let b = _mm256_extracti128_si256(v, 1);
-        let r = if is_min { _mm_min_epi32(a, b) } else { _mm_max_epi32(a, b) };
+        let r = if is_min {
+            _mm_min_epi32(a, b)
+        } else {
+            _mm_max_epi32(a, b)
+        };
         let r2 = _mm_shuffle_epi32(r, 0b01_00_11_10);
-        let r = if is_min { _mm_min_epi32(r, r2) } else { _mm_max_epi32(r, r2) };
+        let r = if is_min {
+            _mm_min_epi32(r, r2)
+        } else {
+            _mm_max_epi32(r, r2)
+        };
         let r3 = _mm_shuffle_epi32(r, 0b10_11_00_01);
-        let r = if is_min { _mm_min_epi32(r, r3) } else { _mm_max_epi32(r, r3) };
+        let r = if is_min {
+            _mm_min_epi32(r, r3)
+        } else {
+            _mm_max_epi32(r, r3)
+        };
         _mm_cvtsi128_si32(r)
     };
     let imin = (fold(kmin, true) & 15) as usize;
@@ -2151,11 +2119,23 @@ unsafe fn extrema_opaque_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3])
     let fold = |v: __m256i, is_min: bool| -> i32 {
         let a = _mm256_castsi256_si128(v);
         let b = _mm256_extracti128_si256(v, 1);
-        let r = if is_min { _mm_min_epi32(a, b) } else { _mm_max_epi32(a, b) };
+        let r = if is_min {
+            _mm_min_epi32(a, b)
+        } else {
+            _mm_max_epi32(a, b)
+        };
         let r2 = _mm_shuffle_epi32(r, 0b01_00_11_10);
-        let r = if is_min { _mm_min_epi32(r, r2) } else { _mm_max_epi32(r, r2) };
+        let r = if is_min {
+            _mm_min_epi32(r, r2)
+        } else {
+            _mm_max_epi32(r, r2)
+        };
         let r3 = _mm_shuffle_epi32(r, 0b10_11_00_01);
-        let r = if is_min { _mm_min_epi32(r, r3) } else { _mm_max_epi32(r, r3) };
+        let r = if is_min {
+            _mm_min_epi32(r, r3)
+        } else {
+            _mm_max_epi32(r, r3)
+        };
         _mm_cvtsi128_si32(r)
     };
     let imin = (fold(kmin, true) & 15) as usize;
@@ -2163,8 +2143,6 @@ unsafe fn extrema_opaque_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3])
     let (mx, mn) = (pixels[imax], pixels[imin]);
     ([mx[0], mx[1], mx[2]], [mn[0], mn[1], mn[2]])
 }
-
-
 
 /// Per-channel `(max, min)` over the block's sixteen pixels.
 ///
@@ -2205,7 +2183,6 @@ unsafe fn channel_minmax_avx2_impl(pixels: &[[u8; 4]; 16]) -> ([u8; 4], [u8; 4])
     )
 }
 
-
 /// Transpose a block's sixteen RGBA pixels into four 16-byte channel planes.
 ///
 /// Scalar this is 64 individual byte moves. As vectors it is the standard 4x16
@@ -2236,13 +2213,24 @@ unsafe fn planar_avx2_impl(pixels: &[[u8; 4]; 16]) -> [[u8; 16]; 4] {
     let hi01 = _mm_unpackhi_epi32(s0, s1);
     let hi23 = _mm_unpackhi_epi32(s2, s3);
     let mut out = [[0u8; 16]; 4];
-    _mm_storeu_si128(out[0].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(lo01, lo23));
-    _mm_storeu_si128(out[1].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(lo01, lo23));
-    _mm_storeu_si128(out[2].as_mut_ptr() as *mut __m128i, _mm_unpacklo_epi64(hi01, hi23));
-    _mm_storeu_si128(out[3].as_mut_ptr() as *mut __m128i, _mm_unpackhi_epi64(hi01, hi23));
+    _mm_storeu_si128(
+        out[0].as_mut_ptr() as *mut __m128i,
+        _mm_unpacklo_epi64(lo01, lo23),
+    );
+    _mm_storeu_si128(
+        out[1].as_mut_ptr() as *mut __m128i,
+        _mm_unpackhi_epi64(lo01, lo23),
+    );
+    _mm_storeu_si128(
+        out[2].as_mut_ptr() as *mut __m128i,
+        _mm_unpacklo_epi64(hi01, hi23),
+    );
+    _mm_storeu_si128(
+        out[3].as_mut_ptr() as *mut __m128i,
+        _mm_unpackhi_epi64(hi01, hi23),
+    );
     out
 }
-
 
 /// Nearest-palette index for sixteen alpha samples against an 8-entry palette,
 /// plus the resulting SSE.
@@ -2296,10 +2284,12 @@ unsafe fn alpha_select_avx2_impl(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 1
     // 128-bit lane interleave.
     let packed = _mm256_permute4x64_epi64(_mm256_packus_epi16(idx16, idx16), 0b00_00_10_00);
     let mut out = [0u8; 16];
-    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, _mm256_castsi256_si128(packed));
+    _mm_storeu_si128(
+        out.as_mut_ptr() as *mut __m128i,
+        _mm256_castsi256_si128(packed),
+    );
     (out, err)
 }
-
 
 /// BC1 least-squares endpoints for a fixed index table — the plain encoder's
 /// equivalent of what `refit_with_ls` does on the RDO path.
@@ -2354,11 +2344,7 @@ unsafe fn bc1_ls_endpoints_avx2_impl(
         // it back is a store-to-load round trip PER PIXEL — the exact
         // store-forwarding shape this codebase has removed six times, and it
         // measured 8-26% SLOWER end to end than the scalar loop it replaced.
-        let wv = _mm256_blend_ps(
-            _mm256_set1_ps(u),
-            _mm256_set1_ps(wgt),
-            0b1111_0000,
-        );
+        let wv = _mm256_blend_ps(_mm256_set1_ps(u), _mm256_set1_ps(wgt), 0b1111_0000);
         let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
             *(src.add(i * 4) as *const i32),
         )));
@@ -2492,7 +2478,11 @@ unsafe fn pca_extremes_avx2_impl(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3], [u8
             }
             let dv = _mm256_loadu_ps(lane.as_ptr());
             let term = _mm256_mul_ps(dv, _mm256_set1_ps(ax));
-            acc = if ch == 0 { term } else { _mm256_add_ps(acc, term) };
+            acc = if ch == 0 {
+                term
+            } else {
+                _mm256_add_ps(acc, term)
+            };
         }
         _mm256_storeu_ps(t.as_mut_ptr().add(h * 8), acc);
     }
@@ -2624,7 +2614,7 @@ mod oracle {
     /// The vector LS accumulation must be **bit-identical** to the scalar loop,
     /// which means the same order and no fused multiply-add.
     #[cfg(target_arch = "x86_64")]
-                #[test]
+    #[test]
     fn alpha_channel_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -3206,7 +3196,7 @@ mod oracle {
                 (r >> 56) as u8,
             ];
             match case % 4 {
-                1 => c1 = c0,                                     // zero delta
+                1 => c1 = c0, // zero delta
                 2 => {
                     c0 = [0, 0, 0, 0];
                     c1 = [255, 255, 255, 255]; // full swing
@@ -3303,7 +3293,10 @@ mod oracle {
         }
         // A random 2-bit table is singular only when all sixteen fields agree,
         // so effectively every case must have been exercised.
-        assert!(tested >= 59_000, "singular-skip rate impossibly high: {tested}");
+        assert!(
+            tested >= 59_000,
+            "singular-skip rate impossibly high: {tested}"
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -3555,7 +3548,9 @@ mod oracle {
                 // Duplicate palette values: the tie-break must keep the lowest index.
                 2 => {
                     pal = [7, 7, 7, 7, 200, 200, 200, 200];
-                    sm = [7, 200, 100, 0, 255, 7, 200, 3, 9, 199, 201, 6, 8, 128, 64, 32];
+                    sm = [
+                        7, 200, 100, 0, 255, 7, 200, 3, 9, 199, 201, 6, 8, 128, 64, 32,
+                    ];
                 }
                 _ => {
                     let a = next().to_le_bytes();

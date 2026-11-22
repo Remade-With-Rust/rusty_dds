@@ -13,10 +13,10 @@ use crate::error::Error;
 // the same `write2`/`write2_split` pair serves all eight BC7 modes). The
 // packing layout both mirrors consume is defined once, in
 // `decode::interp_pack`.
-#[cfg(all(feature = "simd", target_arch = "x86_64"))]
-use crate::decode::simd as interp;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 use crate::decode::neon as interp;
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
+use crate::decode::simd as interp;
 
 /// Parallelize BC7 only when enough work amortizes `thread::scope` spawn cost.
 /// 32×32 (64 blocks) is too small — spawn overhead dominated (~10–20× slower).
@@ -164,12 +164,7 @@ pub fn decode_bc3_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> 
     })
 }
 
-pub fn decode_bc4(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    is_signed: bool,
-) -> Result<Vec<u8>, Error> {
+pub fn decode_bc4(data: &[u8], width: u32, height: u32, is_signed: bool) -> Result<Vec<u8>, Error> {
     alloc_and_decode(data, width, height, 8, |o| {
         decode_bc4_into(data, width, height, is_signed, o)
     })
@@ -197,9 +192,7 @@ pub fn decode_bc4_into(
                 // SAFETY: SSSE3 and fast `pdep` checked above; the helper
                 // bounds `data`/`out` and passes only whole blocks.
                 unsafe {
-                    crate::decode::simd::bc4_blocks_ssse3(
-                        d, grid_x, run_x, run_y, o, ow, is_signed,
-                    )
+                    crate::decode::simd::bc4_blocks_ssse3(d, grid_x, run_x, run_y, o, ow, is_signed)
                 }
             },
             |block, dst, pitch| bc4_block_rgba(block, dst, pitch, is_signed),
@@ -233,12 +226,7 @@ pub fn decode_bc4_into(
     Ok(())
 }
 
-pub fn decode_bc5(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    is_signed: bool,
-) -> Result<Vec<u8>, Error> {
+pub fn decode_bc5(data: &[u8], width: u32, height: u32, is_signed: bool) -> Result<Vec<u8>, Error> {
     alloc_and_decode(data, width, height, 16, |o| {
         decode_bc5_into(data, width, height, is_signed, o)
     })
@@ -266,9 +254,7 @@ pub fn decode_bc5_into(
                 // SAFETY: SSSE3 and fast `pdep` checked above; the helper
                 // bounds `data`/`out` and passes only whole blocks.
                 unsafe {
-                    crate::decode::simd::bc5_blocks_ssse3(
-                        d, grid_x, run_x, run_y, o, ow, is_signed,
-                    )
+                    crate::decode::simd::bc5_blocks_ssse3(d, grid_x, run_x, run_y, o, ow, is_signed)
                 }
             },
             |block, dst, pitch| bc5_block_rgba(block, dst, pitch, is_signed),
@@ -325,8 +311,7 @@ pub fn decode_bc7_into(data: &[u8], width: u32, height: u32, out: &mut [u8]) -> 
     // the parallel gate is about work, not shape. (Same class as the BC1-BC5
     // dispatch gate and the mip filter's even-dimension gate — a gate that
     // states a DIFFERENT requirement than the one the kernel has.)
-    let parallel =
-        blocks_y >= 2 && blocks_x.saturating_mul(blocks_y) >= BC7_PARALLEL_MIN_BLOCKS;
+    let parallel = blocks_y >= 2 && blocks_x.saturating_mul(blocks_y) >= BC7_PARALLEL_MIN_BLOCKS;
 
     if parallel {
         decode_bc7_parallel(data, out, out_w, out_h, blocks_x, blocks_y);
@@ -573,7 +558,9 @@ pub(super) fn bc4_palette_packed(a0: u8, a1: u8, is_signed: bool) -> u64 {
 /// read by computed offset instead, so all sixteen are independent.
 #[inline(always)]
 pub(super) fn bc4_indices(blk: &[u8]) -> u64 {
-    u64::from_le_bytes([blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7]]) >> 16
+    u64::from_le_bytes([
+        blk[0], blk[1], blk[2], blk[3], blk[4], blk[5], blk[6], blk[7],
+    ]) >> 16
 }
 
 /// Decode a BC4 block straight to RGBA8: value in red, zero in green and blue,
@@ -983,8 +970,16 @@ fn decode_surface_peeled(
     check_out_len(out, out_w, out_h)?;
 
     // Whole blocks only: drop the last column / row exactly when it is partial.
-    let run_x = if width % 4 == 0 { blocks_x } else { blocks_x - 1 };
-    let run_y = if height % 4 == 0 { blocks_y } else { blocks_y - 1 };
+    let run_x = if width % 4 == 0 {
+        blocks_x
+    } else {
+        blocks_x - 1
+    };
+    let run_y = if height % 4 == 0 {
+        blocks_y
+    } else {
+        blocks_y - 1
+    };
     if run_x > 0 && run_y > 0 {
         kernel(data, blocks_x, run_x, run_y, out, out_w);
     }
@@ -1051,8 +1046,7 @@ mod npot_peel_tests {
             let px = (w as usize) * (h as usize) * 4;
             let mut out = vec![0u8; px];
             // Shipping path (peeled dispatch).
-            let ship = best(&mut |
-| {
+            let ship = best(&mut || {
                 decode_bc7_into(black_box(&data), w, h, &mut out).unwrap();
                 out[123] as u64 + 1
             });
@@ -1093,16 +1087,8 @@ mod npot_peel_tests {
                 // (unchanged path); the neutrality line above is the real gate.
                 ship
             } else {
-                best(&mut |
-| {
-                    decode_bc7_scratch(
-                        black_box(&data),
-                        &mut out,
-                        w as usize,
-                        h as usize,
-                        bx,
-                        by,
-                    );
+                best(&mut || {
+                    decode_bc7_scratch(black_box(&data), &mut out, w as usize, h as usize, bx, by);
                     out[123] as u64 + 1
                 })
             };
@@ -1140,7 +1126,16 @@ mod npot_peel_tests {
                 dims.push((8 + wm, 8 + hm));
             }
         }
-        dims.extend([(1, 1), (2, 3), (3, 2), (4, 4), (5, 5), (7, 1), (1, 7), (13, 9)]);
+        dims.extend([
+            (1, 1),
+            (2, 3),
+            (3, 2),
+            (4, 4),
+            (5, 5),
+            (7, 1),
+            (1, 7),
+            (13, 9),
+        ]);
 
         // BC7 arm: it does not route through `decode_rgba_blocks_into`, so its
         // reference is `decode_bc7_scratch` — the clamping all-scratch walker,
@@ -1168,7 +1163,13 @@ mod npot_peel_tests {
             let bx = w.div_ceil(4) as usize;
             let by = h.div_ceil(4) as usize;
             let px = (w as usize) * (h as usize) * 4;
-            for (bb, tag) in [(8usize, "bc1"), (16, "bc2"), (16, "bc3"), (8, "bc4"), (16, "bc5")] {
+            for (bb, tag) in [
+                (8usize, "bc1"),
+                (16, "bc2"),
+                (16, "bc3"),
+                (8, "bc4"),
+                (16, "bc5"),
+            ] {
                 let mut data = vec![0u8; bx * by * bb];
                 for c in data.chunks_exact_mut(8) {
                     c.copy_from_slice(&next().to_le_bytes());
@@ -1435,7 +1436,14 @@ fn block_grid(width: u32, height: u32, block_bytes: usize) -> Result<(usize, usi
 }
 
 #[inline]
-fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px0: usize, py0: usize) {
+fn blit_rgba4(
+    scratch: &[u8; 64],
+    out: &mut [u8],
+    out_w: usize,
+    out_h: usize,
+    px0: usize,
+    py0: usize,
+) {
     let copy_w = 4.min(out_w - px0);
     let copy_h = 4.min(out_h - py0);
     for row in 0..copy_h {
@@ -1444,8 +1452,6 @@ fn blit_rgba4(scratch: &[u8; 64], out: &mut [u8], out_w: usize, out_h: usize, px
         out[dst..dst + copy_w * 4].copy_from_slice(&scratch[src..src + copy_w * 4]);
     }
 }
-
-
 
 // --------------------------------------------------------------- BC7 mode 6
 
@@ -1493,23 +1499,20 @@ pub(crate) fn bc7_fast_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
 /// Subset assignment for BC7's 64 two-subset partitions: bit `p` set means
 /// pixel `p` (raster order) belongs to subset 1. Derived from the spec table.
 const BC7_P2_SUBSET: [u16; 64] = [
-    0xcccc, 0x8888, 0xeeee, 0xecc8, 0xc880, 0xfeec, 0xfec8, 0xec80,
-    0xc800, 0xffec, 0xfe80, 0xe800, 0xffe8, 0xff00, 0xfff0, 0xf000,
-    0xf710, 0x008e, 0x7100, 0x08ce, 0x008c, 0x7310, 0x3100, 0x8cce,
-    0x088c, 0x3110, 0x6666, 0x366c, 0x17e8, 0x0ff0, 0x718e, 0x399c,
-    0xaaaa, 0xf0f0, 0x5a5a, 0x33cc, 0x3c3c, 0x55aa, 0x9696, 0xa55a,
-    0x73ce, 0x13c8, 0x324c, 0x3bdc, 0x6996, 0xc33c, 0x9966, 0x0660,
-    0x0272, 0x04e4, 0x4e40, 0x2720, 0xc936, 0x936c, 0x39c6, 0x639c,
-    0x9336, 0x9cc6, 0x817e, 0xe718, 0xccf0, 0x0fcc, 0x7744, 0xee22,
+    0xcccc, 0x8888, 0xeeee, 0xecc8, 0xc880, 0xfeec, 0xfec8, 0xec80, 0xc800, 0xffec, 0xfe80, 0xe800,
+    0xffe8, 0xff00, 0xfff0, 0xf000, 0xf710, 0x008e, 0x7100, 0x08ce, 0x008c, 0x7310, 0x3100, 0x8cce,
+    0x088c, 0x3110, 0x6666, 0x366c, 0x17e8, 0x0ff0, 0x718e, 0x399c, 0xaaaa, 0xf0f0, 0x5a5a, 0x33cc,
+    0x3c3c, 0x55aa, 0x9696, 0xa55a, 0x73ce, 0x13c8, 0x324c, 0x3bdc, 0x6996, 0xc33c, 0x9966, 0x0660,
+    0x0272, 0x04e4, 0x4e40, 0x2720, 0xc936, 0x936c, 0x39c6, 0x639c, 0x9336, 0x9cc6, 0x817e, 0xe718,
+    0xccf0, 0x0fcc, 0x7744, 0xee22,
 ];
 
 /// Pixel index carrying subset 1's fix-up index, per partition. Subset 0's
 /// fix-up is always pixel 0. Both are stored with one bit fewer.
 const BC7_P2_FIXUP: [u8; 64] = [
-    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
-    15,  2,  8,  2,  2,  8,  8, 15,  2,  8,  2,  2,  8,  8,  2,  2,
-    15, 15,  6,  8,  2,  8, 15, 15,  2,  8,  2,  2,  2, 15, 15,  6,
-     6,  2,  6,  8, 15, 15,  2,  2, 15, 15, 15, 15, 15,  2,  2, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 2, 8, 2, 2, 8, 8, 15, 2, 8,
+    2, 2, 8, 8, 2, 2, 15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6, 6, 2, 6, 8, 15, 15, 2,
+    2, 15, 15, 15, 15, 15, 2, 2, 15,
 ];
 
 /// BC7 interpolation weights for 3-bit indices.
@@ -1888,7 +1891,10 @@ mod bc7_mode7_tests {
                 blk[0] = 0x80;
 
                 let mut ours = [0u8; 64];
-                assert!(bc7_mode7_block(&blk, &mut ours, 16), "partition {partition}");
+                assert!(
+                    bc7_mode7_block(&blk, &mut ours, 16),
+                    "partition {partition}"
+                );
                 let mut theirs = [0u8; 64];
                 bcdec_rs::bc7(&blk, &mut theirs, 16);
                 assert_eq!(
@@ -1907,7 +1913,11 @@ mod bc7_mode7_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode7_block(&blk, &mut px, 16), mode == 7, "vs mode {mode}");
+            assert_eq!(
+                bc7_mode7_block(&blk, &mut px, 16),
+                mode == 7,
+                "vs mode {mode}"
+            );
         }
         // The reserved encoding must be declined too.
         let mut px = [0u8; 64];
@@ -2016,10 +2026,7 @@ fn bc7_mode4_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             bo[map[k] & 3] = base[k];
             dobj[map[k] & 3] = delta[k];
         }
-        let (bp, dp) = (
-            interp::pack4(bo),
-            interp::pack4(dobj),
-        );
+        let (bp, dp) = (interp::pack4(bo), interp::pack4(dobj));
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
             let (c1, a1) = weights(p + 1);
@@ -2134,36 +2141,84 @@ mod bc7_mode4_tests {
 /// Subset assignment for BC7s 64 three-subset partitions, two bits per
 /// pixel in raster order. Derived from the spec table.
 const BC7_P3_SUBSET: [u32; 64] = [
-    0xaa685050, 0x6a5a5040, 0x5a5a4200, 0x5450a0a8,
-    0xa5a50000, 0xa0a05050, 0x5555a0a0, 0x5a5a5050,
-    0xaa550000, 0xaa555500, 0xaaaa5500, 0x90909090,
-    0x94949494, 0xa4a4a4a4, 0xa9a59450, 0x2a0a4250,
-    0xa5945040, 0x0a425054, 0xa5a5a500, 0x55a0a0a0,
-    0xa8a85454, 0x6a6a4040, 0xa4a45000, 0x1a1a0500,
-    0x0050a4a4, 0xaaa59090, 0x14696914, 0x69691400,
-    0xa08585a0, 0xaa821414, 0x50a4a450, 0x6a5a0200,
-    0xa9a58000, 0x5090a0a8, 0xa8a09050, 0x24242424,
-    0x00aa5500, 0x24924924, 0x24499224, 0x50a50a50,
-    0x500aa550, 0xaaaa4444, 0x66660000, 0xa5a0a5a0,
-    0x50a050a0, 0x69286928, 0x44aaaa44, 0x66666600,
-    0xaa444444, 0x54a854a8, 0x95809580, 0x96969600,
-    0xa85454a8, 0x80959580, 0xaa141414, 0x96960000,
-    0xaaaa1414, 0xa05050a0, 0xa0a5a5a0, 0x96000000,
-    0x40804080, 0xa9a8a9a8, 0xaaaaaa44, 0x2a4a5254,
+    0xaa685050, 0x6a5a5040, 0x5a5a4200, 0x5450a0a8, 0xa5a50000, 0xa0a05050, 0x5555a0a0, 0x5a5a5050,
+    0xaa550000, 0xaa555500, 0xaaaa5500, 0x90909090, 0x94949494, 0xa4a4a4a4, 0xa9a59450, 0x2a0a4250,
+    0xa5945040, 0x0a425054, 0xa5a5a500, 0x55a0a0a0, 0xa8a85454, 0x6a6a4040, 0xa4a45000, 0x1a1a0500,
+    0x0050a4a4, 0xaaa59090, 0x14696914, 0x69691400, 0xa08585a0, 0xaa821414, 0x50a4a450, 0x6a5a0200,
+    0xa9a58000, 0x5090a0a8, 0xa8a09050, 0x24242424, 0x00aa5500, 0x24924924, 0x24499224, 0x50a50a50,
+    0x500aa550, 0xaaaa4444, 0x66660000, 0xa5a0a5a0, 0x50a050a0, 0x69286928, 0x44aaaa44, 0x66666600,
+    0xaa444444, 0x54a854a8, 0x95809580, 0x96969600, 0xa85454a8, 0x80959580, 0xaa141414, 0x96960000,
+    0xaaaa1414, 0xa05050a0, 0xa0a5a5a0, 0x96000000, 0x40804080, 0xa9a8a9a8, 0xaaaaaa44, 0x2a4a5254,
 ];
 
 /// Pixel indices carrying the fix-up index for subsets 1 and 2, per
 /// partition. Subset 0s fix-up is always pixel 0. All three store one bit
 /// fewer, so all three shorten the index stream.
 const BC7_P3_ANCHOR: [[u8; 2]; 64] = [
-    [ 3,15], [ 3, 8], [15, 8], [15, 3], [ 8,15], [ 3,15], [15, 3], [15, 8],
-    [ 8,15], [ 8,15], [ 6,15], [ 6,15], [ 6,15], [ 5,15], [ 3,15], [ 3, 8],
-    [ 3,15], [ 3, 8], [ 8,15], [15, 3], [ 3,15], [ 3, 8], [ 6,15], [10, 8],
-    [ 5, 3], [ 8,15], [ 8, 6], [ 6,10], [ 8,15], [ 5,15], [15,10], [15, 8],
-    [ 8,15], [15, 3], [ 3,15], [ 5,10], [ 6,10], [10, 8], [ 8, 9], [15,10],
-    [15, 6], [ 3,15], [15, 8], [ 5,15], [15, 3], [15, 6], [15, 6], [15, 8],
-    [ 3,15], [15, 3], [ 5,15], [ 5,15], [ 5,15], [ 8,15], [ 5,15], [10,15],
-    [ 5,15], [10,15], [ 8,15], [13,15], [15, 3], [12,15], [ 3,15], [ 3, 8],
+    [3, 15],
+    [3, 8],
+    [15, 8],
+    [15, 3],
+    [8, 15],
+    [3, 15],
+    [15, 3],
+    [15, 8],
+    [8, 15],
+    [8, 15],
+    [6, 15],
+    [6, 15],
+    [6, 15],
+    [5, 15],
+    [3, 15],
+    [3, 8],
+    [3, 15],
+    [3, 8],
+    [8, 15],
+    [15, 3],
+    [3, 15],
+    [3, 8],
+    [6, 15],
+    [10, 8],
+    [5, 3],
+    [8, 15],
+    [8, 6],
+    [6, 10],
+    [8, 15],
+    [5, 15],
+    [15, 10],
+    [15, 8],
+    [8, 15],
+    [15, 3],
+    [3, 15],
+    [5, 10],
+    [6, 10],
+    [10, 8],
+    [8, 9],
+    [15, 10],
+    [15, 6],
+    [3, 15],
+    [15, 8],
+    [5, 15],
+    [15, 3],
+    [15, 6],
+    [15, 6],
+    [15, 8],
+    [3, 15],
+    [15, 3],
+    [5, 15],
+    [5, 15],
+    [5, 15],
+    [8, 15],
+    [5, 15],
+    [10, 15],
+    [5, 15],
+    [10, 15],
+    [8, 15],
+    [13, 15],
+    [15, 3],
+    [12, 15],
+    [3, 15],
+    [3, 8],
 ];
 
 /// Bit offset and width of pixel `p`s index in a three-subset mode. Fix-ups sit
@@ -2428,8 +2483,16 @@ mod bc7_p3_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode0_block(&blk, &mut px, 16), mode == 0, "m0 vs {mode}");
-            assert_eq!(bc7_mode2_block(&blk, &mut px, 16), mode == 2, "m2 vs {mode}");
+            assert_eq!(
+                bc7_mode0_block(&blk, &mut px, 16),
+                mode == 0,
+                "m0 vs {mode}"
+            );
+            assert_eq!(
+                bc7_mode2_block(&blk, &mut px, 16),
+                mode == 2,
+                "m2 vs {mode}"
+            );
         }
     }
 
@@ -2446,7 +2509,10 @@ mod bc7_p3_tests {
             for p in 0..16 {
                 seen[((m >> (2 * p)) & 0x3) as usize] = true;
             }
-            assert!(seen[0] && seen[1] && seen[2], "partition {i} misses a subset");
+            assert!(
+                seen[0] && seen[1] && seen[2],
+                "partition {i} misses a subset"
+            );
             assert!(!seen[3], "partition {i} uses subset 3");
             // Each anchor must belong to the subset it anchors.
             let [a1, a2] = BC7_P3_ANCHOR[i];
@@ -2542,10 +2608,7 @@ fn bc7_mode5_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             bo[map[k] & 3] = base[k];
             dobj[map[k] & 3] = delta[k];
         }
-        let (bp, dp) = (
-            interp::pack4(bo),
-            interp::pack4(dobj),
-        );
+        let (bp, dp) = (interp::pack4(bo), interp::pack4(dobj));
         for p in (0..16usize).step_by(2) {
             let (c0, a0) = weights(p);
             let (c1, a1) = weights(p + 1);
@@ -2706,8 +2769,16 @@ mod bc7_p2_tests {
             let mut blk = [0u8; 16];
             blk[0] = 1u8 << mode;
             let mut px = [0u8; 64];
-            assert_eq!(bc7_mode1_block(&blk, &mut px, 16), mode == 1, "m1 vs {mode}");
-            assert_eq!(bc7_mode3_block(&blk, &mut px, 16), mode == 3, "m3 vs {mode}");
+            assert_eq!(
+                bc7_mode1_block(&blk, &mut px, 16),
+                mode == 1,
+                "m1 vs {mode}"
+            );
+            assert_eq!(
+                bc7_mode3_block(&blk, &mut px, 16),
+                mode == 3,
+                "m3 vs {mode}"
+            );
         }
     }
 
@@ -2855,15 +2926,7 @@ fn bc7_mode6_block(blk: &[u8], out: &mut [u8], pitch: usize) -> bool {
             let Some(dst) = out.get_mut(o..o + 8) else {
                 return false;
             };
-            interp::write2(
-                bp,
-                dp,
-                bp,
-                dp,
-                weight(i) as i16,
-                weight(i + 1) as i16,
-                dst,
-            );
+            interp::write2(bp, dp, bp, dp, weight(i) as i16, weight(i + 1) as i16, dst);
         }
     }
 
@@ -2913,7 +2976,10 @@ mod bc7_mode6_tests {
             blk[0] = 0x40; // force mode 6
 
             let mut ours = [0u8; 64];
-            assert!(bc7_mode6_block(&blk, &mut ours, 16), "case {case}: not recognised");
+            assert!(
+                bc7_mode6_block(&blk, &mut ours, 16),
+                "case {case}: not recognised"
+            );
 
             let mut theirs = [0u8; 64];
             bcdec_rs::bc7(&blk, &mut theirs, 16);

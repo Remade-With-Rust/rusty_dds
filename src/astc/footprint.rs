@@ -222,7 +222,10 @@ mod tests {
 
     #[test]
     fn payload_arithmetic() {
-        assert_eq!(payload_len(127, 128, 1, AstcFootprint::B6X5), Some(22 * 26 * 16));
+        assert_eq!(
+            payload_len(127, 128, 1, AstcFootprint::B6X5),
+            Some(22 * 26 * 16)
+        );
         assert_eq!(payload_len(1, 1, 1, AstcFootprint::B12X12), Some(16));
         assert_eq!(payload_len(0, 1, 1, AstcFootprint::B4X4), Some(0));
         assert_eq!(block_rows(10, AstcFootprint::B12X10), 1);

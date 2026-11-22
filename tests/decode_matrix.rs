@@ -172,19 +172,15 @@ fn assert_matches_oracle(dds: &Dds, id: SubresourceId) {
     let content = dds.decode_content().expect("content");
     let surf = dds.surface(id).expect("surface");
     let img = dds.decode_rgba8(id).expect("decode");
-    let oracle = reference::reference_rgba8(
-        content,
-        surf.data,
-        surf.width,
-        surf.height,
-        surf.depth,
-    )
-    .expect("oracle");
+    let oracle =
+        reference::reference_rgba8(content, surf.data, surf.width, surf.height, surf.depth)
+            .expect("oracle");
     assert_eq!(img.width, surf.width);
     assert_eq!(img.height, surf.height);
     assert_eq!(img.depth, surf.depth);
     assert_eq!(
-        img.pixels, oracle,
+        img.pixels,
+        oracle,
         "oracle mismatch content={} id={:?}",
         content.name(),
         id
@@ -312,9 +308,7 @@ fn srgb_tag_is_stored_bytes() {
     })
     .unwrap();
     dds.data[..4].copy_from_slice(&[10, 20, 30, 40]);
-    let img = dds
-        .decode_rgba8(SubresourceId::mip_layer(0, 0))
-        .unwrap();
+    let img = dds.decode_rgba8(SubresourceId::mip_layer(0, 0)).unwrap();
     assert_eq!(img.pixel(0, 0), Some([10, 20, 30, 40]));
 }
 

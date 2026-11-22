@@ -25,7 +25,11 @@ pub fn decode_bc6h_into(
     out: &mut [f32],
 ) -> Result<(), Error> {
     let (blocks_x, blocks_y, w, h) = validate(data, width, height)?;
-    if out.len() != w.checked_mul(h).and_then(|n| n.checked_mul(4)).ok_or(Error::OutOfBounds)? {
+    if out.len()
+        != w.checked_mul(h)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::OutOfBounds)?
+    {
         return Err(Error::OutOfBounds);
     }
 
@@ -295,7 +299,10 @@ mod mode11_tests {
                 continue;
             }
             blk[0] = m;
-            assert!(!bc6h_mode11_half(&blk, &mut out, false), "mode field {m:#07b}");
+            assert!(
+                !bc6h_mode11_half(&blk, &mut out, false),
+                "mode field {m:#07b}"
+            );
         }
     }
 }

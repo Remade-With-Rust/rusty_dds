@@ -38,9 +38,7 @@ fn dxt1_mips_first_and_last() {
     let dds = load("dxt1_64x64_mips.dds");
     assert_eq!(dds.get_num_mipmap_levels(), 7);
 
-    let mip0 = dds
-        .surface(SubresourceId::mip_layer(0, 0))
-        .expect("mip0");
+    let mip0 = dds.surface(SubresourceId::mip_layer(0, 0)).expect("mip0");
     assert_eq!((mip0.width, mip0.height), (64, 64));
     assert_eq!(mip0.data.len(), 2048); // BC1 64x64
 

@@ -102,8 +102,17 @@ impl Ctx {
         else {
             return;
         };
-        let keep: Vec<u16> = list.iter().take_while(|e| e.1 < coverage).map(|e| e.0).collect();
-        let kept: Vec<Mode> = self.modes.iter().copied().filter(|m| keep.contains(&m.mode)).collect();
+        let keep: Vec<u16> = list
+            .iter()
+            .take_while(|e| e.1 < coverage)
+            .map(|e| e.0)
+            .collect();
+        let kept: Vec<Mode> = self
+            .modes
+            .iter()
+            .copied()
+            .filter(|m| keep.contains(&m.mode))
+            .collect();
         // Never leave the search empty.
         if !kept.is_empty() {
             self.modes = kept;
@@ -119,7 +128,10 @@ impl Ctx {
                 ModeClass::Grid(g) if block_mode::check(&g, fp).is_ok() => g,
                 _ => continue,
             };
-            let gi = match grids.iter().position(|x| x.w == g.w && x.h == g.h && x.d == g.d) {
+            let gi = match grids
+                .iter()
+                .position(|x| x.w == g.w && x.h == g.h && x.d == g.d)
+            {
                 Some(i) => i,
                 None => {
                     grids.push(build_grid(fp, g.w as u32, g.h as u32, g.d as u32));
@@ -127,10 +139,9 @@ impl Ctx {
                 }
             };
             // One mode per (grid, range, dual): the lowest index.
-            if modes
-                .iter()
-                .any(|x: &Mode| x.grid as usize == gi && x.range == g.range && x.dual == g.dual_plane)
-            {
+            if modes.iter().any(|x: &Mode| {
+                x.grid as usize == gi && x.range == g.range && x.dual == g.dual_plane
+            }) {
                 continue;
             }
             let mut crange = [[0xFFu8; 4]; 4];
@@ -171,9 +182,9 @@ impl Ctx {
                 continue;
             }
             // Deduplicate, including the complement (same split, swapped labels).
-            let dup = part2.iter().any(|p| {
-                p.labels == labels || p.labels.iter().zip(&labels).all(|(a, b)| *a != *b)
-            });
+            let dup = part2
+                .iter()
+                .any(|p| p.labels == labels || p.labels.iter().zip(&labels).all(|(a, b)| *a != *b));
             if !dup {
                 let mut bits = [0u64; 4];
                 for (i, &l) in labels.iter().enumerate() {
@@ -188,8 +199,16 @@ impl Ctx {
                 });
             }
         }
-        let part3 = if max_partitions >= 3 { build_parts(fp, 3) } else { Vec::new() };
-        let part4 = if max_partitions >= 4 { build_parts(fp, 4) } else { Vec::new() };
+        let part3 = if max_partitions >= 3 {
+            build_parts(fp, 3)
+        } else {
+            Vec::new()
+        };
+        let part4 = if max_partitions >= 4 {
+            build_parts(fp, 4)
+        } else {
+            Vec::new()
+        };
         let ng = grids.len();
         Ctx {
             texels,
@@ -232,8 +251,18 @@ mod tests {
                     let mut want = [0u8; 216];
                     infill(fp, g.w as u32, g.h as u32, g.d as u32, &grid, &mut want);
                     for (t, &(n, tp)) in g.taps.iter().enumerate() {
-                        let s: u32 = tp[..n as usize].iter().map(|&(i, c)| grid[i as usize] as u32 * c as u32).sum();
-                        assert_eq!(((s + 8) >> 4) as u8, want[t], "{fp} grid {}x{}x{} texel {t}", g.w, g.h, g.d);
+                        let s: u32 = tp[..n as usize]
+                            .iter()
+                            .map(|&(i, c)| grid[i as usize] as u32 * c as u32)
+                            .sum();
+                        assert_eq!(
+                            ((s + 8) >> 4) as u8,
+                            want[t],
+                            "{fp} grid {}x{}x{} texel {t}",
+                            g.w,
+                            g.h,
+                            g.d
+                        );
                     }
                 }
             }

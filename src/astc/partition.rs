@@ -50,9 +50,15 @@ pub const fn select_partition(
     let s12 = s12v * s12v;
 
     let (sh1, sh2) = if seed & 1 != 0 {
-        (if seed & 2 != 0 { 4 } else { 5 }, if count == 3 { 6 } else { 5 })
+        (
+            if seed & 2 != 0 { 4 } else { 5 },
+            if count == 3 { 6 } else { 5 },
+        )
     } else {
-        (if count == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 })
+        (
+            if count == 3 { 6 } else { 5 },
+            if seed & 2 != 0 { 4 } else { 5 },
+        )
     };
     let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
 

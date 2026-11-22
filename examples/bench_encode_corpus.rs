@@ -170,14 +170,12 @@ fn main() {
                     let img = dds
                         .decode_rgba8(SubresourceId::mip_layer(0, 0))
                         .expect("decode");
-                    let recon = if matches!(
-                        content,
-                        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm
-                    ) {
-                        snorm_bits_rgba_to_unorm(&img.pixels)
-                    } else {
-                        img.pixels.clone()
-                    };
+                    let recon =
+                        if matches!(content, DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm) {
+                            snorm_bits_rgba_to_unorm(&img.pixels)
+                        } else {
+                            img.pixels.clone()
+                        };
                     (
                         psnr_channels(&recon, &item.rgba, channels_for(content)),
                         dds.data.len(),
@@ -292,10 +290,9 @@ fn load_tiff_rgba(path: &Path) -> Result<(u32, u32, Vec<u8>, bool), String> {
                 .collect(),
             false,
         ),
-        (ColorType::Gray(8), DecodingResult::U8(v)) => (
-            v.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-            true,
-        ),
+        (ColorType::Gray(8), DecodingResult::U8(v)) => {
+            (v.iter().flat_map(|&g| [g, g, g, 255]).collect(), true)
+        }
         (ColorType::Gray(16), DecodingResult::U16(v)) => (
             v.iter()
                 .flat_map(|&g| {

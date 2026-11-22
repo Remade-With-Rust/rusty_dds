@@ -73,7 +73,8 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<u8>,
     ) -> Result<(u32, u32, u32), Error> {
         let s = self.astc_surface(id)?;
-        let need = astc::payload_len(s.width, s.height, s.depth, s.footprint).ok_or(Error::OutOfBounds)?;
+        let need =
+            astc::payload_len(s.width, s.height, s.depth, s.footprint).ok_or(Error::OutOfBounds)?;
         if s.data.len() < need {
             return Err(Error::TruncatedData);
         }
@@ -109,7 +110,8 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<f32>,
     ) -> Result<(u32, u32, u32), Error> {
         let s = self.astc_surface(id)?;
-        let need = astc::payload_len(s.width, s.height, s.depth, s.footprint).ok_or(Error::OutOfBounds)?;
+        let need =
+            astc::payload_len(s.width, s.height, s.depth, s.footprint).ok_or(Error::OutOfBounds)?;
         if s.data.len() < need {
             return Err(Error::TruncatedData);
         }
@@ -125,12 +127,28 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         let profile = Self::astc_profile_f32(c, opts);
         if profile == AstcProfile::LdrSrgb {
             let mut tmp = vec![0u8; n];
-            astc::decode_rgba8_into(s.data, s.width, s.height, s.depth, s.footprint, profile, &mut tmp)?;
+            astc::decode_rgba8_into(
+                s.data,
+                s.width,
+                s.height,
+                s.depth,
+                s.footprint,
+                profile,
+                &mut tmp,
+            )?;
             for (d, &v) in dst.iter_mut().zip(&tmp) {
                 *d = v as f32 / 255.0;
             }
         } else {
-            astc::decode_rgba_f32_into(s.data, s.width, s.height, s.depth, s.footprint, profile, dst)?;
+            astc::decode_rgba_f32_into(
+                s.data,
+                s.width,
+                s.height,
+                s.depth,
+                s.footprint,
+                profile,
+                dst,
+            )?;
         }
         Ok((s.width, s.height, s.depth))
     }
@@ -177,12 +195,28 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         let profile = Self::astc_profile_f32(c, DecodeOptions::new());
         if profile == AstcProfile::LdrSrgb {
             let mut tmp = vec![0u8; dst.len()];
-            astc::decode_block_rows_into(s.data, s.width, s.height, s.footprint, profile, rows, &mut tmp)?;
+            astc::decode_block_rows_into(
+                s.data,
+                s.width,
+                s.height,
+                s.footprint,
+                profile,
+                rows,
+                &mut tmp,
+            )?;
             for (d, &v) in dst.iter_mut().zip(&tmp) {
                 *d = v as f32 / 255.0;
             }
         } else {
-            astc::decode_block_rows_f32_into(s.data, s.width, s.height, s.footprint, profile, rows, dst)?;
+            astc::decode_block_rows_f32_into(
+                s.data,
+                s.width,
+                s.height,
+                s.footprint,
+                profile,
+                rows,
+                dst,
+            )?;
         }
         Ok(())
     }
@@ -212,7 +246,8 @@ impl crate::Dds {
     ) -> Result<crate::Dds, Error> {
         let fp = opts.footprint;
         let srgb = opts.profile == AstcProfile::LdrSrgb;
-        let format = crate::DxgiFormat::from_astc(fp.width(), fp.height(), srgb).ok_or(Error::UnsupportedFormat)?;
+        let format = crate::DxgiFormat::from_astc(fp.width(), fp.height(), srgb)
+            .ok_or(Error::UnsupportedFormat)?;
         let mut dds = crate::Dds::new_dxgi(crate::NewDxgiParams {
             height,
             width,

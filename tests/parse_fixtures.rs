@@ -47,6 +47,9 @@ fn all_fixtures_parse_with_rusty_dds_and_ddsfile() {
             "{name}: data length mismatch"
         );
         assert_eq!(local.header.width, upstream.header.width, "{name}: width");
-        assert_eq!(local.header.height, upstream.header.height, "{name}: height");
+        assert_eq!(
+            local.header.height, upstream.header.height,
+            "{name}: height"
+        );
     }
 }

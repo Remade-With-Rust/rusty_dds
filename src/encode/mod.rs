@@ -282,10 +282,7 @@ impl Dds {
             // contending for bandwidth; same law as banding the downsample
             // itself. The serial fence stays.
             for mip in 0..layout.mipmap_levels {
-                let range = ranges
-                    .get(mip as usize)
-                    .ok_or(Error::OutOfBounds)?
-                    .clone();
+                let range = ranges.get(mip as usize).ok_or(Error::OutOfBounds)?.clone();
                 let cur: &[u8] = if mip == 0 { src0 } else { &cur_buf };
                 encode_surface(
                     layout.content,

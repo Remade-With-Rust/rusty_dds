@@ -29,7 +29,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (name, content) in [("bc1", DecodeContent::Bc1), ("bc7", DecodeContent::Bc7)] {
         for lam in [0.0f32, 4.0, 25.0, 100.0] {
-            let rdo = if lam == 0.0 { Rdo::Off } else { Rdo::lambda(lam) };
+            let rdo = if lam == 0.0 {
+                Rdo::Off
+            } else {
+                Rdo::lambda(lam)
+            };
             let layout = EncodeLayout::flat_2d(content, side, side)
                 .with_mips(4)
                 .with_rdo(rdo);

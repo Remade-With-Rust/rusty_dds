@@ -262,7 +262,13 @@ mod tests {
     fn levels_match_form() {
         for r in 0..RANGE_COUNT {
             let (b, t, q) = FORM[r];
-            let mul = if t != 0 { 3 } else if q != 0 { 5 } else { 1 };
+            let mul = if t != 0 {
+                3
+            } else if q != 0 {
+                5
+            } else {
+                1
+            };
             assert_eq!(LEVELS[r] as u32, mul << b);
         }
     }
@@ -288,7 +294,11 @@ const fn build_trit_inverse() -> [u8; 243] {
     let mut t = 0;
     while t < 256 {
         let d = unpack_trits(t as u32);
-        let k = d[0] as usize + 3 * d[1] as usize + 9 * d[2] as usize + 27 * d[3] as usize + 81 * d[4] as usize;
+        let k = d[0] as usize
+            + 3 * d[1] as usize
+            + 9 * d[2] as usize
+            + 27 * d[3] as usize
+            + 81 * d[4] as usize;
         if !seen[k] {
             seen[k] = true;
             inv[k] = t as u8;
@@ -387,12 +397,18 @@ mod encode_tests {
         // for a tuple whose missing digits are zero must fit in those bits.
         for (k, covered) in [(1usize, 2u32), (2, 4), (3, 5), (4, 7)] {
             for code in 0..3usize.pow(k as u32) {
-                assert!((TRIT_INV[code] as u32) < (1 << covered), "trits k={k} code={code}");
+                assert!(
+                    (TRIT_INV[code] as u32) < (1 << covered),
+                    "trits k={k} code={code}"
+                );
             }
         }
         for (k, covered) in [(1usize, 3u32), (2, 5)] {
             for code in 0..5usize.pow(k as u32) {
-                assert!((QUINT_INV[code] as u32) < (1 << covered), "quints k={k} code={code}");
+                assert!(
+                    (QUINT_INV[code] as u32) < (1 << covered),
+                    "quints k={k} code={code}"
+                );
             }
         }
     }

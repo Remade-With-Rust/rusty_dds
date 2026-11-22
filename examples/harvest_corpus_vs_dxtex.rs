@@ -27,7 +27,10 @@ fn main() {
     fs::create_dir_all(&work).unwrap();
 
     if !manifest_path.exists() {
-        eprintln!("ERROR: missing {}. Run: python corpus/fetch_ambientcg.py", manifest_path.display());
+        eprintln!(
+            "ERROR: missing {}. Run: python corpus/fetch_ambientcg.py",
+            manifest_path.display()
+        );
         std::process::exit(1);
     }
     let man: serde_json::Value =
@@ -150,12 +153,20 @@ fn main() {
             println!(
                 "{:<36} {:>8}µs / {:>8}µs  ratio={:<7}  PSNR {:>7} vs {:>7}  Δ={:>7}  {} | {}",
                 case_id,
-                rusty_ns.map(|n| format!("{:.0}", n / 1000.0)).unwrap_or_else(|| "fail".into()),
-                dx_ns.map(|n| format!("{:.0}", n / 1000.0)).unwrap_or_else(|| "fail".into()),
-                ratio.map(|r| format!("{r:.3}")).unwrap_or_else(|| "—".into()),
+                rusty_ns
+                    .map(|n| format!("{:.0}", n / 1000.0))
+                    .unwrap_or_else(|| "fail".into()),
+                dx_ns
+                    .map(|n| format!("{:.0}", n / 1000.0))
+                    .unwrap_or_else(|| "fail".into()),
+                ratio
+                    .map(|r| format!("{r:.3}"))
+                    .unwrap_or_else(|| "—".into()),
                 fmt_psnr(rusty_psnr),
                 fmt_psnr(dx_psnr),
-                delta.map(|d| format!("{d:+.2}")).unwrap_or_else(|| "—".into()),
+                delta
+                    .map(|d| format!("{d:+.2}"))
+                    .unwrap_or_else(|| "—".into()),
                 speed_verdict,
                 q_verdict,
             );
@@ -218,7 +229,10 @@ fn main() {
     let json_path = artifacts.join("corpus-vs-directxtex.json");
     fs::write(&json_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
     write_md(&artifacts, &report);
-    println!("\n{}", serde_json::to_string_pretty(&report["summary"]).unwrap());
+    println!(
+        "\n{}",
+        serde_json::to_string_pretty(&report["summary"]).unwrap()
+    );
     println!("Wrote {}", json_path.display());
 }
 
@@ -265,9 +279,7 @@ fn rusty_roundtrip(
     // bcdec SNORM writes i8 bit patterns as u8; DirectXTex roundtrip returns UNORM.
     // Map SNORM bits → UNORM so PSNR matches the DX peer domain.
     let decoded = match content {
-        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm => {
-            snorm_bits_rgba_to_unorm(&img.pixels)
-        }
+        DecodeContent::Bc4SNorm | DecodeContent::Bc5SNorm => snorm_bits_rgba_to_unorm(&img.pixels),
         _ => img.pixels.clone(),
     };
     let psnr = psnr_channels(&decoded, pixels, channels);
@@ -366,7 +378,12 @@ fn load_png_as_rgba(path: &Path, role: &str) -> Result<(u32, u32, Vec<u8>), Stri
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let w = info.width;
     let h = info.height;
-    let rgba = expand_to_rgba(&buf[..info.buffer_size()], info.color_type, info.bit_depth, role)?;
+    let rgba = expand_to_rgba(
+        &buf[..info.buffer_size()],
+        info.color_type,
+        info.bit_depth,
+        role,
+    )?;
     if rgba.len() != (w as usize) * (h as usize) * 4 {
         return Err(format!(
             "rgba len {} want {}",
@@ -428,12 +445,7 @@ fn expand_to_rgba(
                 out.extend_from_slice(&[c[0], 0, 0, 255]);
             }
         }
-        _ => {
-            return Err(format!(
-                "unsupported color {:?} for role {role}",
-                color
-            ))
-        }
+        _ => return Err(format!("unsupported color {:?} for role {role}", color)),
     }
     Ok(out)
 }

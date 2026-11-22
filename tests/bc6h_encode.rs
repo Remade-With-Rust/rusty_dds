@@ -117,8 +117,14 @@ fn flat_block_reconstructs_near_exact() {
 #[test]
 fn uf16_clamps_negative_nan_and_huge() {
     let px: Vec<f32> = vec![
-        -5.0, f32::NAN, 1e30, 0.25, // pixel 0: neg, NaN, huge, -
-        0.0, 0.0, 0.0, 1.0,
+        -5.0,
+        f32::NAN,
+        1e30,
+        0.25, // pixel 0: neg, NaN, huge, -
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     ]
     .into_iter()
     .chain(std::iter::repeat(0.0).take(14 * 4))
@@ -136,7 +142,9 @@ fn uf16_clamps_negative_nan_and_huge() {
 #[test]
 fn npot_and_truncation_fail_closed() {
     // NPOT encodes fine (edge clamp) …
-    let px: Vec<f32> = (0..10 * 6).flat_map(|i| [i as f32, 1.0, 2.0, 1.0]).collect();
+    let px: Vec<f32> = (0..10 * 6)
+        .flat_map(|i| [i as f32, 1.0, 2.0, 1.0])
+        .collect();
     let out = roundtrip(&px, 10, 6);
     assert_eq!(out.len(), 10 * 6 * 4);
     // … while short buffers are refused.
@@ -158,7 +166,9 @@ fn read_radiance_hdr(path: &std::path::Path) -> Option<(usize, usize, Vec<f32>)>
         while pos < data.len() && data[pos] != b'\n' {
             pos += 1;
         }
-        let s = std::str::from_utf8(&data[start..pos]).ok().map(|s| s.to_string());
+        let s = std::str::from_utf8(&data[start..pos])
+            .ok()
+            .map(|s| s.to_string());
         pos += 1;
         s
     };
@@ -294,7 +304,10 @@ fn bc6h_encode_speed_probe() {
         eprintln!(
             "{}: {}x{} encode best {} ms  ({:.1} Mpx/s)",
             path.file_name().unwrap().to_string_lossy(),
-            w, h, best / 1_000_000, mpxs
+            w,
+            h,
+            best / 1_000_000,
+            mpxs
         );
     }
 }

@@ -6,12 +6,7 @@ use crate::error::Error;
 /// buffers through [`downsample_rgba8_into`] and no production path allocates
 /// per level any more.
 #[cfg(test)]
-pub fn downsample_rgba8(
-    src: &[u8],
-    width: u32,
-    height: u32,
-    depth: u32,
-) -> Result<Vec<u8>, Error> {
+pub fn downsample_rgba8(src: &[u8], width: u32, height: u32, depth: u32) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     downsample_rgba8_into(src, width, height, depth, &mut out)?;
     Ok(out)
@@ -61,12 +56,7 @@ pub fn downsample_rgba8_into(
     // arithmetic reason. Volumes, 1-wide/1-tall levels and non-SSSE3 CPUs take
     // the scalar loops below, which stay as the kernel's oracle.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if sd == 1
-        && sw >= 2
-        && sh >= 2
-        && src.len() >= sw * sh * 4
-        && crate::swizzle::has_ssse3()
-    {
+    if sd == 1 && sw >= 2 && sh >= 2 && src.len() >= sw * sh * 4 && crate::swizzle::has_ssse3() {
         let dh_us = sh / 2;
         // REFUTED (2026-08-26): splitting this kernel's output rows across a
         // thread scope for large levels measured 0.38x — 2.6x SLOWER (2048²:
@@ -148,11 +138,7 @@ pub fn downsample_rgba8_into(
     // three axes (depth >= 2 means every output slice has both z taps), so
     // every output pixel is a full 2x2x2 — exactly `(sum8 + 4) >> 3`.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    if sd >= 2
-        && sw >= 2
-        && sh >= 2
-        && src.len() >= sw * sh * sd * 4
-        && crate::swizzle::has_ssse3()
+    if sd >= 2 && sw >= 2 && sh >= 2 && src.len() >= sw * sh * sd * 4 && crate::swizzle::has_ssse3()
     {
         // SAFETY: SSSE3 confirmed; `src` covers the whole volume (checked
         // above) and `out` covers `dw * dh * dd * 4` bytes by construction.
@@ -365,10 +351,7 @@ unsafe fn downsample_3d_ssse3(src: &[u8], sw: usize, sh: usize, sd: usize, out: 
             for p in 0..pairs {
                 let m = |r: *const u8| {
                     _mm_maddubs_epi16(
-                        _mm_shuffle_epi8(
-                            _mm_loadu_si128(r.add(p * 16) as *const __m128i),
-                            sel,
-                        ),
+                        _mm_shuffle_epi8(_mm_loadu_si128(r.add(p * 16) as *const __m128i), sel),
                         ones,
                     )
                 };
@@ -580,9 +563,7 @@ mod tests {
             }
             best
         };
-        let ref_ns = best(&mut || {
-            downsample_reference(black_box(&src), W, H, 1)[123] as u64 + 1
-        });
+        let ref_ns = best(&mut || downsample_reference(black_box(&src), W, H, 1)[123] as u64 + 1);
         let mut buf = Vec::new();
         let ship_ns = best(&mut || {
             super::downsample_rgba8_into(black_box(&src), W, H, 1, &mut buf).unwrap();
@@ -772,9 +753,7 @@ mod tests {
             }
             best
         };
-        let ref_ns = best(&mut || {
-            downsample_reference(black_box(&src), L, 1, 1)[3] as u64 + 1
-        });
+        let ref_ns = best(&mut || downsample_reference(black_box(&src), L, 1, 1)[3] as u64 + 1);
         let mut buf = Vec::new();
         let ship_ns = best(&mut || {
             super::downsample_rgba8_into(black_box(&src), L, 1, 1, &mut buf).unwrap();
@@ -818,9 +797,7 @@ mod tests {
             }
             best
         };
-        let ref_ns = best(&mut || {
-            downsample_reference(black_box(&src), W, H, D)[123] as u64 + 1
-        });
+        let ref_ns = best(&mut || downsample_reference(black_box(&src), W, H, D)[123] as u64 + 1);
         let mut buf = Vec::new();
         let ship_ns = best(&mut || {
             super::downsample_rgba8_into(black_box(&src), W, H, D, &mut buf).unwrap();
@@ -1020,7 +997,11 @@ mod tests {
             let mut next_buf: Vec<u8> = Vec::new();
             let (mut w, mut h) = (W, H);
             for level in 0..levels {
-                let cur: &[u8] = if level == 0 { black_box(&src[..]) } else { &cur_buf };
+                let cur: &[u8] = if level == 0 {
+                    black_box(&src[..])
+                } else {
+                    &cur_buf
+                };
                 sink = sink.wrapping_add(cur[0] as u64);
                 if level + 1 < levels {
                     super::downsample_rgba8_into(cur, w, h, 1, &mut next_buf).unwrap();

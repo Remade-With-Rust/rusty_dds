@@ -60,7 +60,11 @@ pub(crate) fn build_taps(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Taps {
     let (bw, bh, bd) = (fp.width(), fp.height(), fp.depth());
     let ds = (1024 + bw / 2) / (bw - 1);
     let dt = (1024 + bh / 2) / (bh - 1);
-    let dr = if bd > 1 { (1024 + bd / 2) / (bd - 1) } else { 0 };
+    let dr = if bd > 1 {
+        (1024 + bd / 2) / (bd - 1)
+    } else {
+        0
+    };
     let count = (gw * gh * gd) as usize;
     let mut taps = Vec::with_capacity(fp.texels() as usize);
     for r in 0..bd {
@@ -193,4 +197,3 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         full,
     }
 }
-

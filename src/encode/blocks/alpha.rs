@@ -139,10 +139,7 @@ pub(super) fn encode_alpha_block_unsigned(samples: [u8; 16]) -> [u8; 8] {
     // Opt in with RUSTY_DDS_BC45U_WINDOW=1. (err>16 tight-gate variant was
     // tried: keeps only 10-45% of the smooth-map gains, which live at err
     // 5..16.)
-    if unsigned_window_enabled()
-        && !quality_is_fast()
-        && (16..=64).contains(&span)
-        && best_err > 4
+    if unsigned_window_enabled() && !quality_is_fast() && (16..=64).contains(&span) && best_err > 4
     {
         unsigned_window_sweep(&samples, &mut best, &mut best_err);
     }
@@ -353,7 +350,13 @@ pub(super) fn refine_alpha_neighborhood_u(
     }
 }
 
-pub(super) fn consider_alpha_u(a0: u8, a1: u8, samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
+pub(super) fn consider_alpha_u(
+    a0: u8,
+    a1: u8,
+    samples: &[u8; 16],
+    best: &mut [u8; 8],
+    best_err: &mut i32,
+) {
     if a0 == a1 {
         return;
     }
@@ -530,7 +533,11 @@ fn pack_alpha_indices_err_scalar(
     let mut indices = [0u8; 16];
     let mut err = 0i32;
     if alpha_sel_enabled() {
-        let order = if a0 > a1 { &ALPHA_ORDER6 } else { &ALPHA_ORDER4 };
+        let order = if a0 > a1 {
+            &ALPHA_ORDER6
+        } else {
+            &ALPHA_ORDER4
+        };
         let sel = AlphaSelect::build(palette, order);
         for (i, &s) in samples.iter().enumerate() {
             let best = sel.select(s);
@@ -572,7 +579,16 @@ pub(super) fn ls_alpha_endpoints_u(samples: &[u8; 16], block: &[u8; 8]) -> Optio
     }
     let bits = alpha_index_bits(block);
     // BC4 6-lerp: idx 0→e0, 1→e1, 2..7 → (6..1)*e0 + (1..6)*e1 over 7.
-    const W: [f32; 8] = [0.0, 1.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0];
+    const W: [f32; 8] = [
+        0.0,
+        1.0,
+        1.0 / 7.0,
+        2.0 / 7.0,
+        3.0 / 7.0,
+        4.0 / 7.0,
+        5.0 / 7.0,
+        6.0 / 7.0,
+    ];
     let mut sw = 0.0f32;
     let mut sw2 = 0.0f32;
     let mut sx = 0.0f32;
@@ -677,7 +693,9 @@ pub(super) fn signed_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best_e
 /// The full signed search pipeline BEFORE the exhaustive sweep.
 /// Returns (block, err, lo, hi, span, n_unique) — split out so the harvest
 /// test can measure the sweep's null arm.
-pub(super) fn encode_alpha_block_signed_presweep(samples: [u8; 16]) -> ([u8; 8], i32, i32, i32, i32, usize) {
+pub(super) fn encode_alpha_block_signed_presweep(
+    samples: [u8; 16],
+) -> ([u8; 8], i32, i32, i32, i32, usize) {
     // Search endpoints in SNORM, but score (and assign indices) by UNORM recon —
     // the bake-off PSNR is UNORM after snorm→unorm, not SNORM-domain SSE.
     let mut vals = [0i32; 16];
@@ -728,7 +746,13 @@ pub(super) fn signed_sweep_gate(span: i32, best_err: i32) -> bool {
 /// Bounded near-exhaustive signed endpoint sweep (both orders => both
 /// palette modes), candidates added under strict `<` (quality-monotone).
 #[cfg(test)]
-pub(super) fn signed_sweep(lo: i32, hi: i32, samples: &[u8; 16], best: &mut [u8; 8], best_err: &mut i32) {
+pub(super) fn signed_sweep(
+    lo: i32,
+    hi: i32,
+    samples: &[u8; 16],
+    best: &mut [u8; 8],
+    best_err: &mut i32,
+) {
     let a_lo = (lo - 8).max(-127);
     let a_hi = (hi + 8).min(127);
     for e0 in a_lo..=a_hi {
@@ -970,7 +994,16 @@ pub(super) fn ls_alpha_endpoints_s(vals: &[i32; 16], block: &[u8; 8]) -> Option<
         return None;
     }
     let bits = alpha_index_bits(block);
-    const W: [f32; 8] = [0.0, 1.0, 1.0 / 7.0, 2.0 / 7.0, 3.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 6.0 / 7.0];
+    const W: [f32; 8] = [
+        0.0,
+        1.0,
+        1.0 / 7.0,
+        2.0 / 7.0,
+        3.0 / 7.0,
+        4.0 / 7.0,
+        5.0 / 7.0,
+        6.0 / 7.0,
+    ];
     let mut sw = 0.0f32;
     let mut sw2 = 0.0f32;
     let mut sx = 0.0f32;
@@ -1010,7 +1043,6 @@ pub(super) fn alpha_sse_u(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
     }
     alpha_fixed_sse_scalar(samples, &palette, bits)
 }
-
 
 /// Kept OUT of line: the fallback arm of an AVX2 dispatch.
 #[cold]
@@ -1103,7 +1135,12 @@ pub(super) fn alpha_select_scalar(pal_u: &[u8; 8], samples: &[u8; 16]) -> ([u8; 
     (indices, err)
 }
 
-pub(super) fn pack_alpha_indices_s(a0: i32, a1: i32, palette: &[i32; 8], samples: &[u8; 16]) -> [u8; 8] {
+pub(super) fn pack_alpha_indices_s(
+    a0: i32,
+    a1: i32,
+    palette: &[i32; 8],
+    samples: &[u8; 16],
+) -> [u8; 8] {
     let mut pal_u = [0u8; 8];
     for (i, &p) in palette.iter().enumerate() {
         pal_u[i] = snorm_i32_to_unorm_u8(p);

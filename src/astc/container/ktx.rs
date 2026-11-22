@@ -13,8 +13,12 @@ use super::{slice, surface_len, AstcSurface};
 use crate::astc::AstcFootprint;
 use crate::Error;
 
-const KTX1_ID: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
-const KTX2_ID: [u8; 12] = [0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A];
+const KTX1_ID: [u8; 12] = [
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+];
+const KTX2_ID: [u8; 12] = [
+    0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A,
+];
 
 const GL_RGBA: u32 = 0x1908;
 const GL_ASTC_2D: u32 = 0x93B0;
@@ -26,18 +30,32 @@ const GL_SRGB_ASTC_3D: u32 = 0x93E0;
 /// or `GL_COMPRESSED_SRGB8_ALPHA8_ASTC_*`).
 pub fn gl_internal_format(fp: AstcFootprint, srgb: bool) -> u32 {
     if fp.is_3d() {
-        let i = AstcFootprint::ALL_3D.iter().position(|&f| f == fp).unwrap_or(0) as u32;
+        let i = AstcFootprint::ALL_3D
+            .iter()
+            .position(|&f| f == fp)
+            .unwrap_or(0) as u32;
         i + if srgb { GL_SRGB_ASTC_3D } else { GL_ASTC_3D }
     } else {
-        let i = AstcFootprint::ALL_2D.iter().position(|&f| f == fp).unwrap_or(0) as u32;
+        let i = AstcFootprint::ALL_2D
+            .iter()
+            .position(|&f| f == fp)
+            .unwrap_or(0) as u32;
         i + if srgb { GL_SRGB_ASTC_2D } else { GL_ASTC_2D }
     }
 }
 
 /// Footprint and sRGB flag of a GL internal format, if it is ASTC.
 pub fn from_gl_internal_format(f: u32) -> Option<(AstcFootprint, bool)> {
-    let pick2 = |base: u32| AstcFootprint::ALL_2D.get(f.wrapping_sub(base) as usize).copied();
-    let pick3 = |base: u32| AstcFootprint::ALL_3D.get(f.wrapping_sub(base) as usize).copied();
+    let pick2 = |base: u32| {
+        AstcFootprint::ALL_2D
+            .get(f.wrapping_sub(base) as usize)
+            .copied()
+    };
+    let pick3 = |base: u32| {
+        AstcFootprint::ALL_3D
+            .get(f.wrapping_sub(base) as usize)
+            .copied()
+    };
     match f {
         0x93B0..=0x93BD => pick2(GL_ASTC_2D).map(|p| (p, false)),
         0x93D0..=0x93DD => pick2(GL_SRGB_ASTC_2D).map(|p| (p, true)),
@@ -58,10 +76,16 @@ pub enum VkAstcKind {
 /// The `VkFormat` of an ASTC footprint and encoding.
 pub fn vk_format(fp: AstcFootprint, kind: VkAstcKind) -> u32 {
     if fp.is_3d() {
-        let i = AstcFootprint::ALL_3D.iter().position(|&f| f == fp).unwrap_or(0) as u32;
+        let i = AstcFootprint::ALL_3D
+            .iter()
+            .position(|&f| f == fp)
+            .unwrap_or(0) as u32;
         1_000_288_000 + 3 * i + kind as u32
     } else {
-        let i = AstcFootprint::ALL_2D.iter().position(|&f| f == fp).unwrap_or(0) as u32;
+        let i = AstcFootprint::ALL_2D
+            .iter()
+            .position(|&f| f == fp)
+            .unwrap_or(0) as u32;
         match kind {
             VkAstcKind::Unorm => 157 + 2 * i,
             VkAstcKind::Srgb => 158 + 2 * i,
@@ -75,12 +99,16 @@ pub fn from_vk_format(f: u32) -> Option<(AstcFootprint, VkAstcKind)> {
     match f {
         157..=184 => {
             let i = (f - 157) as usize;
-            let kind = if i % 2 == 0 { VkAstcKind::Unorm } else { VkAstcKind::Srgb };
+            let kind = if i % 2 == 0 {
+                VkAstcKind::Unorm
+            } else {
+                VkAstcKind::Srgb
+            };
             AstcFootprint::ALL_2D.get(i / 2).map(|&p| (p, kind))
         }
-        1_000_066_000..=1_000_066_013 => {
-            AstcFootprint::ALL_2D.get((f - 1_000_066_000) as usize).map(|&p| (p, VkAstcKind::Sfloat))
-        }
+        1_000_066_000..=1_000_066_013 => AstcFootprint::ALL_2D
+            .get((f - 1_000_066_000) as usize)
+            .map(|&p| (p, VkAstcKind::Sfloat)),
         1_000_288_000..=1_000_288_029 => {
             let i = (f - 1_000_288_000) as usize;
             let kind = [VkAstcKind::Unorm, VkAstcKind::Srgb, VkAstcKind::Sfloat][i % 3];
@@ -139,7 +167,8 @@ impl<'a> KtxView<'a> {
         if gl_type != 0 {
             return Err(Error::UnsupportedFormat);
         }
-        let (footprint, srgb) = from_gl_internal_format(gl_internal).ok_or(Error::UnsupportedFormat)?;
+        let (footprint, srgb) =
+            from_gl_internal_format(gl_internal).ok_or(Error::UnsupportedFormat)?;
         let width = rd(36);
         let height = rd(40).max(1);
         let depth = rd(44).max(1);
@@ -154,7 +183,9 @@ impl<'a> KtxView<'a> {
             return Err(Error::InvalidField(format!("KTX numberOfFaces {faces}")));
         }
         if levels > 32 {
-            return Err(Error::InvalidField(format!("KTX numberOfMipmapLevels {levels}")));
+            return Err(Error::InvalidField(format!(
+                "KTX numberOfMipmapLevels {levels}"
+            )));
         }
         let non_array_cube = rd(48) == 0 && faces == 6;
         let mut off = 64usize.checked_add(kvd).ok_or(Error::TruncatedData)?;
@@ -200,16 +231,33 @@ impl<'a> KtxView<'a> {
     }
 
     /// One subresource.
-    pub fn astc_surface(&self, level: u32, layer: u32, face: u32) -> Result<AstcSurface<'a>, Error> {
+    pub fn astc_surface(
+        &self,
+        level: u32,
+        layer: u32,
+        face: u32,
+    ) -> Result<AstcSurface<'a>, Error> {
         if level >= self.levels || layer >= self.layers || face >= self.faces {
             return Err(Error::OutOfBounds);
         }
-        let (w, h, d) = (mip(self.width, level), mip(self.height, level), mip(self.depth, level));
+        let (w, h, d) = (
+            mip(self.width, level),
+            mip(self.height, level),
+            mip(self.depth, level),
+        );
         let one = surface_len(self.footprint, w, h, d)?;
         let idx = (layer as usize) * self.faces as usize + face as usize;
         let off = self.level_offsets[level as usize] + idx * one;
         let data = slice(self.data, off, one)?;
-        Ok(AstcSurface::new(self.footprint, w, h, d, Some(self.srgb), None, data))
+        Ok(AstcSurface::new(
+            self.footprint,
+            w,
+            h,
+            d,
+            Some(self.srgb),
+            None,
+            data,
+        ))
     }
 
     /// Write a little-endian KTX 1.0 file with one face and no array layers:
@@ -263,7 +311,11 @@ impl<'a> KtxView<'a> {
 
 fn rd_at(b: &[u8], off: usize, be: bool) -> Result<u32, Error> {
     let s: [u8; 4] = slice(b, off, 4)?.try_into().unwrap();
-    Ok(if be { u32::from_be_bytes(s) } else { u32::from_le_bytes(s) })
+    Ok(if be {
+        u32::from_be_bytes(s)
+    } else {
+        u32::from_le_bytes(s)
+    })
 }
 
 fn le32(b: &[u8], off: usize) -> Result<u32, Error> {
@@ -333,7 +385,9 @@ impl<'a> Ktx2View<'a> {
                 .and_then(|v| v.checked_mul(faces as usize))
                 .ok_or(Error::OutOfBounds)?;
             if len != need {
-                return Err(Error::InvalidField(format!("KTX2 level {l} length {len}, layout needs {need}")));
+                return Err(Error::InvalidField(format!(
+                    "KTX2 level {l} length {len}, layout needs {need}"
+                )));
             }
             slice(bytes, off, len)?;
             level_index.push((off, len));
@@ -369,7 +423,11 @@ impl<'a> Ktx2View<'a> {
             return Err(Error::UnsupportedFormat);
         }
         let w3 = le32(dfd, 4 + 12)?;
-        let (bx, by, bz) = ((w3 & 0xFF) + 1, ((w3 >> 8) & 0xFF) + 1, ((w3 >> 16) & 0xFF) + 1);
+        let (bx, by, bz) = (
+            (w3 & 0xFF) + 1,
+            ((w3 >> 8) & 0xFF) + 1,
+            ((w3 >> 16) & 0xFF) + 1,
+        );
         let fp = AstcFootprint::new_3d(bx, by, bz).ok_or(Error::UnsupportedFormat)?;
         // First sample: qualifier bits in the top byte of its first word; 0x80 = float.
         let s0 = le32(dfd, 4 + 24)?;
@@ -378,16 +436,33 @@ impl<'a> Ktx2View<'a> {
     }
 
     /// One subresource.
-    pub fn astc_surface(&self, level: u32, layer: u32, face: u32) -> Result<AstcSurface<'a>, Error> {
+    pub fn astc_surface(
+        &self,
+        level: u32,
+        layer: u32,
+        face: u32,
+    ) -> Result<AstcSurface<'a>, Error> {
         if level >= self.levels || layer >= self.layers || face >= self.faces {
             return Err(Error::OutOfBounds);
         }
-        let (w, h, d) = (mip(self.width, level), mip(self.height, level), mip(self.depth, level));
+        let (w, h, d) = (
+            mip(self.width, level),
+            mip(self.height, level),
+            mip(self.depth, level),
+        );
         let one = surface_len(self.footprint, w, h, d)?;
         let (off, _) = self.level_index[level as usize];
         let idx = layer as usize * self.faces as usize + face as usize;
         let data = slice(self.data, off + idx * one, one)?;
-        Ok(AstcSurface::new(self.footprint, w, h, d, Some(self.srgb), Some(self.hdr), data))
+        Ok(AstcSurface::new(
+            self.footprint,
+            w,
+            h,
+            d,
+            Some(self.srgb),
+            Some(self.hdr),
+            data,
+        ))
     }
 }
 
@@ -409,7 +484,9 @@ impl Ktx2View<'_> {
         levels: &[&[u8]],
     ) -> Result<(), Error> {
         if levels.is_empty() || levels.len() > 32 || width == 0 || height == 0 || depth == 0 {
-            return Err(Error::InvalidField("KTX2 needs 1..=32 levels and non-zero size".into()));
+            return Err(Error::InvalidField(
+                "KTX2 needs 1..=32 levels and non-zero size".into(),
+            ));
         }
         for (l, p) in levels.iter().enumerate() {
             let l = l as u32;
@@ -423,12 +500,24 @@ impl Ktx2View<'_> {
         dfd.push(44); // dfdTotalSize
         dfd.push(0); // vendorId KHRONOS (0), descriptorType BASICFORMAT (0)
         dfd.push(2 | (40 << 16)); // versionNumber 2, descriptorBlockSize 40
-        let transfer = if kind == VkAstcKind::Srgb { KHR_DF_TRANSFER_SRGB } else { 1 };
+        let transfer = if kind == VkAstcKind::Srgb {
+            KHR_DF_TRANSFER_SRGB
+        } else {
+            1
+        };
         dfd.push(KHR_DF_MODEL_ASTC | (1 << 8) | (transfer << 16)); // model, BT709, transfer, flags 0
-        dfd.push((footprint.width() - 1) | ((footprint.height() - 1) << 8) | ((footprint.depth() - 1) << 16));
+        dfd.push(
+            (footprint.width() - 1)
+                | ((footprint.height() - 1) << 8)
+                | ((footprint.depth() - 1) << 16),
+        );
         dfd.push(16); // bytesPlane0
         dfd.push(0); // bytesPlane4..7
-        let qualifiers = if kind == VkAstcKind::Sfloat { 0xC0u32 } else { 0 };
+        let qualifiers = if kind == VkAstcKind::Sfloat {
+            0xC0u32
+        } else {
+            0
+        };
         dfd.push((127 << 16) | (qualifiers << 24)); // bitOffset 0, bitLength 127, ASTC_DATA
         dfd.push(0); // sample position
         let (lower, upper) = if kind == VkAstcKind::Sfloat {
@@ -536,7 +625,9 @@ pub fn ktx2_inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     // Keep everything up to the end of the metadata (index, DFD, KVD).
     let mut meta_end = index_end;
     for (o, l) in [(48usize, 52usize), (56, 60)] {
-        let end = (le32(bytes, o)? as usize).checked_add(le32(bytes, l)? as usize).ok_or(Error::OutOfBounds)?;
+        let end = (le32(bytes, o)? as usize)
+            .checked_add(le32(bytes, l)? as usize)
+            .ok_or(Error::OutOfBounds)?;
         meta_end = meta_end.max(end);
     }
     let mut out = slice(bytes, 0, meta_end)?.to_vec();
@@ -564,7 +655,9 @@ pub fn ktx2_inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         let got = rusty_zstd::decompress_into_with_limit(&mut out, src, opts, need)
             .map_err(|e| Error::InvalidField(format!("KTX2 level {l} zstd: {e:?}")))?;
         if got != need {
-            return Err(Error::InvalidField(format!("KTX2 level {l} inflates to {got}, layout needs {need}")));
+            return Err(Error::InvalidField(format!(
+                "KTX2 level {l} inflates to {got}, layout needs {need}"
+            )));
         }
         out[base..base + 8].copy_from_slice(&new_off.to_le_bytes());
         out[base + 8..base + 16].copy_from_slice(&(need as u64).to_le_bytes());
@@ -581,7 +674,10 @@ mod tests {
     fn format_tables_round_trip() {
         for &fp in AstcFootprint::ALL_2D.iter().chain(AstcFootprint::ALL_3D) {
             for srgb in [false, true] {
-                assert_eq!(from_gl_internal_format(gl_internal_format(fp, srgb)), Some((fp, srgb)));
+                assert_eq!(
+                    from_gl_internal_format(gl_internal_format(fp, srgb)),
+                    Some((fp, srgb))
+                );
             }
             for k in [VkAstcKind::Unorm, VkAstcKind::Srgb, VkAstcKind::Sfloat] {
                 assert_eq!(from_vk_format(vk_format(fp, k)), Some((fp, k)));
@@ -610,11 +706,17 @@ mod tests {
             let mut out = Vec::new();
             Ktx2View::write(&mut out, fp, w, h, d, kind, &refs).unwrap();
             let v = Ktx2View::parse(&out).unwrap();
-            assert_eq!((v.footprint, v.width, v.height, v.depth, v.levels), (fp, w, h, d, 3));
+            assert_eq!(
+                (v.footprint, v.width, v.height, v.depth, v.levels),
+                (fp, w, h, d, 3)
+            );
             assert_eq!(v.srgb, kind == VkAstcKind::Srgb);
             assert_eq!(v.hdr, kind == VkAstcKind::Sfloat);
             for l in 0..3 {
-                assert_eq!(v.astc_surface(l, 0, 0).unwrap().data, &levels[l as usize][..]);
+                assert_eq!(
+                    v.astc_surface(l, 0, 0).unwrap().data,
+                    &levels[l as usize][..]
+                );
             }
             // The DFD alone (vkFormat cleared) identifies the same format.
             let mut undef = out.clone();

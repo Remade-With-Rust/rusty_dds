@@ -135,7 +135,10 @@ mod sse2 {
 #[cfg(target_arch = "aarch64")]
 mod neon {
     use super::{wv, Ends};
-    use core::arch::aarch64::{vaddq_u16, vdupq_n_u16, vld1q_u16, vmulq_u16, vshlq_n_u16, vshrq_n_u16, vst1q_u16, vsubq_u16};
+    use core::arch::aarch64::{
+        vaddq_u16, vdupq_n_u16, vld1q_u16, vmulq_u16, vshlq_n_u16, vshrq_n_u16, vst1q_u16,
+        vsubq_u16,
+    };
 
     #[inline(always)]
     fn pair(x: [u16; 4], y: [u16; 4]) -> [u16; 8] {
@@ -157,7 +160,11 @@ mod neon {
         let mut t = 0;
         while t + 2 <= n {
             let (a0, b0) = &ends[if pmap.is_empty() { 0 } else { pmap[t] as usize }];
-            let (a1, b1) = &ends[if pmap.is_empty() { 0 } else { pmap[t + 1] as usize }];
+            let (a1, b1) = &ends[if pmap.is_empty() {
+                0
+            } else {
+                pmap[t + 1] as usize
+            }];
             let a = pair(*a0, *a1);
             let b = pair(*b0, *b1);
             let w = pair(wv(w1, w2, ccs, t), wv(w1, w2, ccs, t + 1));
@@ -188,7 +195,16 @@ mod neon {
             let mut a2 = [0u8; 216];
             a1[..216 - t].copy_from_slice(&w1[t..]);
             a2[..216 - t].copy_from_slice(&w2[t..]);
-            super::u8_texels_scalar(ends, &pmap[t.min(pmap.len())..], &a1, &a2, ccs, srgb, n - t, &mut out[t..]);
+            super::u8_texels_scalar(
+                ends,
+                &pmap[t.min(pmap.len())..],
+                &a1,
+                &a2,
+                ccs,
+                srgb,
+                n - t,
+                &mut out[t..],
+            );
         }
     }
 }
@@ -222,7 +238,11 @@ mod tests {
                 w2[i] = rng.below(65) as u8;
             }
             let parts = 1 + rng.below(4) as usize;
-            let pmap: Vec<u8> = if parts == 1 { Vec::new() } else { (0..n).map(|_| rng.below(parts as u64) as u8).collect() };
+            let pmap: Vec<u8> = if parts == 1 {
+                Vec::new()
+            } else {
+                (0..n).map(|_| rng.below(parts as u64) as u8).collect()
+            };
             let ccs = rng.below(5) as usize;
             let srgb = round % 2 == 0;
             let mut a = [[0u16; 4]; 216];
