@@ -273,6 +273,34 @@ handing the GPU byte-identical data:
 Where each number came from, including the ones that went against us:
 [docs/plans/optimization-plan.md](docs/plans/optimization-plan.md).
 
+## ASTC
+
+Every number here comes from a committed artifact that records its command, machine and date.
+
+- **Conformance.** The decoder matches ARM astcenc 5.7.1 byte for byte in all six decode cells
+  (sRGB/linear LDR × 8-bit/half-float, HDR RGB + LDR alpha, HDR). That covers 506,671,729
+  random, mutated and natural blocks across all 24 footprints with 0 differing bytes, plus a
+  census of 2,888 (footprint, class) cells.
+  [docs/artifacts/astc-conformance.md](docs/artifacts/astc-conformance.md)
+- **Decode speed.** Single thread, 8-bit output, four 2048² textures at 4x4, 6x6, 8x8 and
+  12x12, ABBA with a null arm, under rusty_alloc. Measured: **1.9× to 2.8×** `astc-decode`
+  0.3.1 and `texture2ddecoder` 0.1.2 (neither is bit-exact with astcenc), and **1.45× to
+  2.1×** `astcenc-avx2 -dl -j 1`.
+  [docs/artifacts/astc-decode-vs-baselines.md](docs/artifacts/astc-decode-vs-baselines.md)
+- **Encode quality.** Mean PSNR gap against astcenc 5.7.1 at the same preset name, 8 Kodak
+  images, six footprints: `Fastest` −0.16 to +0.10 dB, `Fast` −0.03 to +0.19 dB, `Medium`
+  −0.31 to −0.46 dB. Every emitted block decodes identically in astcenc.
+  [docs/artifacts/astc-encode-quality.md](docs/artifacts/astc-encode-quality.md)
+- **Encode speed.** Scalar code, at equal quality against `astcenc-none` (its `-quality`
+  bisected to our PSNR). `Fast` runs at 0.62× to 0.85× of astcenc's speed. `Medium` runs at
+  0.45× to 0.58×, and its 12x12 point is below our own 0.5× floor. Against `astcenc-avx2`:
+  0.15× to 0.30×. [docs/artifacts/astc-encode-speed.md](docs/artifacts/astc-encode-speed.md)
+
+The encoder is written from the ASTC specification. astcenc is used only as a black-box
+oracle (`tools/astc-oracle`, outside the dependency graph), and no astcenc source is
+translated. Other pure-Rust ASTC encoders exist on crates.io (for example `ktx-rs`, which
+ports astcenc, and `oxideav-dds`).
+
 ## Install
 
 ```toml
@@ -379,6 +407,10 @@ cargo bench --bench decode_ab
   float / 16-bit / packed uncompressed layouts (`R16G16B16A16_FLOAT`, `R16_UNORM`, `R10G10B10A2`, …;
   full list in [docs/formats.md](docs/formats.md)). UF16 mode-11 encode (`encode_bc6h_uf16`).
   Notes: [docs/artifacts/encode-quality.md](docs/artifacts/encode-quality.md).
+- **ASTC** — `rusty_dds::astc` (feature `astc`, on by default): decode of every 2D and 3D
+  footprint and all six decode cells, bit-exact with ARM astcenc 5.7.1; an encoder for LDR
+  (presets `Fastest` to `Exhaustive`), 3D, and a first HDR version; `.astc`, KTX 1.0 and
+  KTX 2.0 containers, and ASTC inside DDS. Measured numbers are in [ASTC](#astc) below.
 - **GPU plans** — `upload_plan_compressed` / `upload_plan_decoded_rgba8` (Vulkan / wgpu / DXGI
   names; no graphics API dependency).
 - **CLI** — `rusty-dds info|decode|encode|retag` (`ddsinfo` / `retag` kept as shims).
@@ -396,6 +428,7 @@ cargo bench --bench decode_ab
 | Feature-gated `decode` / `encode` | ✅ Phase 5 |
 | BC6H / float HDR | ✅ decode (`decode_rgba_f32`) · ✅ encode UF16 mode-11 (`encode_bc6h_uf16`) |
 | Float / 16-bit / packed uncompressed | ✅ decode (`decode_rgba_f32`) |
+| ASTC (2D + 3D, LDR + HDR; `.astc`, KTX, KTX2, DDS) | ✅ decode (bit-exact with astcenc 5.7.1) · ✅ encode LDR / 3D · HDR encode first version |
 
 ## Architecture
 

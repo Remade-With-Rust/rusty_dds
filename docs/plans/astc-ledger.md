@@ -80,6 +80,29 @@ Full sweep after tuning (8 Kodak images, mean / worst gap in dB, ours single-thr
 
 Targets (section 2.3: Fastest/Fast mean >= -0.30, Medium >= -0.50, worst >= -1.5): all met.
 
+## Encoder speed, ES1 (2026-11-21)
+
+ES1 = our MT/s over `astcenc-none` MT/s at equal PSNR (astcenc `-quality` bisected to within 0.05 dB of ours), Kodak 01/03/08/15, single thread pinned to one core in WSL, CPU-time clocks (the host is shared; wall samples swung 4x), 4 ABBA rounds, minimum per arm.
+
+| Step | Medium 6x6 kodim03 Ir | Medium 12x12 kodim03 Ir | Note |
+|---|---|---|---|
+| after preset tuning | 39.6 G | 26.34 G* | *measured after the Medium retune below |
+| Medium retune (refine 2, partition pre-ranking `part_search [2, 1, 0]`, early-out 1.5) | | | quality -0.31..-0.46 dB mean, 0.28 -> 0.53 MT/s |
+| hoists: opaque alpha skip, per-grid feed sums, padded taps, per-texel residual weights | | 24.76 G | byte-identical |
+| exact top-k residual pruning | 23.87 G | 22.33 G | byte-identical |
+| one-pass partition refit | 22.93 G | | byte-identical |
+
+ES1 result (two repeats agree within 0.03):
+
+| Preset | 4x4 | 6x6 | 8x8 | 12x12 | floor |
+|---|---|---|---|---|---|
+| Fast | 0.77 | 0.74 | 0.85 | 0.62 | 0.5: pass |
+| Medium | 0.58 | 0.49 / 0.52 | 0.51 / 0.53 | 0.45 / 0.46 | 0.5: 12x12 fails, 6x6 borderline |
+
+Against `astcenc-avx2` (ES2 territory, not a release gate): 0.14-0.28.
+
+Open: Medium at 12x12. The cost there is the per-grid ranking (decimation + residual for every grid of every fit). The planned lever is a block-mode shortlist harvested from our own encodes per footprint (plan E6), which changes output and needs its own quality gate.
+
 ## Refuted or deferred ideas
 
 | Idea | Measurement | Verdict |
@@ -89,3 +112,6 @@ Targets (section 2.3: Fastest/Fast mean >= -0.30, Medium >= -0.50, worst >= -1.5
 | Precomputed per-mode colour range table | byte-identical, no measurable speed change (mode ranking no longer the bottleneck) | kept (simpler), not a win |
 | "First pure-Rust ASTC encoder" claim | crates.io survey 2026-11-21: ktx-rs 4.4.4 (astcenc port, encode + decode) and oxideav-dds 0.0.7 (LDR encoder) exist | claim dropped |
 | Lower early-out threshold for small blocks | Medium 4x4 0.75 -> 0.3: +0.04 dB for -15% speed; dual-plane gate gives +0.25 | not taken |
+| Partition candidates visited by ascending lower bound (sorted) | pruned more residuals, but the sort cost more: 24.76 -> 25.30 G Ir | replaced by index-order pruning (22.33 G) |
+| Channel-major gather for the exact error loop | did not vectorise on the SSE2 baseline; buffer memset 1.46 G Ir | reverted |
+| Medium `grid_iters` 3 -> 2 for speed | ES1 6x6 0.59 but 12x12 0.42 (astcenc's matched point gets faster too) | not taken |
