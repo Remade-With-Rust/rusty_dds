@@ -7,6 +7,12 @@
 //! DXGI format x odd and power-of-two sizes x mips, arrays, cubes, volumes).
 //! Any change to an existing format's layout fails this test.
 //!
+//! One deliberate re-record since: #12 moved every block-compressed (BCn)
+//! mip chain to exact whole-block sizing per level. 147 BCn lines changed,
+//! every one a mip chain of an NPOT, non-square or volume surface (those
+//! were short or misplaced before); square power-of-two 2D chains, the
+//! committed fixtures and all non-block formats are unchanged.
+//!
 //! Regenerate only on purpose: `UPDATE_LAYOUT_SNAPSHOT=1 cargo test --test layout_snapshot`.
 
 use rusty_dds::{
