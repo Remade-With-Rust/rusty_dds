@@ -159,7 +159,22 @@ pub(crate) fn read_bits(src: u128, pos: u32, n: u32) -> u32 {
 /// Each value takes its own `bits` low bits and its share of the trit/quint
 /// block bits; trit/quint bits belonging to values past the end of the
 /// sequence are zero, as the specification requires for a final partial block.
+/// (The parser uses [`decode_map`]; this is the differential harness's entry.)
+#[cfg_attr(not(any(test, feature = "__astc_internals")), allow(dead_code))]
 pub fn decode(src: u128, start: u32, range: usize, out: &mut [u8]) {
+    decode_map(src, start, range, out, |v| v as u8);
+}
+
+/// [`decode`] with each value passed through `map` as it is stored: the
+/// parser unquantises in place, with no staging buffer and no second pass.
+#[inline(always)]
+pub(crate) fn decode_map<F: Fn(u32) -> u8>(
+    src: u128,
+    start: u32,
+    range: usize,
+    out: &mut [u8],
+    map: F,
+) {
     let (bits, trits, quints) = FORM[range];
     let bits = bits as u32;
     let count = out.len();
@@ -181,7 +196,7 @@ pub fn decode(src: u128, start: u32, range: usize, out: &mut [u8]) {
             }
             let tv = &TRITS[t as usize];
             for j in 0..n {
-                out[base + j] = ((tv[j] as u32) << bits | m[j]) as u8;
+                out[base + j] = map((tv[j] as u32) << bits | m[j]);
             }
             base += 5;
         }
@@ -201,13 +216,13 @@ pub fn decode(src: u128, start: u32, range: usize, out: &mut [u8]) {
             }
             let qv = &QUINTS[q as usize];
             for j in 0..n {
-                out[base + j] = ((qv[j] as u32) << bits | m[j]) as u8;
+                out[base + j] = map((qv[j] as u32) << bits | m[j]);
             }
             base += 3;
         }
     } else {
         for o in out.iter_mut() {
-            *o = read_bits(src, pos, bits) as u8;
+            *o = map(read_bits(src, pos, bits));
             pos += bits;
         }
     }
