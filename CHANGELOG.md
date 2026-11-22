@@ -3,6 +3,26 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.2](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.1...v0.11.2) - 2026-11-22
+
+### Fixed
+
+- *(astc)* narrow avx2/popcnt field visibility for MSRV 1.73 (E0446)
+
+### Other
+
+- *(astc)* encode-speed artifact for the SIMD round
+- *(clippy)* src/astc clean; the CI clippy job now gates the whole crate
+- *(astc)* AVX2 widening of the exact partition error (four texels per register)
+- *(astc)* weight re-derivation hoists the per-partition line terms
+- *(astc)* AVX2 twin of the weight infill (eight texels per register)
+- *(astc)* SSE2 twin of the endpoint refit sums (channels in lanes)
+- *(astc)* pattern ranking compiled for POPCNT when the CPU has it
+- *(astc)* AVX2 twins of the weight-grid decimation and its residual
+- *(astc)* SSE2 twin of the exact partition error (two texels per register)
+- *(astc)* rank 3/4-partition patterns from label bitsets, not a texel walk
+- cargo fmt the whole crate
+
 ## [0.11.1](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.0...v0.11.1) - 2026-11-22
 
 ### Other
