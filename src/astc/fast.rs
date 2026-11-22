@@ -18,7 +18,7 @@ use super::footprint::AstcFootprint;
 use super::parse::{self, BlockKind};
 use super::partition::select_partition;
 use super::reference::{decode_block, Out};
-use super::tables::{build_grid, Grid};
+use super::tables::{build_taps, Taps};
 use super::texel::{lerp, lns_to_f16, unorm16_to_f16};
 use super::{AstcBlockStatus, AstcProfile};
 
@@ -47,8 +47,9 @@ pub(crate) fn u8_from_8bit(c0: u16, c1: u16, w: u8, srgb: bool) -> u16 {
 pub(crate) struct FastCtx {
     fp: AstcFootprint,
     texels: usize,
-    /// Grids seen so far, keyed by (w, h, d).
-    grids: Vec<((u8, u8, u8), Grid)>,
+    /// Grids seen so far, keyed by (w, h, d): only their taps (the encoder's
+    /// derived tables are never built here).
+    grids: Vec<((u8, u8, u8), Taps)>,
     /// Partition maps for counts 2..=4, seed 0..1024, built on first use.
     parts: Vec<Option<Box<[u8]>>>,
     /// Every block mode classified for the footprint.
@@ -70,7 +71,7 @@ impl FastCtx {
         if let Some(i) = self.grids.iter().position(|(k, _)| *k == (w, h, d)) {
             return i;
         }
-        self.grids.push(((w, h, d), build_grid(self.fp, w as u32, h as u32, d as u32)));
+        self.grids.push(((w, h, d), build_taps(self.fp, w as u32, h as u32, d as u32)));
         self.grids.len() - 1
     }
 
