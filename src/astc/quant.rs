@@ -157,6 +157,40 @@ pub(crate) const fn color_range(values: u32, bits: u32) -> Option<usize> {
     None
 }
 
+const fn build_crange() -> [[u8; 128]; 9] {
+    let mut t = [[0xFFu8; 128]; 9];
+    let mut v = 0;
+    while v < 9 {
+        let mut bits = 0;
+        while bits < 128 {
+            if let Some(r) = color_range(2 * (v as u32 + 1), bits as u32) {
+                t[v][bits] = r as u8;
+            }
+            bits += 1;
+        }
+        v += 1;
+    }
+    t
+}
+
+/// [`color_range`] tabulated for even value counts 2..=18 and 0..128 bits.
+static CRANGE: [[u8; 128]; 9] = build_crange();
+
+/// Table form of [`color_range`] (value counts are always even and at most
+/// 18 here; colour bits are at most 111).
+#[inline]
+pub(crate) fn color_range_lut(values: u32, bits: u32) -> Option<usize> {
+    if values & 1 != 0 {
+        return color_range(values, bits);
+    }
+    let v = (values / 2).wrapping_sub(1) as usize;
+    match CRANGE.get(v).and_then(|row| row.get(bits as usize)) {
+        Some(&r) if r != 0xFF => Some(r as usize),
+        Some(_) => None,
+        None => color_range(values, bits),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +209,15 @@ mod tests {
         }
         // Bit replication: 3-bit 101 -> 10110110.
         assert_eq!(COLOR_UNQUANT[5][5], 0b1011_0110);
+    }
+
+    #[test]
+    fn color_range_table_equals_the_iterative_rule() {
+        for values in 1..=20u32 {
+            for bits in 0..200u32 {
+                assert_eq!(color_range_lut(values, bits), color_range(values, bits), "{values} {bits}");
+            }
+        }
     }
 
     #[test]

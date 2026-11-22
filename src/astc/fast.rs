@@ -30,6 +30,8 @@ pub(crate) struct FastCtx {
     grids: Vec<((u8, u8, u8), Grid)>,
     /// Partition maps for counts 2..=4, seed 0..1024, built on first use.
     parts: Vec<Option<Box<[u8]>>>,
+    /// Every block mode classified for the footprint.
+    modes: Box<[parse::ModeInfo]>,
 }
 
 impl FastCtx {
@@ -39,6 +41,7 @@ impl FastCtx {
             texels: fp.texels() as usize,
             grids: Vec::new(),
             parts: (0..3 * 1024).map(|_| None).collect(),
+            modes: (0..2048u16).map(|m| parse::mode_info(m, fp)).collect(),
         }
     }
 
@@ -77,7 +80,9 @@ impl FastCtx {
         out: &mut [[u16; 4]],
     ) -> AstcBlockStatus {
         let fp = self.fp;
-        let s = parse::parse(block, fp);
+        let b = u128::from_le_bytes(*block);
+        let mode = (b & 0x7FF) as u16;
+        let s = parse::parse_with(b, mode, fp, self.modes[mode as usize]);
         if s.kind != BlockKind::Normal {
             return decode_block(block, fp, profile, out_kind, out);
         }

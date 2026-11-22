@@ -120,20 +120,42 @@ impl SymbolicBlock {
 pub fn parse(block: &[u8; 16], fp: AstcFootprint) -> SymbolicBlock {
     let b = u128::from_le_bytes(*block);
     let mode = (b & 0x7FF) as u16;
-    let g = match block_mode::classify(mode as u32, fp) {
-        ModeClass::VoidExtent => return parse_void(b, mode, fp),
-        ModeClass::Reserved => return SymbolicBlock::illegal(mode, IllegalReason::ReservedBlockMode),
-        ModeClass::Grid(g) => g,
-    };
-    if let Err(e) = block_mode::check(&g, fp) {
-        let r = match e {
-            GridIllegal::TooManyWeights => IllegalReason::TooManyWeights,
-            GridIllegal::WeightBitsTooMany => IllegalReason::WeightBitsTooMany,
-            GridIllegal::WeightBitsTooFew => IllegalReason::WeightBitsTooFew,
-            GridIllegal::GridLargerThanFootprint => IllegalReason::GridLargerThanFootprint,
-        };
-        return SymbolicBlock::illegal(mode, r);
+    parse_with(b, mode, fp, mode_info(mode, fp))
+}
+
+/// A block mode classified for a footprint (footprint-dependent legality
+/// included). The fast decoder tabulates this per footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModeInfo {
+    Void,
+    Illegal(IllegalReason),
+    Grid(block_mode::GridMode),
+}
+
+pub(crate) fn mode_info(mode: u16, fp: AstcFootprint) -> ModeInfo {
+    match block_mode::classify(mode as u32, fp) {
+        ModeClass::VoidExtent => ModeInfo::Void,
+        ModeClass::Reserved => ModeInfo::Illegal(IllegalReason::ReservedBlockMode),
+        ModeClass::Grid(g) => match block_mode::check(&g, fp) {
+            Ok(()) => ModeInfo::Grid(g),
+            Err(e) => ModeInfo::Illegal(match e {
+                GridIllegal::TooManyWeights => IllegalReason::TooManyWeights,
+                GridIllegal::WeightBitsTooMany => IllegalReason::WeightBitsTooMany,
+                GridIllegal::WeightBitsTooFew => IllegalReason::WeightBitsTooFew,
+                GridIllegal::GridLargerThanFootprint => IllegalReason::GridLargerThanFootprint,
+            }),
+        },
     }
+}
+
+/// [`parse`] with the block mode already classified (`info` must be
+/// `mode_info(mode, fp)`).
+pub(crate) fn parse_with(b: u128, mode: u16, fp: AstcFootprint, info: ModeInfo) -> SymbolicBlock {
+    let g = match info {
+        ModeInfo::Void => return parse_void(b, mode, fp),
+        ModeInfo::Illegal(r) => return SymbolicBlock::illegal(mode, r),
+        ModeInfo::Grid(g) => g,
+    };
     let partitions = read_bits(b, 11, 2) + 1;
     if g.dual_plane && partitions == 4 {
         return SymbolicBlock::illegal(mode, IllegalReason::DualPlaneFourPartitions);
@@ -180,7 +202,7 @@ pub fn parse(block: &[u8; 16], fp: AstcFootprint) -> SymbolicBlock {
     }
     let dual_bits = if g.dual_plane { 2 } else { 0 };
     let color_bits = 128u32.saturating_sub(config_bits + weight_bits + dual_bits);
-    let color_range = match quant::color_range(color_count, color_bits) {
+    let color_range = match quant::color_range_lut(color_count, color_bits) {
         Some(r) => r,
         None => return SymbolicBlock::illegal(mode, IllegalReason::ColorBitsTooFew),
     };
