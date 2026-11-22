@@ -22,6 +22,27 @@ use super::tables::{build_grid, Grid};
 use super::texel::{lerp, lns_to_f16, unorm16_to_f16};
 use super::{AstcBlockStatus, AstcProfile};
 
+/// 8-bit output of LDR interpolation from 8-bit endpoints `c0`, `c1`.
+///
+/// With `X = c0 (64 - w) + c1 w` (at most 255 * 64 = 16_320):
+/// - linear: endpoints expand to `257 c`, and
+///   `(257 X + 32) >> 6 = 4 X + ((X + 32) >> 6)`, whose top 8 bits are the
+///   output; every intermediate fits 16 bits unsigned (at most 65_535);
+/// - sRGB: endpoints expand to `256 c + 128`, and
+///   `(256 X + 128 * 64 + 32) >> 6 = 4 X + 128`.
+///
+/// Identical to `lerp(e0, e1, w) >> 8` on the expanded endpoints (tested).
+#[inline(always)]
+pub(crate) fn u8_from_8bit(c0: u16, c1: u16, w: u8, srgb: bool) -> u16 {
+    let w = w as u32;
+    let x = c0 as u32 * (64 - w) + c1 as u32 * w;
+    if srgb {
+        (((x << 2) + 128) >> 8) as u16
+    } else {
+        (((x << 2) + ((x + 32) >> 6)) >> 8) as u16
+    }
+}
+
 /// Per-surface decode state; caller-owned, no global state.
 pub(crate) struct FastCtx {
     fp: AstcFootprint,
@@ -145,18 +166,30 @@ impl FastCtx {
         };
         let out = &mut out[..n];
         match out_kind {
-            Out::U8 if parts == 1 && ccs == 4 => {
-                // One partition, one plane: the common case, no per-texel
-                // partition lookup or plane select.
-                let e = &eps[0];
-                for t in 0..n {
-                    let w = w1[t];
-                    out[t] = [
-                        lerp(e.e0[0], e.e1[0], w) >> 8,
-                        lerp(e.e0[1], e.e1[1], w) >> 8,
-                        lerp(e.e0[2], e.e1[2], w) >> 8,
-                        lerp(e.e0[3], e.e1[3], w) >> 8,
-                    ];
+            Out::U8 if matches!(profile, AstcProfile::Ldr | AstcProfile::LdrSrgb) => {
+                // 8-bit output under an LDR profile: every endpoint is an 8-bit
+                // value c expanded as 257 c (linear) or 256 c + 128 (sRGB),
+                // so the interpolation reduces exactly to 16-bit integers (see
+                // `u8_from_8bit`). One partition, one plane is the common case.
+                let srgb = profile == AstcProfile::LdrSrgb;
+                let c8 = |e: &cem::Endpoints| -> ([u16; 4], [u16; 4]) {
+                    (e.e0.map(|v| v >> 8), e.e1.map(|v| v >> 8))
+                };
+                if parts == 1 && ccs == 4 {
+                    let (a, b) = c8(&eps[0]);
+                    for t in 0..n {
+                        let w = w1[t];
+                        out[t] = core::array::from_fn(|c| u8_from_8bit(a[c], b[c], w, srgb));
+                    }
+                } else {
+                    let ends: [([u16; 4], [u16; 4]); 4] = core::array::from_fn(|p| c8(&eps[p]));
+                    for t in 0..n {
+                        let (a, b) = &ends[if parts > 1 { pmap[t] as usize } else { 0 }];
+                        out[t] = core::array::from_fn(|c| {
+                            let w = if c == ccs { w2[t] } else { w1[t] };
+                            u8_from_8bit(a[c], b[c], w, srgb)
+                        });
+                    }
                 }
             }
             Out::U8 => {
@@ -194,6 +227,25 @@ impl FastCtx {
             AstcBlockStatus::HdrInLdr
         } else {
             AstcBlockStatus::Ok
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u8_from_8bit_equals_the_16bit_lerp() {
+        for c0 in 0..=255u16 {
+            for c1 in 0..=255u16 {
+                for w in 0..=64u8 {
+                    let lin = lerp(c0 * 257, c1 * 257, w) >> 8;
+                    assert_eq!(u8_from_8bit(c0, c1, w, false), lin);
+                    let srgb = lerp((c0 << 8) | 0x80, (c1 << 8) | 0x80, w) >> 8;
+                    assert_eq!(u8_from_8bit(c0, c1, w, true), srgb);
+                }
+            }
         }
     }
 }
