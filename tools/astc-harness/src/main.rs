@@ -1383,6 +1383,137 @@ fn cmd_ktx2out(args: &[String]) -> bool {
     ok
 }
 
+/// Radiance .hdr (RGBE, new-style RLE or flat) to RGBA f32.
+fn load_hdr(path: &str) -> (u32, u32, Vec<f32>) {
+    let d = std::fs::read(path).unwrap();
+    let mut pos = 0;
+    let mut line = || {
+        let s = pos;
+        while d[pos] != b'\n' {
+            pos += 1;
+        }
+        pos += 1;
+        String::from_utf8_lossy(&d[s..pos - 1]).into_owned()
+    };
+    loop {
+        if line().is_empty() {
+            break;
+        }
+    }
+    let res = line();
+    let parts: Vec<&str> = res.split_whitespace().collect();
+    let (h, w): (u32, u32) = (parts[1].parse().unwrap(), parts[3].parse().unwrap());
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let mut scan = vec![[0u8; 4]; w as usize];
+    for _ in 0..h {
+        if d[pos] == 2 && d[pos + 1] == 2 && w >= 8 && w < 32768 {
+            pos += 4;
+            for c in 0..4 {
+                let mut x = 0usize;
+                while x < w as usize {
+                    let n = d[pos] as usize;
+                    pos += 1;
+                    if n > 128 {
+                        let v = d[pos];
+                        pos += 1;
+                        for _ in 0..n - 128 {
+                            scan[x][c] = v;
+                            x += 1;
+                        }
+                    } else {
+                        for _ in 0..n {
+                            scan[x][c] = d[pos];
+                            pos += 1;
+                            x += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for px in scan.iter_mut() {
+                px.copy_from_slice(&d[pos..pos + 4]);
+                pos += 4;
+            }
+        }
+        for px in &scan {
+            let f = if px[3] == 0 { 0.0 } else { 2f32.powi(px[3] as i32 - 136) };
+            out.extend_from_slice(&[px[0] as f32 * f, px[1] as f32 * f, px[2] as f32 * f, 1.0]);
+        }
+    }
+    (w, h, out)
+}
+
+fn log_rmse(src: &[f32], dec: &[f32]) -> f64 {
+    let mut se = 0f64;
+    let mut n = 0f64;
+    for (a, b) in src.chunks_exact(4).zip(dec.chunks_exact(4)) {
+        for c in 0..3 {
+            let x = (a[c].max(1e-4) as f64).log2() - (b[c].max(1e-4) as f64).log2();
+            se += x * x;
+            n += 1.0;
+        }
+    }
+    (se / n).sqrt()
+}
+
+/// EC1 for HDR and 3D encodes: every emitted block decodes identically in
+/// astcenc (six cells), and HDR quality against astcenc -ch / -cH (log2 RMSE
+/// over RGB, on our decode, which is bit-exact with astcenc's).
+///   astch ec1x <hdr files...>
+fn cmd_ec1x(args: &[String]) -> bool {
+    let tmp = "/root/astcws/out/ec1x";
+    std::fs::create_dir_all(tmp).unwrap();
+    let mut ok = true;
+    println!("| image | footprint | profile | preset | blocks | EC1 bad | ours log2 RMSE | astcenc log2 RMSE |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for path in args {
+        let (w, h, px) = load_hdr(path);
+        let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+        for fp in [AstcFootprint::B4X4, AstcFootprint::B6X6, AstcFootprint::B8X8] {
+            for (prof, flag) in [(AstcProfile::HdrRgbLdrA, "-ch"), (AstcProfile::Hdr, "-cH")] {
+                let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Medium);
+                let data = astc::encode_rgba_f32(&px, w, h, &opts).unwrap();
+                let blocks: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+                let (_, bad) = cells_check(fp, &blocks);
+                let ec1: u64 = bad.iter().sum();
+                ok &= ec1 == 0;
+                let mut dec = vec![0f32; px.len()];
+                astc::decode_rgba_f32_into(&data, w, h, 1, fp, prof, &mut dec).unwrap();
+                let ours = log_rmse(&px, &dec);
+                let out = format!("{tmp}/{name}_{fp}.astc");
+                let _ = std::fs::remove_file(&out);
+                let fps = fp.to_string();
+                let theirs = if run_astcenc(&[flag, path, &out, &fps, "-medium", "-j", "8", "-silent"]) {
+                    let d = std::fs::read(&out).unwrap();
+                    let f = astc::AstcFile::parse(&d).unwrap();
+                    let mut dec2 = vec![0f32; px.len()];
+                    astc::decode_rgba_f32_into(f.data, w, h, 1, fp, prof, &mut dec2).unwrap();
+                    log_rmse(&px, &dec2)
+                } else {
+                    f64::NAN
+                };
+                println!("| {name} | {fp} | {prof:?} | Medium | {} | {ec1} | {ours:.4} | {theirs:.4} |", blocks.len());
+            }
+        }
+    }
+    // 3D: six 256x256 slices, every 3D footprint, EC1.
+    let slices: Vec<(u32, u32, Vec<u8>)> = (0..6).map(|i| load_rgba(&format!("/root/astcws/corpus/slices/ldr_{i}.png"))).collect();
+    let (w, h) = (slices[0].0, slices[0].1);
+    let vol: Vec<u8> = slices.iter().flat_map(|s| s.2.iter().copied()).collect();
+    for &fp in AstcFootprint::ALL_3D {
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(astc::AstcPreset::Fast);
+        let data = astc::encode_volume_rgba8(&vol, w, h, 6, &opts).unwrap();
+        let blocks: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+        let (_, bad) = cells_check(fp, &blocks);
+        let ec1: u64 = bad.iter().sum();
+        ok &= ec1 == 0;
+        let mut dec = vec![0u8; vol.len()];
+        astc::decode_rgba8_into(&data, w, h, 6, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        println!("| volume 256x256x6 | {fp} | Ldr | Fast | {} | {ec1} | PSNR {:.3} dB | |", blocks.len(), psnr_img(&vol, &dec));
+    }
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -1412,6 +1543,7 @@ fn main() {
         Some("blockdbg") => cmd_blockdbg(&args[2..]),
         Some("es1") => cmd_es1(&args[2..]),
         Some("ktx2out") => cmd_ktx2out(&args[2..]),
+        Some("ec1x") => cmd_ec1x(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();
