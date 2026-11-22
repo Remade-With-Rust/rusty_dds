@@ -137,3 +137,24 @@ fn upload_plans_carry_the_footprint() {
     let d = dds.upload_plan_decoded_rgba8(SubresourceId::new(0, 0, 0)).unwrap();
     assert_eq!(d.data_len, 37 * 29 * 4);
 }
+
+#[cfg(feature = "encode")]
+#[test]
+fn encode_astc_dds_round_trip() {
+    let (w, h) = (37u32, 22u32);
+    let px: Vec<u8> = (0..w * h)
+        .flat_map(|i| [(i * 7) as u8, (i * 3) as u8, (i / 5) as u8, 255])
+        .collect();
+    for &(fp, prof) in &[(AstcFootprint::B6X6, AstcProfile::Ldr), (AstcFootprint::B8X5, AstcProfile::LdrSrgb)] {
+        let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Fastest);
+        let dds = Dds::encode_astc_from_rgba8(&px, w, h, &opts).unwrap();
+        let mut bytes = Vec::new();
+        dds.write(&mut bytes).unwrap();
+        let v = DdsView::parse(&bytes).unwrap();
+        let c = v.astc_content().unwrap();
+        assert_eq!((c.footprint, c.srgb), (fp, prof == AstcProfile::LdrSrgb));
+        let img = v.decode_rgba8(SubresourceId::new(0, 0, 0)).unwrap();
+        let direct = astc::encode_rgba8(&px, w, h, &opts).unwrap();
+        assert_eq!(astc::decode_rgba8(&direct, w, h, fp, prof).unwrap().pixels, img.pixels);
+    }
+}
