@@ -554,19 +554,21 @@ pub fn ktx2_inflate(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             .and_then(|v| v.checked_mul(faces as usize))
             .ok_or(Error::OutOfBounds)?;
         let src = slice(bytes, off, len)?;
-        let level = rusty_zstd::decompress_with_limit(src, opts, need)
-            .map_err(|e| Error::InvalidField(format!("KTX2 level {l} zstd: {e:?}")))?;
-        if level.len() != need {
-            return Err(Error::InvalidField(format!("KTX2 level {l} inflates to {}, layout needs {need}", level.len())));
-        }
         while out.len() % 16 != 0 {
             out.push(0);
         }
         let new_off = out.len() as u64;
+        // Inflate straight onto the end of the output: no per-level buffer to
+        // copy from. The cap counts only this level's bytes, and the frame's
+        // back-references cannot reach the bytes already in `out`.
+        let got = rusty_zstd::decompress_into_with_limit(&mut out, src, opts, need)
+            .map_err(|e| Error::InvalidField(format!("KTX2 level {l} zstd: {e:?}")))?;
+        if got != need {
+            return Err(Error::InvalidField(format!("KTX2 level {l} inflates to {got}, layout needs {need}")));
+        }
         out[base..base + 8].copy_from_slice(&new_off.to_le_bytes());
         out[base + 8..base + 16].copy_from_slice(&(need as u64).to_le_bytes());
         out[base + 16..base + 24].copy_from_slice(&(need as u64).to_le_bytes());
-        out.extend_from_slice(&level);
     }
     Ok(out)
 }
