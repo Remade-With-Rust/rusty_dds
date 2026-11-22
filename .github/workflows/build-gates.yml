@@ -61,3 +61,25 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --lib astc
+
+  # EC3: the frozen ASTC encoder hashes must hold on aarch64 and wasm32 too
+  # (no floating-point divergence across targets).
+  determinism-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test astc_determinism
+
+  determinism-wasm32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Install wasmtime
+        run: curl -sSf https://wasmtime.dev/install.sh | bash
+      - run: |
+          export PATH="$HOME/.wasmtime/bin:$PATH"
+          CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test --release --target wasm32-wasip1 --no-default-features --features decode,encode,astc --test astc_determinism
