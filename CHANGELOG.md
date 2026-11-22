@@ -5,9 +5,23 @@ figure is reproducible from the repo with the command given beside it.
 
 ## [0.11.2](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.1...v0.11.2) - 2026-11-22
 
+### Added
+
+- *(astc)* HDR encode quality (#23): endpoint repair after colour quantisation, endpoint mode 7 (RGB base + scale), and two-partition HDR blocks. mPSNR +0.1 to +3.1 dB on the HDR corpus; still 0.4-2.7 dB behind astcenc `-ch`, so HDR parity is not claimed. Every encode decodes identically in astcenc. LDR output unchanged.
+
 ### Fixed
 
+- Block-compressed (BCn/DXTn) mip chains for non-power-of-two, non-square and volume textures are now sized per level as `max(1, ceil(w/4)) x max(1, ceil(h/4))` blocks, matching DirectXTex and the `dds` crate (#12, #20). Power-of-two square textures are byte-identical; files with such chains written by older versions read differently.
 - *(astc)* narrow avx2/popcnt field visibility for MSRV 1.73 (E0446)
+- README: install line now says `0.11`, and links are absolute so they work on crates.io (#19).
+
+### Performance
+
+- *(astc)* encoder SIMD (#22), output byte-identical: Medium 1.11x (4x4) to 1.93x (12x12), Fast 1.10x to 1.62x faster than 0.11.1 (single thread). The commits are listed under Other.
+
+### Maintenance
+
+- clippy clean across the crate, with a CI clippy gate (#21); `cargo fmt` across the crate (#17).
 
 ### Other
 
