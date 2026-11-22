@@ -66,7 +66,7 @@ pub(crate) struct Target {
     pub cw: [f32; 4],
 }
 
-const MAX_TEXELS: usize = 216;
+pub(super) const MAX_TEXELS: usize = 216;
 
 /// Squared colour quantisation step (255 / (levels - 1))^2 per range
 /// (baked literals: float const fn needs Rust 1.82).
@@ -339,7 +339,7 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
 
 /// Least-squares fit of per-texel ideal weights (scaled to 0..=64) to a
 /// grid, through the infill taps. Returns grid weights in 0..=64 (float).
-fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &mut [f32; 64]) {
+pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &mut [f32; 64]) {
     let g = &ctx.grids[grid];
     if g.full {
         for (o, &w) in out[..g.count].iter_mut().zip(ideal.iter()) {
@@ -416,14 +416,14 @@ const fn build_wq_lut() -> [[u8; 257]; 12] {
 static WQ_LUT: [[u8; 257]; 12] = build_wq_lut();
 
 /// Quantise grid weights (0..=64 float) to the weight range's levels.
-fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
+pub(super) fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
     let lut = &WQ_LUT[range];
     for (o, &v) in out.iter_mut().zip(g) {
         *o = lut[((v * 4.0 + 0.5) as usize).min(256)];
     }
 }
 
-fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
+pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
     for (t, &(n, tp)) in ctx.grids[grid].taps.iter().enumerate() {
         let mut s = 0u32;
         for &(k, c) in &tp[..n as usize] {

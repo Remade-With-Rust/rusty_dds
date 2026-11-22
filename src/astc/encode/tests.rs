@@ -188,3 +188,38 @@ fn volume_encode_is_legal_and_close() {
         assert!(p > 24.0, "{fp}: {p:.2} dB");
     }
 }
+
+#[test]
+fn hdr_encode_is_legal_and_close() {
+    let (w, h) = (24u32, 18u32);
+    let mut px = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let v = 0.01 * (1.3f32).powf((x + y) as f32 * 0.4);
+            px.extend_from_slice(&[v, v * 0.7, v * 1.4, if (x / 4) % 2 == 0 { 1.0 } else { 0.5 }]);
+        }
+    }
+    for &prof in &[AstcProfile::Hdr, AstcProfile::HdrRgbLdrA] {
+        for &fp in &[AstcFootprint::B4X4, AstcFootprint::B6X6, AstcFootprint::B8X8] {
+            let opts = AstcEncodeOptions::new(fp, prof).with_preset(AstcPreset::Fast);
+            let data = encode_rgba_f32(&px, w, h, &opts).unwrap();
+            for b in data.chunks_exact(16) {
+                assert!(!matches!(parse(b.try_into().unwrap(), fp).kind, BlockKind::Illegal(_)), "{fp} {prof:?}");
+            }
+            let mut dec = vec![0f32; px.len()];
+            crate::astc::decode_rgba_f32_into(&data, w, h, 1, fp, prof, &mut dec).unwrap();
+            // Log-domain RMSE over RGB.
+            let mut se = 0f64;
+            for (a, b) in px.chunks_exact(4).zip(dec.chunks_exact(4)) {
+                for c in 0..3 {
+                    let d = (a[c].max(1e-6) as f64).log2() - (b[c].max(1e-6) as f64).log2();
+                    se += d * d;
+                }
+            }
+            let rmse = (se / (w * h * 3) as f64).sqrt();
+            // Sanity floor (one partition; hard alpha edges in 6x6+ blocks). The
+            // quality comparison against astcenc -ch/-cH lives in the harness.
+            assert!(rmse < 0.4, "{fp} {prof:?}: log2 rmse {rmse:.3}");
+        }
+    }
+}

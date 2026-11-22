@@ -8,6 +8,7 @@
 
 mod block;
 mod context;
+mod hdr;
 
 use alloc::vec::Vec;
 
@@ -320,6 +321,56 @@ pub fn encode_volume_rgba8(
                 out[o..o + 16].copy_from_slice(&super::pack::pack(&best.sym, fp));
                 o += 16;
             }
+        }
+    }
+    Ok(out)
+}
+
+/// HDR encode (plan E7, first version): tightly packed RGBA `f32` (linear;
+/// negatives and NaN clamp to 0, values above the half range to 65504) with
+/// profile `Hdr` (HDR alpha) or `HdrRgbLdrA` (LDR alpha). One partition;
+/// endpoint modes 11, 14 and 15; constant blocks become HDR void extents.
+pub fn encode_rgba_f32(pixels: &[f32], width: u32, height: u32, opts: &AstcEncodeOptions) -> Result<Vec<u8>, Error> {
+    let fp = opts.footprint;
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidField("ASTC encode: zero dimension".into()));
+    }
+    if fp.is_3d() || !matches!(opts.profile, AstcProfile::Hdr | AstcProfile::HdrRgbLdrA) {
+        return Err(Error::UnsupportedFormat);
+    }
+    let need = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(Error::OutOfBounds)?;
+    if pixels.len() != need {
+        return Err(Error::OutOfBounds);
+    }
+    let total = payload_len(width, height, 1, fp).ok_or(Error::OutOfBounds)?;
+    let mut out = alloc::vec![0u8; total];
+    let ctx = Ctx::new(fp, 1);
+    let exact = params(opts.preset).exact_candidates;
+    let (bw, bh) = (fp.width(), fp.height());
+    let (nbx, nby, _) = fp.block_counts(width, height, 1);
+    let mut px = [[0f32; 4]; 216];
+    let mut t = [[0f32; 4]; 216];
+    let mut h = [[0u16; 4]; 216];
+    let mut o = 0usize;
+    for by in 0..nby {
+        for bx in 0..nbx {
+            let mut i = 0;
+            for ty in 0..bh {
+                let y = (by * bh + ty).min(height - 1) as usize;
+                for tx in 0..bw {
+                    let x = (bx * bw + tx).min(width - 1) as usize;
+                    let s = (y * width as usize + x) * 4;
+                    px[i] = [pixels[s], pixels[s + 1], pixels[s + 2], pixels[s + 3]];
+                    i += 1;
+                }
+            }
+            let opaque = hdr::targets(&px[..i], opts.profile, &mut t[..i], &mut h[..i]);
+            let best = hdr::encode_block_hdr(&ctx, opts.profile, exact, &t[..i], &h[..i], opaque);
+            out[o..o + 16].copy_from_slice(&super::pack::pack(&best.sym, fp));
+            o += 16;
         }
     }
     Ok(out)

@@ -61,7 +61,8 @@ pub use container::{AstcFile, AstcSurface};
 pub use footprint::{block_rows, payload_len, AstcFootprint};
 #[cfg(feature = "encode")]
 pub use encode::{
-    encode_block_rows_into, encode_rgba8, encode_rgba8_into, encode_volume_rgba8, AstcEncodeOptions, AstcPreset,
+    encode_block_rows_into, encode_rgba8, encode_rgba8_into, encode_rgba_f32, encode_volume_rgba8, AstcEncodeOptions,
+    AstcPreset,
 };
 pub use parse::IllegalReason;
 pub use reference::{decode_block_f16, decode_block_rgba8, illegal_reason};
