@@ -265,16 +265,27 @@ fn mode7_candidates(t: &Mode7, e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 4]
     }
 }
 
+/// The interpolation-domain endpoints the values `v` decode to.
+fn ep_of(cem_v: u8, profile: AstcProfile, v: &[u8; 8]) -> cem::Endpoints {
+    cem::expand(&cem::decode(cem_v, v), profile)
+}
+
 /// Squared distance of the endpoints `v` decode to from the fitted
-/// endpoints `target` (interpolation domain), over `chans` channels.
+/// endpoints `target` (interpolation domain), over `chans` channels; and
+/// those endpoints.
 fn endpoint_err(
     cem_v: u8,
     profile: AstcProfile,
     v: &[u8; 8],
     target: ([f32; 4], [f32; 4]),
     chans: usize,
-) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
+) -> (f64, cem::Endpoints) {
+    let ep = ep_of(cem_v, profile, v);
+    (endpoint_err_ep(&ep, target, chans), ep)
+}
+
+/// [`endpoint_err`] of already decoded endpoints.
+fn endpoint_err_ep(ep: &cem::Endpoints, target: ([f32; 4], [f32; 4]), chans: usize) -> f64 {
     let mut e = 0f64;
     for c in 0..chans {
         let a = ep.e0[c] as f64 - target.0[c] as f64;
@@ -296,7 +307,7 @@ fn step_level(range: usize, x: u8, up: bool) -> Option<u8> {
 
 /// Coordinate search over the packed values `v` (each moved one
 /// representable level at a time) minimising [`endpoint_err`]; `e` is the
-/// error of `v` on entry. True if `v` changed.
+/// error of `v` on entry. The endpoints of the new `v` if it changed.
 #[allow(clippy::too_many_arguments)]
 fn repair(
     cem_v: u8,
@@ -307,8 +318,8 @@ fn repair(
     mut e: f64,
     target: ([f32; 4], [f32; 4]),
     chans: usize,
-) -> bool {
-    let mut changed = false;
+) -> Option<cem::Endpoints> {
+    let mut changed = None;
     for _ in 0..3 {
         let mut moved = false;
         for k in 0..nvals {
@@ -318,12 +329,12 @@ fn repair(
                 };
                 let mut w = *v;
                 w[k] = q;
-                let ew = endpoint_err(cem_v, profile, &w, target, chans);
+                let (ew, ep) = endpoint_err(cem_v, profile, &w, target, chans);
                 if ew < e {
                     *v = w;
                     e = ew;
                     moved = true;
-                    changed = true;
+                    changed = Some(ep);
                 }
             }
         }
@@ -367,20 +378,12 @@ fn mode7_fit(t: &[[f32; 4]], eff: &[u8; MAX_TEXELS]) -> ([f32; 4], [f32; 4]) {
     (e0, e1)
 }
 
-/// Exact error of the values `v` (endpoint mode `cem_v`) against the
-/// targets `t` with texel weights `eff`: squared differences of the
-/// decoder's interpolated values (interpolation domain), over `chans`.
+/// Exact error of the decoded endpoints `ep` against the targets `t` with
+/// texel weights `eff`: squared differences of the decoder's interpolated
+/// values (interpolation domain), over `chans`.
 // One index walks parallel per-channel arrays (and fixes the operation order).
 #[allow(clippy::needless_range_loop)]
-fn texel_err(
-    cem_v: u8,
-    profile: AstcProfile,
-    v: &[u8; 8],
-    eff: &[u8; MAX_TEXELS],
-    t: &[[f32; 4]],
-    chans: usize,
-) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
+fn texel_err(ep: &cem::Endpoints, eff: &[u8; MAX_TEXELS], t: &[[f32; 4]], chans: usize) -> f64 {
     let mut err = 0f64;
     for (i, ti) in t.iter().enumerate() {
         for c in 0..chans {
@@ -396,6 +399,8 @@ fn texel_err(
 /// endpoints land nearest the fitted ones by a coordinate search over
 /// neighbouring levels ([`repair`]), and append the repaired values; the
 /// exact texel error then chooses among the originals and the repaired.
+/// `eps` holds the decoded endpoints of `quantized` (same order) on entry;
+/// each appended value appends its endpoints.
 #[allow(clippy::too_many_arguments)]
 fn repair_best(
     cem_v: u8,
@@ -403,6 +408,7 @@ fn repair_best(
     range: usize,
     nvals: usize,
     quantized: &mut Vec<[u8; 8]>,
+    eps: &mut Vec<cem::Endpoints>,
     target: ([f32; 4], [f32; 4]),
     chans: usize,
 ) {
@@ -413,8 +419,8 @@ fn repair_best(
     // by error (ties by index) would put first, without sorting the rest.
     // Indices rise, so an equal error never displaces an earlier entry.
     let mut two: [Option<(f64, usize)>; 2] = [None, None];
-    for (j, v) in quantized.iter().enumerate() {
-        let e = endpoint_err(cem_v, profile, v, target, chans);
+    for (j, ep) in eps.iter().enumerate() {
+        let e = endpoint_err_ep(ep, target, chans);
         let below = |s: Option<(f64, usize)>| s.map_or(true, |(b, _)| e.total_cmp(&b).is_lt());
         if below(two[0]) {
             two[1] = two[0];
@@ -425,8 +431,9 @@ fn repair_best(
     }
     for &(e, j) in two.iter().flatten() {
         let mut v = quantized[j];
-        if repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
+        if let Some(ep) = repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
             quantized.push(v);
+            eps.push(ep);
         }
     }
 }
@@ -561,15 +568,12 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
 // One index walks parallel per-channel / per-partition arrays.
 #[allow(clippy::needless_range_loop)]
 fn texel_err_idx(
-    cem_v: u8,
-    profile: AstcProfile,
-    v: &[u8; 8],
+    ep: &cem::Endpoints,
     eff: &[u8; MAX_TEXELS],
     t: &[[f32; 4]],
     idx: &[u8],
     chans: usize,
 ) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
     let mut err = 0f64;
     for &i in idx {
         let i = i as usize;
@@ -615,6 +619,7 @@ fn search_two_partitions(
     }
     let mut six: Vec<[u8; 6]> = Vec::new();
     let mut quantized: Vec<[u8; 8]> = Vec::new();
+    let mut eps: Vec<cem::Endpoints> = Vec::new();
     let mut dec = alloc::vec![[0f32; 64]; ctx.grids.len()];
     let mut res = alloc::vec![-1f32; ctx.grids.len()];
     for &(_, pi) in &top {
@@ -729,18 +734,21 @@ fn search_two_partitions(
                         }
                         quantized.push(v);
                     }
+                    eps.clear();
+                    eps.extend(quantized.iter().map(|v| ep_of(cem_v, profile, v)));
                     repair_best(
                         cem_v,
                         profile,
                         range,
                         nvals,
                         &mut quantized,
+                        &mut eps,
                         (e0, e1),
                         chans,
                     );
                     let mut pb: Option<(f64, [u8; 8])> = None;
-                    for v in &quantized {
-                        let err = texel_err_idx(cem_v, profile, v, &eff, t, id, chans);
+                    for (v, ep) in quantized.iter().zip(&eps) {
+                        let err = texel_err_idx(ep, &eff, t, id, chans);
                         if pb.map_or(true, |b| err < b.0) {
                             pb = Some((err, *v));
                         }
@@ -923,6 +931,7 @@ pub(crate) fn encode_block_hdr(
     };
     let mut six: Vec<[u8; 6]> = Vec::new();
     let mut quantized: Vec<[u8; 8]> = Vec::new();
+    let mut eps: Vec<cem::Endpoints> = Vec::new();
     let mut quads: Vec<[u8; 4]> = Vec::new();
     for &(_, mi, range) in &cands {
         let m = ctx.modes[mi];
@@ -982,17 +991,20 @@ pub(crate) fn encode_block_hdr(
                 quantized.push(v);
             }
             let target = (e0, e1);
+            eps.clear();
+            eps.extend(quantized.iter().map(|v| ep_of(cem_v, profile, v)));
             repair_best(
                 cem_v,
                 profile,
                 range,
                 nvals as usize,
                 &mut quantized,
+                &mut eps,
                 target,
                 chans,
             );
-            for v in &quantized {
-                let err = texel_err(cem_v, profile, v, &eff, t, chans);
+            for (v, ep) in quantized.iter().zip(&eps) {
+                let err = texel_err(ep, &eff, t, chans);
                 if pass_best.map_or(true, |b| err < b.0) {
                     pass_best = Some((err, *v, cem_v, range));
                 }
@@ -1021,9 +1033,11 @@ pub(crate) fn encode_block_hdr(
                         }
                         quantized.push(v);
                     }
-                    repair_best(7, profile, r4, 4, &mut quantized, (f0, f1), chans);
-                    for v in &quantized {
-                        let err = texel_err(7, profile, v, &eff, t, chans);
+                    eps.clear();
+                    eps.extend(quantized.iter().map(|v| ep_of(7, profile, v)));
+                    repair_best(7, profile, r4, 4, &mut quantized, &mut eps, (f0, f1), chans);
+                    for (v, ep) in quantized.iter().zip(&eps) {
+                        let err = texel_err(ep, &eff, t, chans);
                         if pass_best.map_or(true, |b| err < b.0) {
                             pass_best = Some((err, *v, 7, r4));
                         }
