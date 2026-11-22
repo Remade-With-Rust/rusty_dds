@@ -882,6 +882,9 @@ pub(super) fn bc7_mode6_seeds_base(ex: Seed, cm: Seed) -> ([Seed; 5], usize) {
 /// so instead they are gated on the error the cheap seeds left behind: a block
 /// the first two already fit well cannot be rescued by a third seed, and a
 /// block they fit badly is exactly where the extras earn their cost.
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn bc7_mode6_seeds_extra(
     pixels: &[[u8; 4]; 16],
     ex: Seed,

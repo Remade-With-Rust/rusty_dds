@@ -97,9 +97,7 @@ fn solid_red_bc1() -> [u8; 8] {
 fn solid_red_bc2() -> [u8; 16] {
     let mut b = [0u8; 16];
     // Explicit alpha 0xF per nibble → 255
-    for i in 0..8 {
-        b[i] = 0xFF;
-    }
+    b[..8].fill(0xFF);
     b[8..16].copy_from_slice(&solid_red_bc1());
     b
 }

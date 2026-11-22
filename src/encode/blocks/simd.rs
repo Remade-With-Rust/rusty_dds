@@ -1547,6 +1547,9 @@ pub(super) fn ls_accum_mode6(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 unsafe fn ls_accum_mode6_impl(
     pxv: &[[f32; 8]; 16],
     indices: &[u8; 16],
@@ -2681,6 +2684,8 @@ mod oracle {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn alpha_fixed_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2869,6 +2874,8 @@ mod oracle {
     /// `None`), single-channel ramps, and full noise.
     #[cfg(target_arch = "x86_64")]
     #[test]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn pca_extremes_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2940,6 +2947,8 @@ mod oracle {
     #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn probe_pca_ab() {
         use super::*;
         assert!(has_avx2());

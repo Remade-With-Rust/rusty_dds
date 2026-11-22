@@ -746,6 +746,9 @@ pub(super) fn bc6h_interp_avx2(
 }
 
 #[target_feature(enable = "avx2")]
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 unsafe fn bc6h_interp_avx2_impl(
     base: &[i32; 3],
     delta: &[i32; 3],
