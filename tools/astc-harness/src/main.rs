@@ -1227,6 +1227,27 @@ fn cmd_blockdbg(args: &[String]) -> bool {
 
 /// Run astcenc on every image at a float quality, single-threaded; returns
 /// (mean PSNR on our decode, total seconds of astcenc's own coding time).
+/// CPU time of this thread, seconds.
+fn thread_cpu() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes one timespec through a valid pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
+/// User + system CPU time of all waited-for children, seconds.
+fn children_cpu() -> f64 {
+    // SAFETY: getrusage fills one rusage through a valid pointer.
+    let mut ru: libc::rusage = unsafe { core::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+    let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
+/// astcenc at `-quality q` over the images: (mean PSNR, coding seconds).
+/// Coding seconds are CPU time: the child's CPU time times astcenc's own
+/// coding share of its wall time (its "Coding time" over "Total time"), which
+/// removes PNG I/O and is immune to preemption by other processes.
 fn astcenc_at(bin: &str, q: f32, fp: AstcFootprint, imgs: &[(String, u32, u32, Vec<u8>)], tmp: &str) -> (f64, f64) {
     let mut psnr = 0f64;
     let mut secs = 0f64;
@@ -1235,19 +1256,23 @@ fn astcenc_at(bin: &str, q: f32, fp: AstcFootprint, imgs: &[(String, u32, u32, V
         let _ = std::fs::remove_file(&out);
         let qs = format!("{q}");
         let fps = fp.to_string();
+        let c0 = children_cpu();
         let o = std::process::Command::new(bin)
             .args(["-cl", path, &out, &fps, &qs, "-j", "1"])
             .output()
             .expect("astcenc");
-        // astcenc prints "Coding time:  X.XXXX s" (compression only, no I/O).
+        let cpu = children_cpu() - c0;
+        // astcenc prints "Total time: X s" and "Coding time: X s" (wall).
         let text = String::from_utf8_lossy(&o.stdout);
-        let t = text
-            .lines()
-            .find(|l| l.trim_start().starts_with("Coding time"))
-            .and_then(|l| l.split_whitespace().nth(2))
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(f64::NAN);
-        secs += t;
+        let field = |name: &str| {
+            text.lines()
+                .find(|l| l.trim_start().starts_with(name))
+                .and_then(|l| l.split_whitespace().nth(2))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(f64::NAN)
+        };
+        let (total, coding) = (field("Total time"), field("Coding time"));
+        secs += cpu * (coding / total);
         let d = std::fs::read(&out).unwrap();
         let f = astc::AstcFile::parse(&d).unwrap();
         let mut dec = vec![0u8; img.len()];
@@ -1285,7 +1310,7 @@ fn cmd_es1(args: &[String]) -> bool {
     let none = "/root/astcws/rel571/inst/bin/astcenc-none";
     let avx2 = "/root/astcws/rel571/inst/bin/astcenc-avx2";
     let px: f64 = imgs.iter().map(|i| (i.1 * i.2) as f64).sum();
-    println!("preset {:?}; {} images, {:.2} Mpx; single thread; astcenc rates from its own Coding time; {ES1_ROUNDS} ABBA rounds, minimum per arm", preset, imgs.len(), px / 1e6);
+    println!("preset {:?}; {} images, {:.2} Mpx; single thread; CPU time (ours: thread clock; astcenc: child CPU x its coding share of wall); {ES1_ROUNDS} ABBA rounds, minimum per arm", preset, imgs.len(), px / 1e6);
     println!("| footprint | ours dB | ours MT/s | astcenc -quality | astcenc dB | none MT/s | avx2 MT/s | ours / none | ours / avx2 |");
     println!("|---|---|---|---|---|---|---|---|---|");
     for &fp in &fps {
@@ -1317,11 +1342,11 @@ fn cmd_es1(args: &[String]) -> bool {
         // Timing: ABBA rounds (order reversed every round), minimum per arm,
         // so a burst of background load hits one sample, not one arm.
         let ours_once = || {
-            let t = std::time::Instant::now();
+            let t = thread_cpu();
             for (_, w, h, img) in &imgs {
                 std::hint::black_box(astc::encode_rgba8(img, *w, *h, &opts).unwrap());
             }
-            t.elapsed().as_secs_f64()
+            thread_cpu() - t
         };
         let (mut t_ours, mut t_none, mut t_avx2) = (f64::MAX, f64::MAX, f64::MAX);
         for r in 0..ES1_ROUNDS {

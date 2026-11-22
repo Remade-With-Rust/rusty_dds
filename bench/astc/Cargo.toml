@@ -16,6 +16,9 @@ png = "0.17"
 # House rule: every bench binary runs under rusty_alloc (the shipping allocator).
 rusty_alloc-api = "=2.5.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 debug = 1
 
