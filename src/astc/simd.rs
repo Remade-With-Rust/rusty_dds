@@ -22,7 +22,9 @@
 //! aarch64. The scalar loop stays as the oracle and the fallback, and
 //! `*_matches_scalar` tests prove the twins byte-identical.
 
-pub(crate) use super::fast::{u8_texels_scalar, Ends};
+#[cfg(any(test, not(target_arch = "x86_64")))]
+pub(crate) use super::fast::u8_texels_scalar;
+pub(crate) use super::fast::Ends;
 
 /// 8-bit output for `n` texels: the SIMD twin where available.
 #[allow(clippy::too_many_arguments)]
@@ -51,19 +53,22 @@ pub(crate) fn u8_texels(
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 use super::fast::wv;
 
 #[cfg(target_arch = "x86_64")]
 mod sse2 {
-    use super::{wv, Ends};
+    use super::Ends;
     use core::arch::x86_64::{
-        __m128i, _mm_add_epi16, _mm_loadu_si128, _mm_mullo_epi16, _mm_set1_epi16, _mm_slli_epi16,
+        __m128i, _mm_add_epi16, _mm_mullo_epi16, _mm_set1_epi16, _mm_set_epi64x, _mm_slli_epi16,
         _mm_srli_epi16, _mm_storeu_si128, _mm_sub_epi16,
     };
 
+    /// Four 16-bit lanes in one word, lane `c` = `x[c]` (the low half of a
+    /// register is the first texel of a pair).
     #[inline(always)]
-    fn pair(x: [u16; 4], y: [u16; 4]) -> [u16; 8] {
-        [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]]
+    fn lanes(x: [u16; 4]) -> u64 {
+        x[0] as u64 | (x[1] as u64) << 16 | (x[2] as u64) << 32 | (x[3] as u64) << 48
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -78,22 +83,31 @@ mod sse2 {
         out: &mut [[u16; 4]],
     ) {
         let out = &mut out[..n];
+        // The operands are built in registers, not staged through stack
+        // arrays: endpoints packed once per block, and each texel's weights
+        // as one word (plane 1 in every lane, plane 2 in lane `ccs`).
+        let e0: [u64; 4] = core::array::from_fn(|p| lanes(ends[p].0));
+        let e1: [u64; 4] = core::array::from_fn(|p| lanes(ends[p].1));
+        const SPLAT: u64 = 0x0001_0001_0001_0001;
+        let m2: u64 = if ccs < 4 { 0xFFFF << (16 * ccs) } else { 0 };
+        let wl = |t: usize| ((w1[t] as u64 * SPLAT) & !m2) | ((w2[t] as u64 * SPLAT) & m2);
         let mut t = 0;
         while t + 2 <= n {
-            let (a0, b0) = &ends[if pmap.is_empty() { 0 } else { pmap[t] as usize }];
-            let (a1, b1) = &ends[if pmap.is_empty() { 0 } else { pmap[t + 1] as usize }];
-            let a = pair(*a0, *a1);
-            let b = pair(*b0, *b1);
-            let w = pair(wv(w1, w2, ccs, t), wv(w1, w2, ccs, t + 1));
-            let mut r = [0u16; 8];
-            // SAFETY: SSE2 is unconditionally present on x86_64. The loads read
-            // and the store writes exactly 16 bytes from/to local [u16; 8]
-            // arrays (unaligned forms, no alignment requirement). The lane
-            // arithmetic is exact by the range table in the module docs.
+            let (p0, p1) = if pmap.is_empty() {
+                (0, 0)
+            } else {
+                (pmap[t] as usize, pmap[t + 1] as usize)
+            };
+            let dst = &mut out[t..t + 2];
+            // SAFETY: SSE2 is unconditionally present on x86_64. The only
+            // memory access is the store, which writes exactly 16 bytes into
+            // `dst`, two contiguous `[u16; 4]` elements of a live slice
+            // (unaligned form, no alignment requirement). The lane arithmetic
+            // is exact by the range table in the module docs.
             unsafe {
-                let va = _mm_loadu_si128(a.as_ptr() as *const __m128i);
-                let vb = _mm_loadu_si128(b.as_ptr() as *const __m128i);
-                let vw = _mm_loadu_si128(w.as_ptr() as *const __m128i);
+                let va = _mm_set_epi64x(e0[p1] as i64, e0[p0] as i64);
+                let vb = _mm_set_epi64x(e1[p1] as i64, e1[p0] as i64);
+                let vw = _mm_set_epi64x(wl(t + 1) as i64, wl(t) as i64);
                 let vw0 = _mm_sub_epi16(_mm_set1_epi16(64), vw);
                 let x = _mm_add_epi16(_mm_mullo_epi16(va, vw0), _mm_mullo_epi16(vb, vw));
                 let x4 = _mm_slli_epi16(x, 2);
@@ -103,22 +117,18 @@ mod sse2 {
                     _mm_add_epi16(x4, _mm_srli_epi16(_mm_add_epi16(x, _mm_set1_epi16(32)), 6))
                 };
                 let v = _mm_srli_epi16(c, 8);
-                _mm_storeu_si128(r.as_mut_ptr() as *mut __m128i, v);
+                _mm_storeu_si128(dst.as_mut_ptr() as *mut __m128i, v);
             }
-            out[t] = [r[0], r[1], r[2], r[3]];
-            out[t + 1] = [r[4], r[5], r[6], r[7]];
             t += 2;
         }
         if t < n {
-            super::u8_texels_scalar(ends, &pmap[t.min(pmap.len())..], &shift(w1, t), &shift(w2, t), ccs, srgb, n - t, &mut out[t..]);
+            // Odd texel count: the last texel through the scalar formula.
+            let (a, b) = &ends[if pmap.is_empty() { 0 } else { pmap[t] as usize }];
+            out[t] = core::array::from_fn(|c| {
+                let w = if c == ccs { w2[t] } else { w1[t] };
+                crate::astc::fast::u8_from_8bit(a[c], b[c], w, srgb)
+            });
         }
-    }
-
-    /// Weights from texel `t` on, for the scalar tail.
-    fn shift(w: &[u8; 216], t: usize) -> [u8; 216] {
-        let mut o = [0u8; 216];
-        o[..216 - t].copy_from_slice(&w[t..]);
-        o
     }
 }
 

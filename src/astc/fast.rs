@@ -251,8 +251,14 @@ mod tests {
 /// Endpoint pairs (8-bit values, four channels) per partition.
 pub(crate) type Ends = [([u16; 4], [u16; 4]); 4];
 
-/// Scalar oracle: 8-bit output for `n` texels.
+/// Scalar oracle: 8-bit output for `n` texels. The SSE2 twin is gated
+/// against it in tests; it runs in shipping code without `simd` and off
+/// x86_64 / aarch64.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    all(feature = "simd", target_arch = "x86_64", not(test)),
+    allow(dead_code)
+)]
 pub(crate) fn u8_texels_scalar(
     ends: &Ends,
     pmap: &[u8],
@@ -274,7 +280,7 @@ pub(crate) fn u8_texels_scalar(
 
 /// Weights of texel `t` per channel (plane 2 on channel `ccs`).
 #[inline(always)]
-#[cfg_attr(not(feature = "simd"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "simd", target_arch = "aarch64")), allow(dead_code))]
 pub(crate) fn wv(w1: &[u8; 216], w2: &[u8; 216], ccs: usize, t: usize) -> [u16; 4] {
     let a = w1[t] as u16;
     let b = w2[t] as u16;
