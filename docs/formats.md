@@ -70,11 +70,63 @@ value.
 **sRGB:** `_sRGB` tags keep **stored** channel bytes (no linearization) on
 decode; GPU names map to `*Srgb` variants in [`GpuFormat`](../src/upload.rs).
 
+## Supported (ASTC matrix)
+
+Module `rusty_dds::astc` (feature `astc`, default on; decode also needs
+`decode`, encode also needs `encode`). Conformance evidence:
+[astc-conformance.md](artifacts/astc-conformance.md),
+[astc-census.md](artifacts/astc-census.md),
+[astc-containers.md](artifacts/astc-containers.md).
+
+| Content | Decode | Encode | `.astc` | KTX 1.0 | KTX 2.0 | DDS | Compressed upload plan |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 2D LDR, 14 footprints (4x4 .. 12x12) | ✅ | ✅ `Fastest` .. `Exhaustive` | ✅ r/w | ✅ r/w | ✅ r/w | ✅ r/w | ✅ |
+| 2D HDR (endpoint modes 2, 3, 7, 11, 14, 15) | ✅ | ✅ first version (modes 11/14/15, one partition) | ✅ | ✅ (linear tag) | ✅ (`SFLOAT`) | ✅ (linear tag) | ✅ |
+| 3D, 10 footprints (3x3x3 .. 6x6x6) | ✅ | ✅ LDR (`encode_volume_rgba8`) | ✅ | ✅ | ✅ | — (no DXGI tag) | — |
+
+**Decode is bit-exact with ARM astcenc 5.7.1** in six cells: (sRGB, linear
+LDR) x (8-bit, half-float), and the two HDR profiles x half-float. The output
+type selects the decode mode, as in astcenc: 8-bit output follows
+`decode_unorm8` (top 8 bits of the interpolated value), half-float output is
+`decode_float16` (exact bit patterns; `f32` output is their exact widening).
+8-bit output under an HDR profile is rejected (`UnsupportedFormat`): the
+specification makes it invalid and this crate does not tone-map.
+
+**Error colours.** An illegal block, or an HDR void-extent block under an LDR
+profile, decodes to magenta in 8-bit output and to `0xFFFF` (NaN) in every
+half-float channel. An HDR endpoint mode under an LDR profile turns only that
+partition's texels magenta (also in half-float output). Both choices are
+astcenc's; both are allowed by the specification.
+
+**sRGB.** For ASTC the sRGB tag changes the decode arithmetic (endpoints expand
+as `(c << 8) | 0x80` on all four channels) and the output is still the
+sRGB-encoded bytes, not linearised. On the DDS `f32` path an `_UNORM_SRGB`
+surface decodes at 8 bits and widens as an exact `x / 255`, the crate's rule
+for formats defined at 8 bits; `DecodeOptions::astc_profile` overrides.
+
+**HDR tagging.** KTX 1.0 and the DDS convention cannot say whether ASTC data is
+HDR. Linear-tagged surfaces decode with the `Hdr` profile on the float path
+(identical to `Ldr` for LDR blocks, and it decodes HDR blocks instead of
+failing on them) and with `Ldr` on the 8-bit path. HDR data is written with
+the linear tag. KTX 2.0 `SFLOAT` formats say HDR explicitly.
+
+**DDS convention.** There is no Microsoft-defined DXGI ASTC format. rusty_dds
+reads and writes the de facto values 133..=187 used by image-rs/image-dds:
+`ASTC_4X4_TYPELESS = 133`, `_UNORM = 134`, `_UNORM_SRGB = 135`, then three
+values per footprint, four apart, up to `ASTC_12X12_UNORM_SRGB = 187`. It
+writes `_UNORM` and `_UNORM_SRGB` only. ASTC mip chains are sized exactly from
+each level's block grid.
+
+**KTX 2.0 supercompression.** Scheme 0 is read and written. Zstandard
+(scheme 2) is read through `astc::ktx::ktx2_inflate` behind the optional
+`ktx2-zstd` feature (pure-Rust `rusty_zstd`; that feature needs Rust 1.85).
+BasisLZ/UASTC transcoding is out of scope.
+
 ## Explicitly unsupported (today)
 
 | Format family | Status |
 |---------------|--------|
-| ASTC / ETC / PVRTC | out of scope (not DDS-primary desktop BCn) |
+| ETC / PVRTC | out of scope (not DDS-primary desktop BCn) |
 | Uncompressed float / wide / packed formats (other than the 8-bit RGBA/BGRA/X layouts above) | `decode_rgba_f32` only (above); no RGBA8 decode, no encode |
 | Typeless, `_UINT` / `_SINT`, `A8R3G3B2`, `Q16W16V16U16`, `CxV8U8` | `UnsupportedFormat` |
 | Video / YUV DXGI formats | unsupported |
@@ -103,5 +155,7 @@ header whose declared geometry cannot exist yields `UnsupportedFormat` or
 | `decode` | ✅ | `decode_rgba8`, `decode_rgba_f32`, `bcdec_rs` |
 | `encode` | ✅ | `encode_from_rgba8`, `encode_bc6h_uf16`, `EncodeLayout`, `Rdo` |
 | `simd` | ✅ | AVX2 encode kernels; byte-identical output. Off ⇒ `forbid(unsafe_code)` |
-| `tuning` | ❌ | **Development only.** Re-opens the frozen encoder constants to `RUSTY_DDS_*` environment overrides. Never enable in a shipped build — encoder output would stop being a pure function of its inputs. |
+| `astc` | ✅ | `rusty_dds::astc`: ASTC decode (with `decode`), encode (with `encode`), `.astc` / KTX 1.0 / KTX 2.0 containers, ASTC inside DDS. Pure Rust, no extra dependency |
+| `ktx2-zstd` | ❌ | Zstandard-supercompressed KTX 2.0 (`astc::ktx::ktx2_inflate`) via the pure-Rust `rusty_zstd`; raises the MSRV to 1.85 |
+| `tuning` | ❌ | **Development only.** Re-opens the frozen encoder constants (BCn and the ASTC search limits) to `RUSTY_DDS_*` environment overrides. Never enable in a shipped build — encoder output would stop being a pure function of its inputs. |
 | _(none)_ | — | container + surfaces + `UploadPlan` + `decode_content()` classification |

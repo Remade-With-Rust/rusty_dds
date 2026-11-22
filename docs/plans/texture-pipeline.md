@@ -39,7 +39,7 @@ Until those exist, `rusty_dds` is not a drop-in competitor to full DDS texture l
 - Being a full asset conditioner / mipmap generator / texture tooling suite.
 - Binding directly to OpenGL/Vulkan/wgpu in the core crate (optional thin adapters later).
 - Bit-exact parity with every DirectXTex corner case on day one.
-- ASTC / exotic YUV / video formats in phase 1.
+- ASTC / exotic YUV / video formats in phase 1. (ASTC landed separately afterwards: see [astc.md](astc.md).)
 - Replacing every consumer of `ddsfile` without an API-compat story.
 
 ## 3. Architecture sketch
