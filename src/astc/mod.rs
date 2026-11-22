@@ -47,6 +47,8 @@ mod parse;
 mod partition;
 mod quant;
 pub mod reference;
+#[cfg(feature = "simd")]
+mod simd;
 mod tables;
 mod texel;
 

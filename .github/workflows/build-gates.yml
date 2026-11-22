@@ -70,6 +70,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --test astc_determinism
+      # NEON twins of the ASTC decoder against their scalar oracles.
+      - run: cargo test --release --lib astc
 
   determinism-wasm32:
     runs-on: ubuntu-latest

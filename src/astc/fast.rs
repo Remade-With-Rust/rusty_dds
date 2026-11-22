@@ -170,27 +170,14 @@ impl FastCtx {
                 // 8-bit output under an LDR profile: every endpoint is an 8-bit
                 // value c expanded as 257 c (linear) or 256 c + 128 (sRGB),
                 // so the interpolation reduces exactly to 16-bit integers (see
-                // `u8_from_8bit`). One partition, one plane is the common case.
+                // `u8_from_8bit`); the SIMD twin runs two texels per register.
                 let srgb = profile == AstcProfile::LdrSrgb;
-                let c8 = |e: &cem::Endpoints| -> ([u16; 4], [u16; 4]) {
-                    (e.e0.map(|v| v >> 8), e.e1.map(|v| v >> 8))
-                };
-                if parts == 1 && ccs == 4 {
-                    let (a, b) = c8(&eps[0]);
-                    for t in 0..n {
-                        let w = w1[t];
-                        out[t] = core::array::from_fn(|c| u8_from_8bit(a[c], b[c], w, srgb));
-                    }
-                } else {
-                    let ends: [([u16; 4], [u16; 4]); 4] = core::array::from_fn(|p| c8(&eps[p]));
-                    for t in 0..n {
-                        let (a, b) = &ends[if parts > 1 { pmap[t] as usize } else { 0 }];
-                        out[t] = core::array::from_fn(|c| {
-                            let w = if c == ccs { w2[t] } else { w1[t] };
-                            u8_from_8bit(a[c], b[c], w, srgb)
-                        });
-                    }
-                }
+                let ends: Ends = core::array::from_fn(|p| (eps[p].e0.map(|v| v >> 8), eps[p].e1.map(|v| v >> 8)));
+                let pm: &[u8] = if parts > 1 { pmap } else { &[] };
+                #[cfg(feature = "simd")]
+                super::simd::u8_texels(&ends, pm, &w1, &w2, ccs, srgb, n, out);
+                #[cfg(not(feature = "simd"))]
+                u8_texels_scalar(&ends, pm, &w1, &w2, ccs, srgb, n, out);
             }
             Out::U8 => {
                 for t in 0..n {
@@ -249,3 +236,42 @@ mod tests {
         }
     }
 }
+
+/// Endpoint pairs (8-bit values, four channels) per partition.
+pub(crate) type Ends = [([u16; 4], [u16; 4]); 4];
+
+/// Scalar oracle: 8-bit output for `n` texels.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn u8_texels_scalar(
+    ends: &Ends,
+    pmap: &[u8],
+    w1: &[u8; 216],
+    w2: &[u8; 216],
+    ccs: usize,
+    srgb: bool,
+    n: usize,
+    out: &mut [[u16; 4]],
+) {
+    for t in 0..n {
+        let (a, b) = &ends[if pmap.is_empty() { 0 } else { pmap[t] as usize }];
+        out[t] = core::array::from_fn(|c| {
+            let w = if c == ccs { w2[t] } else { w1[t] };
+            u8_from_8bit(a[c], b[c], w, srgb)
+        });
+    }
+}
+
+/// Weights of texel `t` per channel (plane 2 on channel `ccs`).
+#[inline(always)]
+#[cfg_attr(not(feature = "simd"), allow(dead_code))]
+pub(crate) fn wv(w1: &[u8; 216], w2: &[u8; 216], ccs: usize, t: usize) -> [u16; 4] {
+    let a = w1[t] as u16;
+    let b = w2[t] as u16;
+    [
+        if ccs == 0 { b } else { a },
+        if ccs == 1 { b } else { a },
+        if ccs == 2 { b } else { a },
+        if ccs == 3 { b } else { a },
+    ]
+}
+
