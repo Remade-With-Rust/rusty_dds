@@ -14,7 +14,7 @@
 #![allow(unsafe_code)]
 
 #[cfg(target_arch = "x86_64")]
-pub(super) use self::avx2::{decimate, residual, Avx2};
+pub(super) use self::avx2::{decimate, infill_eff, residual, Avx2};
 #[cfg(target_arch = "x86_64")]
 pub(super) use self::popcnt::{rank_patterns, Popcnt};
 #[cfg(target_arch = "x86_64")]
@@ -336,11 +336,13 @@ mod avx2 {
     use super::super::block::MAX_TEXELS;
     use crate::astc::tables::Grid;
     use core::arch::x86_64::{
-        __m256i, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps, _mm256_cmp_ps,
-        _mm256_cmpgt_epi32, _mm256_div_ps, _mm256_i32gather_ps, _mm256_loadu_ps,
+        __m128i, __m256i, _mm256_add_epi32, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps,
+        _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_cvtepu8_epi32, _mm256_cvttps_epi32,
+        _mm256_div_ps, _mm256_i32gather_epi32, _mm256_i32gather_ps, _mm256_loadu_ps,
         _mm256_loadu_si256, _mm256_maskstore_ps, _mm256_max_ps, _mm256_min_epu32, _mm256_min_ps,
-        _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setzero_ps,
-        _mm256_storeu_ps, _mm256_sub_ps, _CMP_GT_OQ,
+        _mm256_mul_ps, _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32,
+        _mm256_setzero_ps, _mm256_setzero_si256, _mm256_srli_epi32, _mm256_storeu_ps,
+        _mm256_storeu_si256, _mm256_sub_ps, _mm_loadl_epi64, _CMP_GT_OQ,
     };
 
     /// Proof that the CPU supports AVX2: only [`Avx2::detect`] makes one.
@@ -514,6 +516,71 @@ mod avx2 {
                 _mm256_maskstore_ps(out.as_mut_ptr().add(j0), below(j0, g.count), v);
                 j0 += 8;
             }
+        }
+    }
+
+    /// Twin of `block::infill_eff_scalar`: the specification's infill
+    /// `(sum(grid[k] * c) + 8) >> 4` for eight texels at a time, in 32-bit
+    /// integer lanes (exact: at most 64 * 16 before the shift), from the
+    /// padded tap tables. Writes only texels `0..taps`. False (nothing
+    /// written) if the grid's tables do not have the padded shapes.
+    pub(in crate::astc::encode) fn infill_eff(
+        _: Avx2,
+        g: &Grid,
+        gw: &[u8; 64],
+        out: &mut [u8; MAX_TEXELS],
+    ) -> bool {
+        if !shapes_ok(g) {
+            return false;
+        }
+        // SAFETY: as in `decimate`.
+        unsafe { infill_k(g, gw, out) };
+        true
+    }
+
+    /// # Safety
+    ///
+    /// AVX2 is available and `shapes_ok(g)`.
+    #[target_feature(enable = "avx2")]
+    unsafe fn infill_k(g: &Grid, gw: &[u8; 64], out: &mut [u8; MAX_TEXELS]) {
+        let (tp, n) = (g.tp, g.tap_i.len());
+        let mut wi = [0i32; 64];
+        // SAFETY: the widening loads read `gw[8 q..8 q + 8]` (q < 8, inside
+        // the 64 bytes) and store 8 lanes at `wi[8 q..]` (inside 64); table
+        // loads at `k * tp + t0` (k < 4, t0 + 8 <= tp) are inside
+        // `tap_iv`/`tap_cv`; gathers from `wi` use indices masked to 0..64;
+        // the result store writes the local `r`.
+        for q in 0..8 {
+            let b = _mm_loadl_epi64(gw.as_ptr().add(8 * q) as *const __m128i);
+            _mm256_storeu_si256(
+                wi.as_mut_ptr().add(8 * q) as *mut __m256i,
+                _mm256_cvtepu8_epi32(b),
+            );
+        }
+        let wmask = _mm256_set1_epi32(63);
+        let k8 = _mm256_set1_epi32(8);
+        let mut r = [0i32; 8];
+        let mut t0 = 0;
+        while t0 < tp {
+            let mut s = _mm256_setzero_si256();
+            for k in 0..4 {
+                let o = k * tp + t0;
+                let i = _mm256_and_si256(
+                    _mm256_loadu_si256(g.tap_iv.as_ptr().add(o) as *const __m256i),
+                    wmask,
+                );
+                let c = _mm256_cvttps_epi32(_mm256_loadu_ps(g.tap_cv.as_ptr().add(o)));
+                s = _mm256_add_epi32(
+                    s,
+                    _mm256_mullo_epi32(_mm256_i32gather_epi32::<4>(wi.as_ptr(), i), c),
+                );
+            }
+            let v = _mm256_srli_epi32(_mm256_add_epi32(s, k8), 4);
+            _mm256_storeu_si256(r.as_mut_ptr() as *mut __m256i, v);
+            for (l, &x) in r.iter().enumerate().take(n.saturating_sub(t0).min(8)) {
+                out[t0 + l] = x as u8;
+            }
+            t0 += 8;
         }
     }
 
@@ -764,6 +831,37 @@ mod tests {
             assert_eq!(bits(&a.d), bits(&b.d), "trial {trial}");
             assert_eq!(bits(&a.x0[..chans]), bits(&b.x0[..chans]), "trial {trial}");
             assert_eq!(bits(&a.x1[..chans]), bits(&b.x1[..chans]), "trial {trial}");
+        }
+    }
+
+    /// The AVX2 infill equals the scalar for every grid of every 2D
+    /// footprint (identity grids included) and random stored weights in
+    /// 0..=64; bytes past the footprint's texels are left untouched.
+    #[test]
+    fn infill_eff_matches_scalar() {
+        use super::super::block::infill_eff_scalar;
+        use super::super::context::Ctx;
+        use crate::astc::footprint::AstcFootprint;
+        let Some(tok) = super::Avx2::detect() else {
+            eprintln!("no AVX2: infill twin not exercised");
+            return;
+        };
+        let mut rng = Rng::new(0x1AF1_1100);
+        for &fp in AstcFootprint::ALL_2D {
+            let ctx = Ctx::new(fp, 1);
+            for g in &ctx.grids {
+                for _ in 0..8 {
+                    let mut gw = [0u8; 64];
+                    for v in gw.iter_mut() {
+                        *v = [0, 64, rng.below(65) as u8][rng.below(3) as usize];
+                    }
+                    let mut a = [0xA5u8; MAX_TEXELS];
+                    let mut b = [0xA5u8; MAX_TEXELS];
+                    assert!(super::infill_eff(tok, g, &gw, &mut a));
+                    infill_eff_scalar(g, &gw, &mut b);
+                    assert_eq!(a, b, "{fp} grid {}x{}", g.w, g.h);
+                }
+            }
         }
     }
 }

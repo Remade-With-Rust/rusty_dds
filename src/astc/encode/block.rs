@@ -523,8 +523,25 @@ pub(super) fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
 }
 
 pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
-    let gw = &gw[..64];
-    for (t, tp) in ctx.grids[grid].taps4.iter().enumerate() {
+    let g = &ctx.grids[grid];
+    let gw: &[u8; 64] = gw[..64].try_into().unwrap();
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if super::simd::infill_eff(t, g, gw, out) {
+            return;
+        }
+    }
+    infill_eff_scalar(g, gw, out);
+}
+
+/// The scalar body of [`infill_eff`]: the oracle of `simd::infill_eff`, and
+/// the kernel without AVX2.
+pub(super) fn infill_eff_scalar(
+    g: &crate::astc::tables::Grid,
+    gw: &[u8; 64],
+    out: &mut [u8; MAX_TEXELS],
+) {
+    for (t, tp) in g.taps4.iter().enumerate() {
         let mut s = 0u32;
         for &(k, c) in tp {
             s += gw[(k & 63) as usize] as u32 * c as u32;
