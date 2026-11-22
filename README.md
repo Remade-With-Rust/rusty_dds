@@ -8,7 +8,7 @@ FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com
 [![By Mata Network](https://img.shields.io/badge/by-Mata%20Network-5b2be0)](https://www.mata.network)
 [![Crates.io](https://img.shields.io/crates/v/rusty_dds.svg)](https://crates.io/crates/rusty_dds)
 [![Docs.rs](https://img.shields.io/docsrs/rusty_dds)](https://docs.rs/rusty_dds)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE-MIT)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Remade-With-Rust/rusty_dds/blob/master/LICENSE-MIT)
 ![Platforms: Windows · macOS · Linux · Web](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Web-informational)
 ![MSRV: 1.73](https://img.shields.io/badge/MSRV-1.73-informational)
 
@@ -28,7 +28,7 @@ FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com
 > 0.3 added a zero-copy parse ([`DdsView`](#streaming-zero-copy-and-your-threads))
 > and decode into caller memory and caller threads — measured against Microsoft
 > DirectXTex in a streaming simulator. Features: `decode` + `encode` (default on).
-> BC6H: decode + UF16 mode-11 encode shipped (SF16 encode deferred). Catalog: [docs/formats.md](docs/formats.md).
+> BC6H: decode + UF16 mode-11 encode shipped (SF16 encode deferred). Catalog: [docs/formats.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/formats.md).
 
 ---
 
@@ -40,10 +40,10 @@ FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com
 
 | Board (24 cases) | rusty_dds vs DirectXTex | Artifact |
 |---|---|---|
-| **Encode quality (PSNR)** | **22 higher / 1 tie / 1 lower** (±0.25 dB) | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
-| **Encode speed (per core)** | **24 ahead / 0 behind** — was 20/4 at 0.7.0 | [corpus-vs-directxtex](docs/artifacts/corpus-vs-directxtex.md) |
-| **Decode speed** | **24 ahead / 0 behind** | [decode-vs-baselines](docs/artifacts/decode-vs-baselines.md) |
-| Synthetic C×X quality grid (54 cases) | **19 higher / 18 tie / 17 DirectXTex-higher** | [encode-quality-vs-directxtex](docs/artifacts/encode-quality-vs-directxtex.md) |
+| **Encode quality (PSNR)** | **22 higher / 1 tie / 1 lower** (±0.25 dB) | [corpus-vs-directxtex](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/corpus-vs-directxtex.md) |
+| **Encode speed (per core)** | **24 ahead / 0 behind** — was 20/4 at 0.7.0 | [corpus-vs-directxtex](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/corpus-vs-directxtex.md) |
+| **Decode speed** | **24 ahead / 0 behind** | [decode-vs-baselines](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/decode-vs-baselines.md) |
+| Synthetic C×X quality grid (54 cases) | **19 higher / 18 tie / 17 DirectXTex-higher** | [encode-quality-vs-directxtex](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/encode-quality-vs-directxtex.md) |
 
 **0.8.0 closed the last four losses.** At 0.7.0 the per-core encode board read
 *20 ahead / 4 behind*, and the four behind were all BC1 albedo — cases where
@@ -257,7 +257,7 @@ dds.decode_block_rows_f32_into(id, 0..dds.block_rows_f32(id)?, &mut hdr)?;
 alias for `DdsBase<Vec<u8>>`, with `DdsView<'a> = DdsBase<&'a [u8]>` sharing one
 implementation.
 
-**Measured against Microsoft DirectXTex** in [`sim/`](sim/) — a deterministic
+**Measured against Microsoft DirectXTex** in [`sim/`](https://github.com/Remade-With-Rust/rusty_dds/blob/master/sim/) — a deterministic
 texture-streaming replay on D3D11 and Vulkan, pinned, ABBA-interleaved, N=7,
 1024² BC7/BC1/BC5/BC4, 192 textures, 10 500 frames. Both stacks are gated on
 handing the GPU byte-identical data:
@@ -271,7 +271,7 @@ handing the GPU byte-identical data:
 | Uploaded bytes | 822.2 MiB | 822.2 MiB (identical) |
 
 Where each number came from, including the ones that went against us:
-[docs/plans/optimization-plan.md](docs/plans/optimization-plan.md).
+[docs/plans/optimization-plan.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/plans/optimization-plan.md).
 
 ## ASTC
 
@@ -281,19 +281,19 @@ Every number here comes from a committed artifact that records its command, mach
   (sRGB/linear LDR × 8-bit/half-float, HDR RGB + LDR alpha, HDR). That covers 506,671,729
   random, mutated and natural blocks across all 24 footprints with 0 differing bytes, plus a
   census of 2,888 (footprint, class) cells.
-  [docs/artifacts/astc-conformance.md](docs/artifacts/astc-conformance.md)
+  [docs/artifacts/astc-conformance.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/astc-conformance.md)
 - **Decode speed.** Single thread, 8-bit output, four 2048² textures at 4x4, 6x6, 8x8 and
   12x12, ABBA with a null arm, under rusty_alloc. Measured: **1.9× to 2.8×** `astc-decode`
   0.3.1 and `texture2ddecoder` 0.1.2 (neither is bit-exact with astcenc), and **1.45× to
   2.1×** `astcenc-avx2 -dl -j 1`.
-  [docs/artifacts/astc-decode-vs-baselines.md](docs/artifacts/astc-decode-vs-baselines.md)
+  [docs/artifacts/astc-decode-vs-baselines.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/astc-decode-vs-baselines.md)
 - **Encode quality.** Mean PSNR gap against astcenc 5.7.1 at the same preset name, 8 Kodak
   images, six footprints: `Fastest` −0.16 to +0.10 dB, `Fast` −0.03 to +0.19 dB, `Medium`
   −0.31 to −0.46 dB. Every emitted block decodes identically in astcenc.
-  [docs/artifacts/astc-encode-quality.md](docs/artifacts/astc-encode-quality.md)
+  [docs/artifacts/astc-encode-quality.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/astc-encode-quality.md)
 - **Encode speed.** Scalar code, at equal quality against `astcenc-none` (its `-quality`
   bisected to our PSNR). `Fast` runs at 0.65× to 0.86× of astcenc's speed, and `Medium` at
-  0.50× to 0.64× (12x12 is the slowest point). Against `astcenc-avx2`: 0.17× to 0.31×. [docs/artifacts/astc-encode-speed.md](docs/artifacts/astc-encode-speed.md)
+  0.50× to 0.64× (12x12 is the slowest point). Against `astcenc-avx2`: 0.17× to 0.31×. [docs/artifacts/astc-encode-speed.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/astc-encode-speed.md)
 
 The encoder is written from the ASTC specification. astcenc is used only as a black-box
 oracle (`tools/astc-oracle`, outside the dependency graph), and no astcenc source is
@@ -303,9 +303,9 @@ ports astcenc, and `oxideav-dds`).
 ## Install
 
 ```toml
-rusty_dds = "0.9"
+rusty_dds = "0.11"
 # decode-only, zero unsafe (e.g. WASM loaders):
-# rusty_dds = { version = "0.9", default-features = false, features = ["decode"] }
+# rusty_dds = { version = "0.11", default-features = false, features = ["decode"] }
 ```
 
 | Feature | Default | Provides |
@@ -323,7 +323,7 @@ Always on: container R/W, zero-copy `DdsView`, `SubresourceId` / `surface()`,
 feature, no thread count changes it. `tests/encode_determinism.rs` freezes that
 as payload hashes across every format, both quality tiers and RDO.
 
-MSRV: **1.73**, verified by building against that toolchain. Changes: [CHANGELOG.md](CHANGELOG.md). Migrating from `ddsfile`: [docs/migration-ddsfile.md](docs/migration-ddsfile.md).
+MSRV: **1.73**, verified by building against that toolchain. Changes: [CHANGELOG.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/CHANGELOG.md). Migrating from `ddsfile`: [docs/migration-ddsfile.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/migration-ddsfile.md).
 
 ## Untrusted input
 
@@ -344,7 +344,7 @@ Every size computation downstream of the header uses checked arithmetic, so a
 header whose declared geometry cannot exist fails closed instead of wrapping
 into a size that would then slice the payload. Two harnesses hold that line:
 `tests/parser_robustness.rs` (pure Rust, stable, deterministic, runs on every
-`cargo test`) and [`fuzz/`](fuzz/README.md) (cargo-fuzz, opt-in, excluded from
+`cargo test`) and [`fuzz/`](https://github.com/Remade-With-Rust/rusty_dds/blob/master/fuzz/README.md) (cargo-fuzz, opt-in, excluded from
 the published package so no C toolchain enters the shipped graph). Both drive
 the same `tests/common/driver.rs`. Anything either one finds is pinned in
 `tests/fixtures/regressions/` and replayed forever.
@@ -404,8 +404,8 @@ cargo bench --bench decode_ab
   plain encoder, gated by payload hash in `tests/encode_determinism.rs`.
 - **HDR and wide formats** — `decode_rgba_f32` decodes BC6H, BC4/BC5 at full precision, and
   float / 16-bit / packed uncompressed layouts (`R16G16B16A16_FLOAT`, `R16_UNORM`, `R10G10B10A2`, …;
-  full list in [docs/formats.md](docs/formats.md)). UF16 mode-11 encode (`encode_bc6h_uf16`).
-  Notes: [docs/artifacts/encode-quality.md](docs/artifacts/encode-quality.md).
+  full list in [docs/formats.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/formats.md)). UF16 mode-11 encode (`encode_bc6h_uf16`).
+  Notes: [docs/artifacts/encode-quality.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/artifacts/encode-quality.md).
 - **ASTC** — `rusty_dds::astc` (feature `astc`, on by default): decode of every 2D and 3D
   footprint and all six decode cells, bit-exact with ARM astcenc 5.7.1; an encoder for LDR
   (presets `Fastest` to `Exhaustive`), 3D, and a first HDR version; `.astc`, KTX 1.0 and
@@ -444,8 +444,8 @@ cargo bench --bench decode_ab
 └─────────────────────────────────────────────────────────┘
 ```
 
-Plan: [docs/plans/texture-pipeline.md](docs/plans/texture-pipeline.md) ·
-Formats: [docs/formats.md](docs/formats.md).
+Plan: [docs/plans/texture-pipeline.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/plans/texture-pipeline.md) ·
+Formats: [docs/formats.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/formats.md).
 
 ## Platform support
 
@@ -479,10 +479,10 @@ FFmpeg remade in Rust for memory-safe encode/decode and the broader Remade media
 
 ## License
 
-MIT — [LICENSE-MIT](LICENSE-MIT). Upstream copyright (c) 2018 Michael Dilger and
+MIT — [LICENSE-MIT](https://github.com/Remade-With-Rust/rusty_dds/blob/master/LICENSE-MIT). Upstream copyright (c) 2018 Michael Dilger and
 `ddsfile` contributors retained. Attribution for included third-party work
 (notably the `bcdec_rs` BC7 partition table) and corpus provenance:
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[THIRD-PARTY-NOTICES.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/THIRD-PARTY-NOTICES.md).
 
 **MIT, permanently.** 100% of the shipping code path is MIT — every format,
 every optimization, every RDO mode. No paid tier, no feature held back, no
@@ -490,7 +490,7 @@ future relicense, no CLA assigning us your copyright. Fork it, vendor it, ship
 it commercially, owe us nothing. Studios that want a λ calibrated on *their*
 corpus, an SLA, or integration work can buy that as a service — the model, and
 the things we commit to never selling, are written down in
-[docs/commercial-model.md](docs/commercial-model.md).
+[docs/commercial-model.md](https://github.com/Remade-With-Rust/rusty_dds/blob/master/docs/commercial-model.md).
 
 ## Trademark
 
