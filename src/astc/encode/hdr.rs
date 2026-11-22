@@ -160,6 +160,75 @@ fn mode11_candidates(e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 6]>) {
     }
 }
 
+/// Squared distance of the endpoints `v` decode to from the fitted
+/// endpoints `target` (interpolation domain), over `chans` channels.
+fn endpoint_err(
+    cem_v: u8,
+    profile: AstcProfile,
+    v: &[u8; 8],
+    target: ([f32; 4], [f32; 4]),
+    chans: usize,
+) -> f64 {
+    let ep = cem::expand(&cem::decode(cem_v, v), profile);
+    let mut e = 0f64;
+    for c in 0..chans {
+        let a = ep.e0[c] as f64 - target.0[c] as f64;
+        let b = ep.e1[c] as f64 - target.1[c] as f64;
+        e += a * a + b * b;
+    }
+    e
+}
+
+/// The representable value of `range` next above (`up`) or below `x`.
+fn step_level(range: usize, x: u8, up: bool) -> Option<u8> {
+    let row = &COLOR_NEAREST[range];
+    if up {
+        (x as usize + 1..256).map(|y| row[y]).find(|&q| q > x)
+    } else {
+        (0..x as usize).rev().map(|y| row[y]).find(|&q| q < x)
+    }
+}
+
+/// Coordinate search over the packed values `v` (each moved one
+/// representable level at a time) minimising [`endpoint_err`]; `e` is the
+/// error of `v` on entry. True if `v` changed.
+#[allow(clippy::too_many_arguments)]
+fn repair(
+    cem_v: u8,
+    profile: AstcProfile,
+    range: usize,
+    nvals: usize,
+    v: &mut [u8; 8],
+    mut e: f64,
+    target: ([f32; 4], [f32; 4]),
+    chans: usize,
+) -> bool {
+    let mut changed = false;
+    for _ in 0..3 {
+        let mut moved = false;
+        for k in 0..nvals {
+            for up in [false, true] {
+                let Some(q) = step_level(range, v[k], up) else {
+                    continue;
+                };
+                let mut w = *v;
+                w[k] = q;
+                let ew = endpoint_err(cem_v, profile, &w, target, chans);
+                if ew < e {
+                    *v = w;
+                    e = ew;
+                    moved = true;
+                    changed = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    changed
+}
+
 /// Encode one HDR block. `t` holds the targets in the interpolation domain
 /// (LNS for HDR lanes, UNORM16 for LDR alpha); `h` the half values (for void
 /// extent); `opaque` means alpha is 1.0 everywhere.
@@ -287,6 +356,7 @@ pub(crate) fn encode_block_hdr(
         sym: SymbolicBlock::empty(BlockKind::VoidHdr, 0),
     };
     let mut six: Vec<[u8; 6]> = Vec::new();
+    let mut quantized: Vec<[u8; 8]> = Vec::new();
     for &(_, mi, range) in &cands {
         let m = ctx.modes[mi];
         let g = m.grid as usize;
@@ -327,6 +397,7 @@ pub(crate) fn encode_block_hdr(
                 &mut six,
             );
             let mut pass_best: Option<(f64, [u8; 8])> = None;
+            quantized.clear();
             for s6 in &six {
                 let mut v = [0u8; 8];
                 v[..6].copy_from_slice(s6);
@@ -340,6 +411,40 @@ pub(crate) fn encode_block_hdr(
                 for x in v.iter_mut().take(nvals as usize) {
                     *x = COLOR_NEAREST[range][*x as usize];
                 }
+                quantized.push(v);
+            }
+            // Below 256 levels, rounding each packed byte on its own can
+            // flip the mode and field bits it carries. Repair the two
+            // candidates whose decoded endpoints land nearest the fitted
+            // ones by a coordinate search over neighbouring levels, judged
+            // on the decoded endpoints; the exact texel error below then
+            // chooses among the originals and the repaired ones.
+            if (range as usize) < COLOR_NEAREST.len() - 1 {
+                let target = (e0, e1);
+                let mut ranked: Vec<(f64, usize)> = quantized
+                    .iter()
+                    .enumerate()
+                    .map(|(j, v)| (endpoint_err(cem_v, profile, v, target, chans), j))
+                    .collect();
+                ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                for &(e, j) in ranked.iter().take(2) {
+                    let mut v = quantized[j];
+                    if repair(
+                        cem_v,
+                        profile,
+                        range,
+                        nvals as usize,
+                        &mut v,
+                        e,
+                        target,
+                        chans,
+                    ) {
+                        quantized.push(v);
+                    }
+                }
+            }
+            for v in &quantized {
+                let v = *v;
                 let ep = cem::expand(&cem::decode(cem_v, &v), profile);
                 let mut err = 0f64;
                 for i in 0..n {
