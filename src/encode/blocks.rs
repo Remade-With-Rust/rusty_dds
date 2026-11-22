@@ -109,8 +109,8 @@ pub fn encode_image(
     encode_block: impl Fn([[u8; 4]; 16], &mut [u8]) + Sync,
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(block_bytes))

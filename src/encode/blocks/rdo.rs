@@ -103,8 +103,8 @@ pub(crate) fn encode_image_bc1_rdo(
     if rgba.len() < w * h * 4 {
         return Err(Error::TruncatedData);
     }
-    let blocks_x = (w + 3) / 4;
-    let blocks_y = (h + 3) / 4;
+    let blocks_x = w.div_ceil(4);
+    let blocks_y = h.div_ceil(4);
     let need = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(8))
@@ -1031,8 +1031,8 @@ pub(crate) fn encode_image_bc7_rdo(
     if rgba.len() < w * h * 4 {
         return Err(Error::TruncatedData);
     }
-    let blocks_x = (w + 3) / 4;
-    let blocks_y = (h + 3) / 4;
+    let blocks_x = w.div_ceil(4);
+    let blocks_y = h.div_ceil(4);
     let need = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(16))

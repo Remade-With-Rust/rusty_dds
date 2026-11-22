@@ -82,8 +82,8 @@ fn tile_rgba(
     block_bytes: usize,
     decode_block: impl Fn(&[u8], &mut [u8], usize),
 ) -> Result<Vec<u8>, Error> {
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x * blocks_y * block_bytes;
     if data.len() < expected {
         return Err(Error::TruncatedData);
@@ -122,8 +122,8 @@ fn tile_rgba(
 }
 
 fn tile_r_to_rgba(data: &[u8], width: u32, height: u32, is_signed: bool) -> Result<Vec<u8>, Error> {
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x * blocks_y * 8;
     if data.len() < expected {
         return Err(Error::TruncatedData);
@@ -158,8 +158,8 @@ fn tile_rg_to_rgba(
     height: u32,
     is_signed: bool,
 ) -> Result<Vec<u8>, Error> {
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x * blocks_y * 16;
     if data.len() < expected {
         return Err(Error::TruncatedData);

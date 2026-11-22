@@ -170,7 +170,7 @@ mod ceiling_probe {
         let nthreads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let rows_per = (bh + nthreads - 1) / nthreads;
+        let rows_per = bh.div_ceil(nthreads);
         let results: Vec<(i64, i64)> = std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for t in 0..nthreads {

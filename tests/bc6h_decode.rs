@@ -28,8 +28,8 @@ fn random_payload(len: usize, seed: u64) -> Vec<u8> {
 /// Oracle: decode a full slice block-by-block with direct bcdec calls,
 /// clamped copy for NPOT edges, RGB -> RGBA (A = 1.0).
 fn oracle_slice(data: &[u8], w: usize, h: usize, signed: bool) -> Vec<f32> {
-    let bx = (w + 3) / 4;
-    let by = (h + 3) / 4;
+    let bx = w.div_ceil(4);
+    let by = h.div_ceil(4);
     let mut out = vec![0f32; w * h * 4];
     let mut scratch = [0f32; 4 * 4 * 3];
     for yb in 0..by {
