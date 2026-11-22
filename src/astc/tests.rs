@@ -263,3 +263,34 @@ fn fast_kernel_equals_reference() {
         }
     }
 }
+
+#[test]
+fn inspect_block_reports_fields() {
+    let mut void = [0u8; 16];
+    void[0] = 0xFC;
+    void[1] = 0xFD;
+    for b in &mut void[2..8] {
+        *b = 0xFF;
+    }
+    void[8] = 0x34;
+    void[9] = 0x12;
+    let i = inspect_block(&void, AstcFootprint::B6X6);
+    assert_eq!(i.kind, AstcBlockKind::VoidExtentLdr);
+    assert_eq!(i.void_color[0], 0x1234);
+    let i = inspect_block(&[0u8; 16], AstcFootprint::B4X4);
+    assert_eq!(i.kind, AstcBlockKind::Illegal(IllegalReason::ReservedBlockMode));
+    // A legal block from the generator: fields agree with the parser.
+    let fp = AstcFootprint::B8X5;
+    let legal = testgen::legal_modes(fp);
+    let mut rng = Rng::new(9);
+    for _ in 0..200 {
+        let b = testgen::mixed(&mut rng, fp, &legal);
+        let i = inspect_block(&b, fp);
+        let s = parse::parse(&b, fp);
+        if s.kind == parse::BlockKind::Normal {
+            assert_eq!(i.weight_grid, s.grid);
+            assert_eq!(i.partitions, s.partitions);
+            assert!(i.weight_levels >= 2 && i.color_levels >= 6);
+        }
+    }
+}

@@ -131,3 +131,65 @@ pub mod internals {
     pub use super::quant::{COLOR_UNQUANT, WEIGHT_UNQUANT};
     pub use super::testgen;
 }
+
+/// What kind of block an ASTC block is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AstcBlockKind {
+    /// A weight-grid block.
+    Normal,
+    /// Void-extent block with a UNORM16 colour.
+    VoidExtentLdr,
+    /// Void-extent block with an FP16 colour.
+    VoidExtentHdr,
+    /// An illegal encoding (decodes to the error colour).
+    Illegal(IllegalReason),
+}
+
+/// Parsed fields of one block, for tools and tests ([`inspect_block`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AstcBlockInfo {
+    pub kind: AstcBlockKind,
+    /// The raw 11-bit block mode.
+    pub block_mode: u16,
+    /// Weight grid width, height, depth (0 for non-normal blocks).
+    pub weight_grid: [u8; 3],
+    /// Levels of the weight range (2..=32) and of the colour range (6..=256).
+    pub weight_levels: u16,
+    pub color_levels: u16,
+    pub partitions: u8,
+    /// 10-bit partition pattern index (0 for one partition).
+    pub partition_seed: u16,
+    /// Colour endpoint mode per partition (only the first `partitions` are meaningful).
+    pub endpoint_modes: [u8; 4],
+    pub dual_plane: bool,
+    /// The channel on the second weight plane (meaningful when `dual_plane`).
+    pub dual_plane_channel: u8,
+    /// Void-extent colour (UNORM16 or FP16 bits); zero otherwise.
+    pub void_color: [u16; 4],
+}
+
+/// Parse one block's fields without decoding it. Total: any 16 bytes.
+pub fn inspect_block(block: &[u8; 16], fp: AstcFootprint) -> AstcBlockInfo {
+    let s = parse::parse(block, fp);
+    let normal = s.kind == parse::BlockKind::Normal;
+    AstcBlockInfo {
+        kind: match s.kind {
+            parse::BlockKind::Normal => AstcBlockKind::Normal,
+            parse::BlockKind::VoidLdr => AstcBlockKind::VoidExtentLdr,
+            parse::BlockKind::VoidHdr => AstcBlockKind::VoidExtentHdr,
+            parse::BlockKind::Illegal(r) => AstcBlockKind::Illegal(r),
+        },
+        block_mode: s.mode,
+        weight_grid: s.grid,
+        weight_levels: if normal { ise::LEVELS[s.weight_range as usize] } else { 0 },
+        color_levels: if normal { ise::LEVELS[s.color_range as usize] } else { 0 },
+        partitions: s.partitions,
+        partition_seed: if s.partitions > 1 { s.partition_seed } else { 0 },
+        endpoint_modes: s.cem,
+        dual_plane: s.dual_plane,
+        dual_plane_channel: s.plane2_component,
+        void_color: s.void_color,
+    }
+}
