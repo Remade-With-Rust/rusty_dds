@@ -9,11 +9,21 @@ description = "rusty_dds ASTC decode vs astc-decode 0.3.1 and texture2ddecoder 0
 [workspace]
 
 [dependencies]
-rusty_dds = { path = "../..", default-features = false, features = ["decode", "astc", "simd"] }
+rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "simd"] }
 astc-decode = "=0.3.1"
 texture2ddecoder = "=0.1.2"
+png = "0.17"
 # House rule: every bench binary runs under rusty_alloc (the shipping allocator).
 rusty_alloc-api = "=2.5.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 debug = 1
+
+[features]
+# Dev-only: RUSTY_DDS_ASTC_* search-limit overrides (rusty_dds `tuning`).
+tuning = ["rusty_dds/tuning"]
+# Dev-only: expose the decoder stages for parse-only timing.
+internals = ["rusty_dds/__astc_internals"]

@@ -261,3 +261,153 @@ mod tests {
         assert_eq!(sequence_bits(18, 20), 144);
     }
 }
+
+// ------------------------------------------------------------------ encode --
+
+const fn build_trit_inverse() -> [u8; 243] {
+    // For each 5-trit tuple (t0 + 3 t1 + 9 t2 + ...), the smallest packed T
+    // that decodes to it. The smallest choice keeps the bits of a final
+    // partial block that are never written at zero (tested below).
+    let mut inv = [0u8; 243];
+    let mut seen = [false; 243];
+    let mut t = 0;
+    while t < 256 {
+        let d = unpack_trits(t as u32);
+        let k = d[0] as usize + 3 * d[1] as usize + 9 * d[2] as usize + 27 * d[3] as usize + 81 * d[4] as usize;
+        if !seen[k] {
+            seen[k] = true;
+            inv[k] = t as u8;
+        }
+        t += 1;
+    }
+    inv
+}
+
+const fn build_quint_inverse() -> [u8; 125] {
+    let mut inv = [0u8; 125];
+    let mut seen = [false; 125];
+    let mut q = 0;
+    while q < 128 {
+        let d = unpack_quints(q as u32);
+        let k = d[0] as usize + 5 * d[1] as usize + 25 * d[2] as usize;
+        if !seen[k] {
+            seen[k] = true;
+            inv[k] = q as u8;
+        }
+        q += 1;
+    }
+    inv
+}
+
+static TRIT_INV: [u8; 243] = build_trit_inverse();
+static QUINT_INV: [u8; 125] = build_quint_inverse();
+
+#[inline]
+fn put_bits(dst: &mut u128, pos: u32, n: u32, v: u32) {
+    if n == 0 || pos >= 128 {
+        return;
+    }
+    let m = ((1u128 << n) - 1) << pos;
+    *dst = (*dst & !m) | (((v as u128) << pos) & m);
+}
+
+/// Encode `vals` (raw ISE values of range `range`) into `dst` from bit
+/// `start`, LSB first: the exact inverse of [`decode`].
+pub fn encode(vals: &[u8], range: usize, dst: &mut u128, start: u32) {
+    let (bits, trits, quints) = FORM[range];
+    let bits = bits as u32;
+    let mask = (1u32 << bits) - 1;
+    let mut pos = start;
+    if trits != 0 {
+        const TB: [(u32, u32); 5] = [(2, 0), (2, 2), (1, 4), (2, 5), (1, 7)];
+        for chunk in vals.chunks(5) {
+            let mut k = 0usize;
+            let mut mul = 1usize;
+            for &v in chunk {
+                k += (v as usize >> bits) * mul;
+                mul *= 3;
+            }
+            let t = TRIT_INV[k] as u32;
+            for (j, &v) in chunk.iter().enumerate() {
+                put_bits(dst, pos, bits, v as u32 & mask);
+                pos += bits;
+                let (tb, sh) = TB[j];
+                put_bits(dst, pos, tb, (t >> sh) & ((1 << tb) - 1));
+                pos += tb;
+            }
+        }
+    } else if quints != 0 {
+        const QB: [(u32, u32); 3] = [(3, 0), (2, 3), (2, 5)];
+        for chunk in vals.chunks(3) {
+            let mut k = 0usize;
+            let mut mul = 1usize;
+            for &v in chunk {
+                k += (v as usize >> bits) * mul;
+                mul *= 5;
+            }
+            let q = QUINT_INV[k] as u32;
+            for (j, &v) in chunk.iter().enumerate() {
+                put_bits(dst, pos, bits, v as u32 & mask);
+                pos += bits;
+                let (qb, sh) = QB[j];
+                put_bits(dst, pos, qb, (q >> sh) & ((1 << qb) - 1));
+                pos += qb;
+            }
+        }
+    } else {
+        for &v in vals {
+            put_bits(dst, pos, bits, v as u32);
+            pos += bits;
+        }
+    }
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+
+    #[test]
+    fn partial_blocks_leave_unwritten_bits_zero() {
+        // A final block of k < 5 trits writes 2, 4, 5, 7 T bits; the chosen T
+        // for a tuple whose missing digits are zero must fit in those bits.
+        for (k, covered) in [(1usize, 2u32), (2, 4), (3, 5), (4, 7)] {
+            for code in 0..3usize.pow(k as u32) {
+                assert!((TRIT_INV[code] as u32) < (1 << covered), "trits k={k} code={code}");
+            }
+        }
+        for (k, covered) in [(1usize, 3u32), (2, 5)] {
+            for code in 0..5usize.pow(k as u32) {
+                assert!((QUINT_INV[code] as u32) < (1 << covered), "quints k={k} code={code}");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_decode_round_trip_every_range_and_length() {
+        let mut x: u32 = 1;
+        for r in 0..RANGE_COUNT {
+            for n in 1..=64usize {
+                if sequence_bits(n as u32, r) > 128 {
+                    continue;
+                }
+                let vals: Vec<u8> = (0..n)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 17;
+                        x ^= x << 5;
+                        (x % LEVELS[r] as u32) as u8
+                    })
+                    .collect();
+                let mut b = 0u128;
+                encode(&vals, r, &mut b, 0);
+                let used = sequence_bits(n as u32, r);
+                if used < 128 {
+                    assert_eq!(b >> used, 0, "bits past the sequence, range {r} n {n}");
+                }
+                let mut out = vec![0u8; n];
+                decode(b, 0, r, &mut out);
+                assert_eq!(out, vals, "range {r} n {n}");
+            }
+        }
+    }
+}

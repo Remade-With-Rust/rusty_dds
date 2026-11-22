@@ -1012,6 +1012,571 @@ fn cmd_dds(tmp: &str) -> bool {
     ok
 }
 
+fn load_rgba(path: &str) -> (u32, u32, Vec<u8>) {
+    let dec = png::Decoder::new(std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}")));
+    let mut r = dec.read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).unwrap();
+    let px = (info.width * info.height) as usize;
+    let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => buf[..px * 4].to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => buf[..px * 3].chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        (png::ColorType::Grayscale, png::BitDepth::Eight) => buf[..px].iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => buf[..px * 2].chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        other => panic!("{path}: png {other:?}"),
+    };
+    (info.width, info.height, rgba)
+}
+
+/// A 2048x2048 natural-content test texture: source images tiled row-major
+/// (each cropped to its tile), for the claim-grade decode bench (section 2.4
+/// asks for 2048x2048 inputs; the Kodak set is 768x512).
+///   astch mosaic <out.png> <in.png>...
+fn cmd_mosaic(args: &[String]) -> bool {
+    const N: usize = 2048;
+    let srcs: Vec<(u32, u32, Vec<u8>)> = args[1..].iter().map(|p| load_rgba(p)).collect();
+    let mut out = vec![0u8; N * N * 4];
+    let (tw, th) = (srcs[0].0 as usize, srcs[0].1 as usize);
+    let cols = N.div_ceil(tw);
+    for y in 0..N {
+        for x in 0..N {
+            let (s, sx, sy) = (&srcs[((y / th) * cols + x / tw) % srcs.len()], x % tw, y % th);
+            let (sw, sh) = (s.0 as usize, s.1 as usize);
+            let i = ((sy % sh) * sw + (sx % sw)) * 4;
+            out[(y * N + x) * 4..(y * N + x) * 4 + 4].copy_from_slice(&s.2[i..i + 4]);
+        }
+    }
+    let f = std::fs::File::create(&args[0]).unwrap();
+    let mut e = png::Encoder::new(std::io::BufWriter::new(f), N as u32, N as u32);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&out).unwrap();
+    true
+}
+
+/// PSNR over RGB for opaque sources, over RGBA otherwise.
+fn psnr_img(src: &[u8], dec: &[u8]) -> f64 {
+    let opaque = src.chunks_exact(4).all(|p| p[3] == 255);
+    let chans = if opaque { 3 } else { 4 };
+    let mut se = 0f64;
+    let mut n = 0f64;
+    for (a, b) in src.chunks_exact(4).zip(dec.chunks_exact(4)) {
+        for c in 0..chans {
+            let d = a[c] as f64 - b[c] as f64;
+            se += d * d;
+            n += 1.0;
+        }
+    }
+    if se == 0.0 {
+        return 99.0;
+    }
+    10.0 * (255.0f64 * 255.0 * n / se).log10()
+}
+
+/// Quality: ours vs astcenc 5.7.1 at a preset, per image and footprint, on
+/// pixels decoded by our decoder (bit-exact with astcenc's), plus EC1 on
+/// every block we emit (astcenc decodes it identically in all six cells).
+///   astch quality <preset> <fps> <profile ldr|srgb> "<astcenc extra args>" <png>...
+fn cmd_quality(args: &[String]) -> bool {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let fps: Vec<AstcFootprint> = args[1].split(',').map(fp_parse).collect();
+    let srgb = args[2] == "srgb";
+    let prof = if srgb { AstcProfile::LdrSrgb } else { AstcProfile::Ldr };
+    let extra: Vec<&str> = args[3].split_whitespace().collect();
+    let tmp = "/root/astcws/out/qtmp";
+    std::fs::create_dir_all(tmp).unwrap();
+    let mut ok = true;
+    let mut sums: std::collections::BTreeMap<AstcFootprint, (f64, f64, f64, usize, f64, f64)> = Default::default();
+    println!("| image | footprint | ours dB | astcenc dB | gap dB | ours MT/s | EC1 bad |");
+    println!("|---|---|---|---|---|---|---|");
+    for path in &args[4..] {
+        let (w, h, img) = load_rgba(path);
+        let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+        for &fp in &fps {
+            let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(preset);
+            let t = std::time::Instant::now();
+            let ours = astc::encode_rgba8(&img, w, h, &opts).unwrap();
+            let secs = t.elapsed().as_secs_f64();
+            let mut dec = vec![0u8; img.len()];
+            astc::decode_rgba8_into(&ours, w, h, 1, fp, prof, &mut dec).unwrap();
+            let p_ours = psnr_img(&img, &dec);
+            // EC1: every emitted block, all six cells against the oracle.
+            let blocks: Vec<[u8; 16]> = ours.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+            let (_, bad) = cells_check(fp, &blocks);
+            let ec1: u64 = bad.iter().sum();
+            let illegal = blocks.iter().filter(|b| matches!(ai::parse(b, fp).kind, ai::BlockKind::Illegal(_))).count();
+            // astcenc on the same source.
+            let out = format!("{tmp}/{name}_{fp}.astc");
+            let _ = std::fs::remove_file(&out);
+            let fps_s = fp.to_string();
+            let mut a: Vec<&str> = vec![if srgb { "-cs" } else { "-cl" }, path, &out, &fps_s];
+            let pre = format!("-{}", args[0]);
+            a.push(&pre);
+            a.extend(["-j", "8", "-silent"]);
+            a.extend(extra.iter().copied());
+            let ok_enc = run_astcenc(&a);
+            let p_ref = if ok_enc {
+                let d = std::fs::read(&out).unwrap();
+                let f = astc::AstcFile::parse(&d).unwrap();
+                let mut dec2 = vec![0u8; img.len()];
+                astc::decode_rgba8_into(f.data, w, h, 1, fp, prof, &mut dec2).unwrap();
+                psnr_img(&img, &dec2)
+            } else {
+                f64::NAN
+            };
+            let mts = (w * h) as f64 / secs / 1e6;
+            println!(
+                "| {name} | {fp} | {p_ours:.3} | {p_ref:.3} | {:+.3} | {mts:.2} | {ec1}{} |",
+                p_ours - p_ref,
+                if illegal > 0 { format!(" ({illegal} illegal)") } else { String::new() }
+            );
+            ok &= ec1 == 0 && illegal == 0;
+            let e = sums.entry(fp).or_insert((0.0, 0.0, 0.0, 0, f64::MAX, 0.0));
+            e.0 += p_ours;
+            e.1 += p_ref;
+            e.2 += mts;
+            e.3 += 1;
+            e.4 = e.4.min(p_ours - p_ref);
+            e.5 += secs;
+        }
+    }
+    println!();
+    println!("| footprint | images | ours mean dB | astcenc mean dB | mean gap | worst gap | ours MT/s (mean) |");
+    println!("|---|---|---|---|---|---|---|");
+    for (fp, (a, b, m, n, worst, _)) in &sums {
+        let n = *n as f64;
+        println!("| {fp} | {} | {:.3} | {:.3} | {:+.3} | {:+.3} | {:.2} |", n as usize, a / n, b / n, (a - b) / n, worst, m / n);
+    }
+    ok
+}
+
+/// Decision parity: for the worst blocks of our encode, print our choice and
+/// astcenc's (from its .astc of the same image), with per-block SSE.
+///   astch blockdbg <png> <fp> <preset> <astcenc .astc> [n]
+fn cmd_blockdbg(args: &[String]) -> bool {
+    let (w, h, img) = load_rgba(&args[0]);
+    let fp = fp_parse(&args[1]);
+    let preset = match args[2].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        _ => astc::AstcPreset::Medium,
+    };
+    let theirs = std::fs::read(&args[3]).unwrap();
+    let theirs = astc::AstcFile::parse(&theirs).unwrap().data.to_vec();
+    let n: usize = args.get(4).map(|s| s.parse().unwrap()).unwrap_or(8);
+    let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+    let ours = astc::encode_rgba8(&img, w, h, &opts).unwrap();
+    let (nbx, nby, _) = fp.block_counts(w, h, 1);
+    let tc = fp.texels() as usize;
+    let mut rows = Vec::new();
+    let mut t8 = vec![[0u8; 4]; tc];
+    for by in 0..nby {
+        for bx in 0..nbx {
+            let k = (by * nbx + bx) as usize;
+            let mut se = [0f64; 2];
+            for (j, data) in [&ours, &theirs].iter().enumerate() {
+                let b: [u8; 16] = data[k * 16..k * 16 + 16].try_into().unwrap();
+                astc::decode_block_rgba8(&b, fp, AstcProfile::Ldr, &mut t8);
+                for ty in 0..fp.height() {
+                    for tx in 0..fp.width() {
+                        let x = (bx * fp.width() + tx).min(w - 1);
+                        let y = (by * fp.height() + ty).min(h - 1);
+                        let s = ((y * w + x) * 4) as usize;
+                        let p = t8[(ty * fp.width() + tx) as usize];
+                        for c in 0..3 {
+                            let d = p[c] as f64 - img[s + c] as f64;
+                            se[j] += d * d;
+                        }
+                    }
+                }
+            }
+            rows.push((se[0] - se[1], k, se));
+        }
+    }
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let desc = |b: &[u8; 16]| -> String {
+        let s = ai::parse(b, fp);
+        format!(
+            "{:?} grid {}x{} wr {} cr {} parts {} cem {:?} dual {} p2 {}",
+            s.kind, s.grid[0], s.grid[1], s.weight_range, s.color_range, s.partitions,
+            &s.cem[..s.partitions.max(1) as usize], s.dual_plane, s.plane2_component
+        )
+    };
+    let tot: (f64, f64) = rows.iter().fold((0.0, 0.0), |a, r| (a.0 + r.2[0], a.1 + r.2[1]));
+    println!("total SSE ours {:.0} astcenc {:.0}", tot.0, tot.1);
+    for r in rows.iter().take(n) {
+        let k = r.1;
+        let ob: [u8; 16] = ours[k * 16..k * 16 + 16].try_into().unwrap();
+        let tb: [u8; 16] = theirs[k * 16..k * 16 + 16].try_into().unwrap();
+        println!("block {k}: SSE ours {:.0} astcenc {:.0}", r.2[0], r.2[1]);
+        println!("   ours    {}", desc(&ob));
+        println!("   astcenc {}", desc(&tb));
+        let s = ai::parse(&ob, fp);
+        println!("   ours colour values {:?}", &s.color_values[..s.color_count as usize]);
+        let s = ai::parse(&tb, fp);
+        println!("   astc colour values {:?}", &s.color_values[..s.color_count as usize]);
+    }
+    true
+}
+
+/// Run astcenc on every image at a float quality, single-threaded; returns
+/// (mean PSNR on our decode, total seconds of astcenc's own coding time).
+/// CPU time of this thread, seconds.
+fn thread_cpu() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes one timespec through a valid pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+}
+
+/// User + system CPU time of all waited-for children, seconds.
+fn children_cpu() -> f64 {
+    // SAFETY: getrusage fills one rusage through a valid pointer.
+    let mut ru: libc::rusage = unsafe { core::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut ru) };
+    let tv = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
+/// astcenc at `-quality q` over the images: (mean PSNR, coding seconds).
+/// Coding seconds are CPU time: the child's CPU time times astcenc's own
+/// coding share of its wall time (its "Coding time" over "Total time"), which
+/// removes PNG I/O and is immune to preemption by other processes.
+fn astcenc_at(bin: &str, q: f32, fp: AstcFootprint, imgs: &[(String, u32, u32, Vec<u8>)], tmp: &str) -> (f64, f64) {
+    let mut psnr = 0f64;
+    let mut secs = 0f64;
+    for (path, w, h, img) in imgs {
+        let out = format!("{tmp}/es1.astc");
+        let _ = std::fs::remove_file(&out);
+        let qs = format!("{q}");
+        let fps = fp.to_string();
+        let c0 = children_cpu();
+        let o = std::process::Command::new(bin)
+            .args(["-cl", path, &out, &fps, &qs, "-j", "1"])
+            .output()
+            .expect("astcenc");
+        let cpu = children_cpu() - c0;
+        // astcenc prints "Total time: X s" and "Coding time: X s" (wall).
+        let text = String::from_utf8_lossy(&o.stdout);
+        let field = |name: &str| {
+            text.lines()
+                .find(|l| l.trim_start().starts_with(name))
+                .and_then(|l| l.split_whitespace().nth(2))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(f64::NAN)
+        };
+        let (total, coding) = (field("Total time"), field("Coding time"));
+        secs += cpu * (coding / total);
+        let d = std::fs::read(&out).unwrap();
+        let f = astc::AstcFile::parse(&d).unwrap();
+        let mut dec = vec![0u8; img.len()];
+        astc::decode_rgba8_into(f.data, *w, *h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        psnr += psnr_img(img, &dec);
+    }
+    (psnr / imgs.len() as f64, secs)
+}
+
+/// ES1: equal-quality encode speed. For each footprint, our preset's mean
+/// PSNR and single-thread rate; astcenc's float -quality bisected until its
+/// mean PSNR matches ours within 0.05 dB; then astcenc-none and astcenc-avx2
+/// single-thread rates at that quality.
+///   astch es1 <preset> <fps> <png>...
+const ES1_ROUNDS: usize = 4;
+
+fn cmd_es1(args: &[String]) -> bool {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let fps: Vec<AstcFootprint> = args[1].split(',').map(fp_parse).collect();
+    let imgs: Vec<(String, u32, u32, Vec<u8>)> = args[2..]
+        .iter()
+        .map(|p| {
+            let (w, h, img) = load_rgba(p);
+            (p.clone(), w, h, img)
+        })
+        .collect();
+    let tmp = "/root/astcws/out/es1tmp";
+    std::fs::create_dir_all(tmp).unwrap();
+    let none = "/root/astcws/rel571/inst/bin/astcenc-none";
+    let avx2 = "/root/astcws/rel571/inst/bin/astcenc-avx2";
+    let px: f64 = imgs.iter().map(|i| (i.1 * i.2) as f64).sum();
+    println!("preset {:?}; {} images, {:.2} Mpx; single thread; CPU time (ours: thread clock; astcenc: child CPU x its coding share of wall); {ES1_ROUNDS} ABBA rounds, minimum per arm", preset, imgs.len(), px / 1e6);
+    println!("| footprint | ours dB | ours MT/s | astcenc -quality | astcenc dB | none MT/s | avx2 MT/s | ours / none | ours / avx2 |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for &fp in &fps {
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+        let mut p_ours = 0f64;
+        for (_, w, h, img) in &imgs {
+            let data = astc::encode_rgba8(img, *w, *h, &opts).unwrap();
+            let mut dec = vec![0u8; img.len()];
+            astc::decode_rgba8_into(&data, *w, *h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
+            p_ours += psnr_img(img, &dec);
+        }
+        p_ours /= imgs.len() as f64;
+        // Bisect astcenc quality (PSNR is monotone enough in quality for this).
+        let (mut lo, mut hi) = (0f32, 100f32);
+        let mut q = 50f32;
+        let mut p_ref = 0f64;
+        for _ in 0..12 {
+            q = (lo + hi) / 2.0;
+            p_ref = astcenc_at(none, q, fp, &imgs, tmp).0;
+            if (p_ref - p_ours).abs() <= 0.05 {
+                break;
+            }
+            if p_ref < p_ours {
+                lo = q;
+            } else {
+                hi = q;
+            }
+        }
+        // Timing: ABBA rounds (order reversed every round), minimum per arm,
+        // so a burst of background load hits one sample, not one arm.
+        let ours_once = || {
+            let t = thread_cpu();
+            for (_, w, h, img) in &imgs {
+                std::hint::black_box(astc::encode_rgba8(img, *w, *h, &opts).unwrap());
+            }
+            thread_cpu() - t
+        };
+        let (mut t_ours, mut t_none, mut t_avx2) = (f64::MAX, f64::MAX, f64::MAX);
+        for r in 0..ES1_ROUNDS {
+            for arm in 0..3 {
+                let a = if r % 2 == 0 { arm } else { 2 - arm };
+                match a {
+                    0 => t_ours = t_ours.min(ours_once()),
+                    1 => t_none = t_none.min(astcenc_at(none, q, fp, &imgs, tmp).1),
+                    _ => t_avx2 = t_avx2.min(astcenc_at(avx2, q, fp, &imgs, tmp).1),
+                }
+            }
+        }
+        let (r_ours, r_none, r_avx2) = (px / t_ours / 1e6, px / t_none / 1e6, px / t_avx2 / 1e6);
+        println!(
+            "| {fp} | {p_ours:.3} | {r_ours:.3} | {q:.2} | {p_ref:.3} | {r_none:.3} | {r_avx2:.3} | {:.2} | {:.2} |",
+            r_ours / r_none,
+            r_ours / r_avx2
+        );
+    }
+    true
+}
+
+/// C4b: write KTX 2.0 variants with our writer for `ktx validate`.
+///   astch ktx2out <png> <outdir>
+fn cmd_ktx2out(args: &[String]) -> bool {
+    use rusty_dds::astc::ktx::VkAstcKind;
+    let (w, h, img) = load_rgba(&args[0]);
+    let dir = &args[1];
+    std::fs::create_dir_all(dir).unwrap();
+    // Box-filtered mips of the source for a real chain.
+    let mut mips = vec![(w, h, img.clone())];
+    while mips.last().unwrap().0 > 1 || mips.last().unwrap().1 > 1 {
+        let (pw, ph, ref p) = *mips.last().unwrap();
+        let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+        let mut n = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let mut s = 0u32;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let sx = (2 * x + dx).min(pw - 1);
+                        let sy = (2 * y + dy).min(ph - 1);
+                        s += p[((sy * pw + sx) * 4 + c) as usize] as u32;
+                    }
+                    n[((y * nw + x) * 4 + c) as usize] = ((s + 2) / 4) as u8;
+                }
+            }
+        }
+        mips.push((nw, nh, n));
+    }
+    let mut ok = true;
+    for (fp, kind, name, nlev) in [
+        (AstcFootprint::B6X6, VkAstcKind::Unorm, "unorm_6x6_mips", mips.len()),
+        (AstcFootprint::B8X5, VkAstcKind::Srgb, "srgb_8x5", 1),
+        (AstcFootprint::B4X4, VkAstcKind::Sfloat, "sfloat_4x4", 1),
+        (AstcFootprint::B12X12, VkAstcKind::Srgb, "srgb_12x12_mips", mips.len()),
+    ] {
+        let prof = if kind == VkAstcKind::Srgb { AstcProfile::LdrSrgb } else { AstcProfile::Ldr };
+        let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Fastest);
+        let levels: Vec<Vec<u8>> = mips[..nlev].iter().map(|(mw, mh, p)| astc::encode_rgba8(p, *mw, *mh, &opts).unwrap()).collect();
+        let refs: Vec<&[u8]> = levels.iter().map(|v| &v[..]).collect();
+        let mut out = Vec::new();
+        astc::Ktx2View::write(&mut out, fp, w, h, 1, kind, &refs).unwrap();
+        let path = format!("{dir}/{name}.ktx2");
+        std::fs::write(&path, &out).unwrap();
+        ok &= astc::Ktx2View::parse(&out).is_ok();
+        println!("wrote {path}");
+    }
+    // A 3D texture: 6 slices of the same image region, 4x4x4 footprint.
+    let fp = AstcFootprint::B4X4X4;
+    let (sw, sh, sd) = (32u32, 32u32, 6u32);
+    let mut payload = Vec::new();
+    for bz in 0..2u32 {
+        for by in 0..8u32 {
+            for bx in 0..8u32 {
+                // Void-extent blocks carrying a colour from the image: legal 3D content.
+                let p = &img[(((by * 4 * w) + bx * 4) * 4) as usize..][..4];
+                let mut b = [0u8; 16];
+                b[0] = 0xFC;
+                b[1] = 0xFD;
+                for v in &mut b[2..8] {
+                    *v = 0xFF;
+                }
+                for c in 0..4 {
+                    let u = p[c] as u16 * 257 ^ (bz as u16 * 0x101);
+                    b[8 + 2 * c] = u as u8;
+                    b[9 + 2 * c] = (u >> 8) as u8;
+                }
+                payload.extend_from_slice(&b);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    astc::Ktx2View::write(&mut out, fp, sw, sh, sd, VkAstcKind::Unorm, &[&payload]).unwrap();
+    std::fs::write(format!("{dir}/unorm_4x4x4_3d.ktx2"), &out).unwrap();
+    println!("wrote {dir}/unorm_4x4x4_3d.ktx2");
+    ok
+}
+
+/// Radiance .hdr (RGBE, new-style RLE or flat) to RGBA f32.
+fn load_hdr(path: &str) -> (u32, u32, Vec<f32>) {
+    let d = std::fs::read(path).unwrap();
+    let mut pos = 0;
+    let mut line = || {
+        let s = pos;
+        while d[pos] != b'\n' {
+            pos += 1;
+        }
+        pos += 1;
+        String::from_utf8_lossy(&d[s..pos - 1]).into_owned()
+    };
+    loop {
+        if line().is_empty() {
+            break;
+        }
+    }
+    let res = line();
+    let parts: Vec<&str> = res.split_whitespace().collect();
+    let (h, w): (u32, u32) = (parts[1].parse().unwrap(), parts[3].parse().unwrap());
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let mut scan = vec![[0u8; 4]; w as usize];
+    for _ in 0..h {
+        if d[pos] == 2 && d[pos + 1] == 2 && w >= 8 && w < 32768 {
+            pos += 4;
+            for c in 0..4 {
+                let mut x = 0usize;
+                while x < w as usize {
+                    let n = d[pos] as usize;
+                    pos += 1;
+                    if n > 128 {
+                        let v = d[pos];
+                        pos += 1;
+                        for _ in 0..n - 128 {
+                            scan[x][c] = v;
+                            x += 1;
+                        }
+                    } else {
+                        for _ in 0..n {
+                            scan[x][c] = d[pos];
+                            pos += 1;
+                            x += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for px in scan.iter_mut() {
+                px.copy_from_slice(&d[pos..pos + 4]);
+                pos += 4;
+            }
+        }
+        for px in &scan {
+            let f = if px[3] == 0 { 0.0 } else { 2f32.powi(px[3] as i32 - 136) };
+            out.extend_from_slice(&[px[0] as f32 * f, px[1] as f32 * f, px[2] as f32 * f, 1.0]);
+        }
+    }
+    (w, h, out)
+}
+
+fn log_rmse(src: &[f32], dec: &[f32]) -> f64 {
+    let mut se = 0f64;
+    let mut n = 0f64;
+    for (a, b) in src.chunks_exact(4).zip(dec.chunks_exact(4)) {
+        for c in 0..3 {
+            let x = (a[c].max(1e-4) as f64).log2() - (b[c].max(1e-4) as f64).log2();
+            se += x * x;
+            n += 1.0;
+        }
+    }
+    (se / n).sqrt()
+}
+
+/// EC1 for HDR and 3D encodes: every emitted block decodes identically in
+/// astcenc (six cells), and HDR quality against astcenc -ch / -cH (log2 RMSE
+/// over RGB, on our decode, which is bit-exact with astcenc's).
+///   astch ec1x <hdr files...>
+fn cmd_ec1x(args: &[String]) -> bool {
+    let tmp = "/root/astcws/out/ec1x";
+    std::fs::create_dir_all(tmp).unwrap();
+    let mut ok = true;
+    println!("| image | footprint | profile | preset | blocks | EC1 bad | ours log2 RMSE | astcenc log2 RMSE |");
+    println!("|---|---|---|---|---|---|---|---|");
+    for path in args {
+        let (w, h, px) = load_hdr(path);
+        let name = std::path::Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+        for fp in [AstcFootprint::B4X4, AstcFootprint::B6X6, AstcFootprint::B8X8] {
+            for (prof, flag) in [(AstcProfile::HdrRgbLdrA, "-ch"), (AstcProfile::Hdr, "-cH")] {
+                let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Medium);
+                let data = astc::encode_rgba_f32(&px, w, h, &opts).unwrap();
+                let blocks: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+                let (_, bad) = cells_check(fp, &blocks);
+                let ec1: u64 = bad.iter().sum();
+                ok &= ec1 == 0;
+                let mut dec = vec![0f32; px.len()];
+                astc::decode_rgba_f32_into(&data, w, h, 1, fp, prof, &mut dec).unwrap();
+                let ours = log_rmse(&px, &dec);
+                let out = format!("{tmp}/{name}_{fp}.astc");
+                let _ = std::fs::remove_file(&out);
+                let fps = fp.to_string();
+                let theirs = if run_astcenc(&[flag, path, &out, &fps, "-medium", "-j", "8", "-silent"]) {
+                    let d = std::fs::read(&out).unwrap();
+                    let f = astc::AstcFile::parse(&d).unwrap();
+                    let mut dec2 = vec![0f32; px.len()];
+                    astc::decode_rgba_f32_into(f.data, w, h, 1, fp, prof, &mut dec2).unwrap();
+                    log_rmse(&px, &dec2)
+                } else {
+                    f64::NAN
+                };
+                println!("| {name} | {fp} | {prof:?} | Medium | {} | {ec1} | {ours:.4} | {theirs:.4} |", blocks.len());
+            }
+        }
+    }
+    // 3D: six 256x256 slices, every 3D footprint, EC1.
+    let slices: Vec<(u32, u32, Vec<u8>)> = (0..6).map(|i| load_rgba(&format!("/root/astcws/corpus/slices/ldr_{i}.png"))).collect();
+    let (w, h) = (slices[0].0, slices[0].1);
+    let vol: Vec<u8> = slices.iter().flat_map(|s| s.2.iter().copied()).collect();
+    for &fp in AstcFootprint::ALL_3D {
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(astc::AstcPreset::Fast);
+        let data = astc::encode_volume_rgba8(&vol, w, h, 6, &opts).unwrap();
+        let blocks: Vec<[u8; 16]> = data.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+        let (_, bad) = cells_check(fp, &blocks);
+        let ec1: u64 = bad.iter().sum();
+        ok &= ec1 == 0;
+        let mut dec = vec![0u8; vol.len()];
+        astc::decode_rgba8_into(&data, w, h, 6, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        println!("| volume 256x256x6 | {fp} | Ldr | Fast | {} | {ec1} | PSNR {:.3} dB | |", blocks.len(), psnr_img(&vol, &dec));
+    }
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -1037,6 +1602,12 @@ fn main() {
         }
         Some("containers") => cmd_containers(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
         Some("dds") => cmd_dds(args.get(2).map(|s| s.as_str()).unwrap_or("/root/astcws/out/ctmp")),
+        Some("quality") => cmd_quality(&args[2..]),
+        Some("blockdbg") => cmd_blockdbg(&args[2..]),
+        Some("es1") => cmd_es1(&args[2..]),
+        Some("mosaic") => cmd_mosaic(&args[2..]),
+        Some("ktx2out") => cmd_ktx2out(&args[2..]),
+        Some("ec1x") => cmd_ec1x(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();

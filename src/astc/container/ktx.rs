@@ -391,6 +391,114 @@ impl<'a> Ktx2View<'a> {
     }
 }
 
+impl Ktx2View<'_> {
+    /// Write a KTX 2.0 file (no supercompression) holding one 2D or 3D ASTC
+    /// texture: `levels[i]` is mip level `i`'s payload, one layer, one face.
+    /// The Data Format Descriptor is the basic ASTC descriptor (model
+    /// `KHR_DF_MODEL_ASTC`, BT.709 primaries, linear or sRGB transfer, one
+    /// 128-bit `ASTC_DATA` sample; signed + float qualifiers and bounds
+    /// -1.0..1.0 for `SFLOAT`), and a `KTXwriter` key is recorded. Levels are
+    /// stored smallest first, 16-byte aligned, as the specification orders them.
+    pub fn write<W: std::io::Write>(
+        w: &mut W,
+        footprint: AstcFootprint,
+        width: u32,
+        height: u32,
+        depth: u32,
+        kind: VkAstcKind,
+        levels: &[&[u8]],
+    ) -> Result<(), Error> {
+        if levels.is_empty() || levels.len() > 32 || width == 0 || height == 0 || depth == 0 {
+            return Err(Error::InvalidField("KTX2 needs 1..=32 levels and non-zero size".into()));
+        }
+        for (l, p) in levels.iter().enumerate() {
+            let l = l as u32;
+            if p.len() != surface_len(footprint, mip(width, l), mip(height, l), mip(depth, l))? {
+                return Err(Error::OutOfBounds);
+            }
+        }
+        let n = levels.len();
+        // Data Format Descriptor.
+        let mut dfd: Vec<u32> = Vec::with_capacity(11);
+        dfd.push(44); // dfdTotalSize
+        dfd.push(0); // vendorId KHRONOS (0), descriptorType BASICFORMAT (0)
+        dfd.push(2 | (40 << 16)); // versionNumber 2, descriptorBlockSize 40
+        let transfer = if kind == VkAstcKind::Srgb { KHR_DF_TRANSFER_SRGB } else { 1 };
+        dfd.push(KHR_DF_MODEL_ASTC | (1 << 8) | (transfer << 16)); // model, BT709, transfer, flags 0
+        dfd.push((footprint.width() - 1) | ((footprint.height() - 1) << 8) | ((footprint.depth() - 1) << 16));
+        dfd.push(16); // bytesPlane0
+        dfd.push(0); // bytesPlane4..7
+        let qualifiers = if kind == VkAstcKind::Sfloat { 0xC0u32 } else { 0 };
+        dfd.push((127 << 16) | (qualifiers << 24)); // bitOffset 0, bitLength 127, ASTC_DATA
+        dfd.push(0); // sample position
+        let (lower, upper) = if kind == VkAstcKind::Sfloat {
+            ((-1.0f32).to_bits(), 1.0f32.to_bits())
+        } else {
+            (0, u32::MAX)
+        };
+        dfd.push(lower);
+        dfd.push(upper);
+        // Key/value data: KTXwriter.
+        let kv_key = b"KTXwriter\0rusty_dds\0";
+        let mut kvd = Vec::new();
+        kvd.extend_from_slice(&(kv_key.len() as u32).to_le_bytes());
+        kvd.extend_from_slice(kv_key);
+        while kvd.len() % 4 != 0 {
+            kvd.push(0);
+        }
+        let index_end = 80 + 24 * n;
+        let dfd_off = index_end;
+        let kvd_off = dfd_off + 44;
+        let mut data_off = kvd_off + kvd.len();
+        // Level offsets, smallest level first, each 16-byte aligned.
+        let mut offs = alloc::vec![0usize; n];
+        for l in (0..n).rev() {
+            data_off = (data_off + 15) & !15;
+            offs[l] = data_off;
+            data_off += levels[l].len();
+        }
+        let mut h = Vec::with_capacity(index_end);
+        h.extend_from_slice(&KTX2_ID);
+        for v in [
+            vk_format(footprint, kind),
+            1, // typeSize
+            width,
+            height,
+            if depth > 1 { depth } else { 0 },
+            0, // layerCount
+            1, // faceCount
+            n as u32,
+            0, // supercompressionScheme
+            dfd_off as u32,
+            44,
+            kvd_off as u32,
+            kvd.len() as u32,
+        ] {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        h.extend_from_slice(&0u64.to_le_bytes()); // sgdByteOffset
+        h.extend_from_slice(&0u64.to_le_bytes()); // sgdByteLength
+        for (l, p) in levels.iter().enumerate() {
+            h.extend_from_slice(&(offs[l] as u64).to_le_bytes());
+            h.extend_from_slice(&(p.len() as u64).to_le_bytes());
+            h.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        }
+        for v in &dfd {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        h.extend_from_slice(&kvd);
+        w.write_all(&h)?;
+        let mut pos = h.len();
+        for l in (0..n).rev() {
+            let pad = offs[l] - pos;
+            w.write_all(&[0u8; 16][..pad])?;
+            w.write_all(levels[l])?;
+            pos = offs[l] + levels[l].len();
+        }
+        Ok(())
+    }
+}
+
 /// Rewrite a Zstandard-supercompressed KTX 2.0 file (scheme 2) as an
 /// uncompressed one (scheme 0) that [`Ktx2View::parse`] reads. Each level is
 /// inflated with the pure-Rust `rusty_zstd`, bounded by the size the header
@@ -480,5 +588,37 @@ mod tests {
         assert_eq!(vk_format(AstcFootprint::B4X4, VkAstcKind::Unorm), 157);
         assert_eq!(vk_format(AstcFootprint::B12X12, VkAstcKind::Srgb), 184);
         assert_eq!(gl_internal_format(AstcFootprint::B12X12, true), 0x93DD);
+    }
+
+    #[test]
+    fn ktx2_write_round_trip() {
+        for &(fp, w, h, d, kind) in &[
+            (AstcFootprint::B6X5, 37u32, 21u32, 1u32, VkAstcKind::Unorm),
+            (AstcFootprint::B8X8, 64, 64, 1, VkAstcKind::Srgb),
+            (AstcFootprint::B4X4, 5, 3, 1, VkAstcKind::Sfloat),
+            (AstcFootprint::B4X4X4, 9, 9, 6, VkAstcKind::Unorm),
+        ] {
+            let levels: Vec<Vec<u8>> = (0..3)
+                .map(|l| {
+                    let n = surface_len(fp, mip(w, l), mip(h, l), mip(d, l)).unwrap();
+                    (0..n).map(|i| (i * 7 + l as usize) as u8).collect()
+                })
+                .collect();
+            let refs: Vec<&[u8]> = levels.iter().map(|v| &v[..]).collect();
+            let mut out = Vec::new();
+            Ktx2View::write(&mut out, fp, w, h, d, kind, &refs).unwrap();
+            let v = Ktx2View::parse(&out).unwrap();
+            assert_eq!((v.footprint, v.width, v.height, v.depth, v.levels), (fp, w, h, d, 3));
+            assert_eq!(v.srgb, kind == VkAstcKind::Srgb);
+            assert_eq!(v.hdr, kind == VkAstcKind::Sfloat);
+            for l in 0..3 {
+                assert_eq!(v.astc_surface(l, 0, 0).unwrap().data, &levels[l as usize][..]);
+            }
+            // The DFD alone (vkFormat cleared) identifies the same format.
+            let mut undef = out.clone();
+            undef[12..16].copy_from_slice(&0u32.to_le_bytes());
+            let u = Ktx2View::parse(&undef).unwrap();
+            assert_eq!((u.footprint, u.srgb, u.hdr), (fp, v.srgb, v.hdr));
+        }
     }
 }

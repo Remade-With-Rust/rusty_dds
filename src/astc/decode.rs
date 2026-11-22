@@ -13,9 +13,12 @@ use super::texel::f16_to_f32;
 use super::{AstcBlockStatus, AstcDecodeReport, AstcProfile};
 use crate::Error;
 
-/// A block decoder: `[u8; 16]` to texels in (z, y, x) order.
+/// A block decoder: `[u8; 16]` to texels in (z, y, x) order. Stateful, so a
+/// kernel can keep per-surface caches; one instance decodes one surface.
 pub(crate) trait BlockDecoder {
+    fn new(fp: AstcFootprint) -> Self;
     fn decode(
+        &mut self,
         block: &[u8; 16],
         fp: AstcFootprint,
         profile: AstcProfile,
@@ -24,11 +27,15 @@ pub(crate) trait BlockDecoder {
     ) -> AstcBlockStatus;
 }
 
-/// The reference kernel.
+/// The reference kernel (frozen oracle).
 pub(crate) struct Reference;
 impl BlockDecoder for Reference {
+    fn new(_: AstcFootprint) -> Self {
+        Reference
+    }
     #[inline]
     fn decode(
+        &mut self,
         block: &[u8; 16],
         fp: AstcFootprint,
         profile: AstcProfile,
@@ -36,6 +43,25 @@ impl BlockDecoder for Reference {
         out: &mut [[u16; 4]],
     ) -> AstcBlockStatus {
         super::reference::decode_block(block, fp, profile, out_kind, out)
+    }
+}
+
+/// The fast scalar kernel, byte-identical to [`Reference`].
+pub(crate) struct Fast(super::fast::FastCtx);
+impl BlockDecoder for Fast {
+    fn new(fp: AstcFootprint) -> Self {
+        Fast(super::fast::FastCtx::new(fp))
+    }
+    #[inline]
+    fn decode(
+        &mut self,
+        block: &[u8; 16],
+        _fp: AstcFootprint,
+        profile: AstcProfile,
+        out_kind: Out,
+        out: &mut [[u16; 4]],
+    ) -> AstcBlockStatus {
+        self.0.decode(block, profile, out_kind, out)
     }
 }
 
@@ -130,32 +156,37 @@ fn decode_region<D: BlockDecoder, T: Sink>(
     let out_h = (y1 - y0) as usize;
     let mut report = AstcDecodeReport::default();
     let mut tmp = [[0u16; 4]; 216];
+    let mut dec = D::new(fp);
     for bz in 0..nbz {
         for by in rows.clone() {
             for bx in 0..nbx {
                 let idx = ((bz as usize * nby as usize + by as usize) * nbx as usize + bx as usize) * 16;
                 let mut blk = [0u8; 16];
                 blk.copy_from_slice(&data[idx..idx + 16]);
-                let st = D::decode(&blk, fp, profile, T::KIND, &mut tmp);
+                let st = dec.decode(&blk, fp, profile, T::KIND, &mut tmp);
                 tally(&mut report, st);
-                let mut t = 0usize;
+                // Copy the visible part of the block row by row: the crop is
+                // decided once per block, not per texel.
+                let xs = (bx * bw) as usize;
+                let vis_w = (width - bx * bw).min(bw) as usize;
                 for tz in 0..bd {
                     let z = bz * bd + tz;
+                    if z >= depth {
+                        break;
+                    }
                     for ty in 0..bh {
                         let y = by * bh + ty;
-                        for tx in 0..bw {
-                            let x = bx * bw + tx;
-                            if x < width && y < height && z < depth {
-                                let o = ((z as usize * out_h + (y - y0) as usize) * width as usize
-                                    + x as usize)
-                                    * 4;
-                                let px = &tmp[t];
-                                out[o] = T::from_value(px[0]);
-                                out[o + 1] = T::from_value(px[1]);
-                                out[o + 2] = T::from_value(px[2]);
-                                out[o + 3] = T::from_value(px[3]);
-                            }
-                            t += 1;
+                        if y >= height {
+                            break;
+                        }
+                        let row = (z as usize * out_h + (y - y0) as usize) * width as usize + xs;
+                        let src = &tmp[((tz * bh + ty) * bw) as usize..][..vis_w];
+                        let dst = &mut out[row * 4..(row + vis_w) * 4];
+                        for (d, px) in dst.chunks_exact_mut(4).zip(src) {
+                            d[0] = T::from_value(px[0]);
+                            d[1] = T::from_value(px[1]);
+                            d[2] = T::from_value(px[2]);
+                            d[3] = T::from_value(px[3]);
                         }
                     }
                 }

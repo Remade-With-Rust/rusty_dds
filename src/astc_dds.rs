@@ -197,3 +197,35 @@ impl DecodeOptions {
         self
     }
 }
+
+#[cfg(feature = "encode")]
+impl crate::Dds {
+    /// Encode tightly packed RGBA8 pixels as a single-level 2D ASTC DDS
+    /// (`ASTC_*_UNORM`, or `_UNORM_SRGB` for [`AstcProfile::LdrSrgb`]). Like
+    /// [`crate::Dds::encode_bc6h_uf16`]: a dedicated entry point for a format
+    /// outside [`crate::DecodeContent`].
+    pub fn encode_astc_from_rgba8(
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        opts: &astc::AstcEncodeOptions,
+    ) -> Result<crate::Dds, Error> {
+        let fp = opts.footprint;
+        let srgb = opts.profile == AstcProfile::LdrSrgb;
+        let format = crate::DxgiFormat::from_astc(fp.width(), fp.height(), srgb).ok_or(Error::UnsupportedFormat)?;
+        let mut dds = crate::Dds::new_dxgi(crate::NewDxgiParams {
+            height,
+            width,
+            depth: None,
+            format,
+            mipmap_levels: None,
+            array_layers: None,
+            caps2: None,
+            is_cubemap: false,
+            resource_dimension: crate::D3D10ResourceDimension::Texture2D,
+            alpha_mode: crate::AlphaMode::Straight,
+        })?;
+        astc::encode_rgba8_into(pixels, width, height, opts, &mut dds.data)?;
+        Ok(dds)
+    }
+}

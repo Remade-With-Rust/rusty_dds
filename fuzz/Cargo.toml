@@ -62,3 +62,9 @@ name = "astc_container"
 path = "fuzz_targets/astc_container.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "astc_encode_roundtrip"
+path = "fuzz_targets/astc_encode_roundtrip.rs"
+test = false
+doc = false

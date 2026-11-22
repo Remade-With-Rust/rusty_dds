@@ -61,3 +61,33 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --lib astc
+
+  # EC3: the frozen ASTC encoder hashes must hold on aarch64 and wasm32 too
+  # (no floating-point divergence across targets).
+  determinism-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test astc_determinism
+      # NEON twins of the ASTC decoder against their scalar oracles.
+      - run: cargo test --release --lib astc
+
+  determinism-wasm32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      # Pinned release tarball: the install script resolves "latest" through
+      # the GitHub API and breaks when that call is rate-limited.
+      - name: Install wasmtime
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v27.0.0/wasmtime-v27.0.0-x86_64-linux.tar.xz | tar -xJ -C "$HOME"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$HOME/wasmtime-v27.0.0-x86_64-linux/wasmtime" "$HOME/.wasmtime/bin/"
+      - run: |
+          export PATH="$HOME/.wasmtime/bin:$PATH"
+          wasmtime --version
+          CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test --release --target wasm32-wasip1 --no-default-features --features decode,encode,astc --test astc_determinism
