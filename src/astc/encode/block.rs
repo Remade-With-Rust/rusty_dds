@@ -425,6 +425,23 @@ pub(super) fn decimate(
         }
         return;
     }
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if super::simd::decimate(t, g, ideal, iters, out) {
+            return;
+        }
+    }
+    decimate_scalar(g, ideal, iters, out);
+}
+
+/// The scalar body of [`decimate`] for a grid that is not the identity: the
+/// oracle of `simd::decimate`, and the kernel without AVX2.
+pub(super) fn decimate_scalar(
+    g: &crate::astc::tables::Grid,
+    ideal: &[f32; MAX_TEXELS],
+    iters: u8,
+    out: &mut [f32; 64],
+) {
     // Start from the contribution-weighted average of the texels each stored
     // weight feeds.
     for j in 0..g.count {
@@ -974,8 +991,25 @@ fn residual(
     plane2: bool,
 ) -> f32 {
     let g = &ctx.grids[grid];
-    let mut e = 0f32;
     let tw = if plane2 { &fit.tw2 } else { &fit.tw1 };
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if let Some(e) = super::simd::residual(t, g, dec, ideal, tw) {
+            return e;
+        }
+    }
+    residual_scalar(g, dec, ideal, tw)
+}
+
+/// The scalar body of [`residual`]: the oracle of `simd::residual`, and the
+/// kernel without AVX2.
+pub(super) fn residual_scalar(
+    g: &crate::astc::tables::Grid,
+    dec: &[f32; 64],
+    ideal: &[f32; MAX_TEXELS],
+    tw: &[f32; MAX_TEXELS],
+) -> f32 {
+    let mut e = 0f32;
     for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
         let mut v = 0f32;
         for k in 0..4 {

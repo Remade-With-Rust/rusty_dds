@@ -68,6 +68,10 @@ pub(crate) struct Ctx {
     pub scratch: core::cell::RefCell<Scratch>,
     /// The block fits, reused across blocks the same way.
     pub fits: core::cell::RefCell<super::block::FitPool>,
+    /// Set when the CPU supports AVX2: the eight-lane twins of the float
+    /// kernels run (`encode::simd`; bit-identical to the scalar).
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    pub avx2: Option<super::simd::Avx2>,
 }
 
 /// Reusable per-fit buffers of the mode search.
@@ -251,6 +255,14 @@ impl Ctx {
                 refined: alloc::vec![false; ng],
             }),
             fits: core::cell::RefCell::new(Default::default()),
+            // 4x4 (16 texels) stays scalar: there the eight-lane twins
+            // measured no faster (3/8 paired wins, 0.979x, Medium, Kodak).
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            avx2: if texels > 16 {
+                super::simd::Avx2::detect()
+            } else {
+                None
+            },
         }
     }
 }

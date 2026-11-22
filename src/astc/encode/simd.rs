@@ -14,6 +14,8 @@
 #![allow(unsafe_code)]
 
 #[cfg(target_arch = "x86_64")]
+pub(super) use self::avx2::{decimate, residual, Avx2};
+#[cfg(target_arch = "x86_64")]
 pub(super) use self::sse2::part_err_acc;
 
 #[cfg(target_arch = "x86_64")]
@@ -190,6 +192,257 @@ mod sse2 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::super::block::MAX_TEXELS;
+    use crate::astc::tables::Grid;
+    use core::arch::x86_64::{
+        __m256i, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps, _mm256_cmp_ps,
+        _mm256_cmpgt_epi32, _mm256_div_ps, _mm256_i32gather_ps, _mm256_loadu_ps,
+        _mm256_loadu_si256, _mm256_maskstore_ps, _mm256_max_ps, _mm256_min_epu32, _mm256_min_ps,
+        _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32, _mm256_setzero_ps,
+        _mm256_storeu_ps, _mm256_sub_ps, _CMP_GT_OQ,
+    };
+
+    /// Proof that the CPU supports AVX2: only [`Avx2::detect`] makes one.
+    #[derive(Clone, Copy)]
+    pub(in crate::astc::encode) struct Avx2(());
+
+    impl Avx2 {
+        /// `Some` when the CPU reports AVX2. With the development-only
+        /// `tuning` feature, `RUSTY_DDS_ASTC_NO_AVX2` set forces `None` (an
+        /// A/B switch for the twins; a shipped build never reads it).
+        pub(in crate::astc::encode) fn detect() -> Option<Self> {
+            #[cfg(feature = "tuning")]
+            if std::env::var_os("RUSTY_DDS_ASTC_NO_AVX2").is_some() {
+                return None;
+            }
+            if std::is_x86_feature_detected!("avx2") {
+                Some(Avx2(()))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The table shapes the kernels read through raw pointers (every load
+    /// and store offset in them is bounded by these).
+    fn shapes_ok(g: &Grid) -> bool {
+        g.tp % 8 == 0
+            && g.tp <= MAX_TEXELS
+            && g.tap_i.len() <= g.tp
+            && g.tap_iv.len() >= 4 * g.tp
+            && g.tap_cv.len() >= 4 * g.tp
+            && g.jp % 8 == 0
+            && g.jp <= 64
+            && g.count <= g.jp
+            && g.feed_tv.len() >= g.fmax * g.jp
+            && g.feed_cv.len() >= g.fmax * g.jp
+            && g.feed_c16v.len() >= g.fmax * g.jp
+            && g.feed_csv.len() >= g.jp
+            && g.feed_denv.len() >= g.jp
+    }
+
+    /// Twin of `block::decimate` for a grid that is not the identity; the
+    /// results equal the scalar's bit for bit. Returns false (nothing
+    /// written) if the grid's tables do not have the padded shapes.
+    ///
+    /// Eight stored weights (or eight texels) per register, one per lane:
+    /// each lane performs exactly the scalar's operations on its weight
+    /// (texel), in the scalar's order, without FMA. The padded tables end
+    /// each lane's tap or feed list with zero contributions; such a term adds
+    /// a signed zero to a sum that is never `-0.0` (it starts at `+0.0`, and
+    /// under round-to-nearest a sum is `-0.0` only if both terms are), which
+    /// leaves the sum unchanged. `clamp(0, 64)` is `max(0, min(64, x))` with
+    /// the operands in the order that returns `x` itself on ties and NaN, as
+    /// `clamp` does. Lanes past the grid's weight count are never stored.
+    pub(in crate::astc::encode) fn decimate(
+        _: Avx2,
+        g: &Grid,
+        ideal: &[f32; MAX_TEXELS],
+        iters: u8,
+        out: &mut [f32; 64],
+    ) -> bool {
+        if !shapes_ok(g) {
+            return false;
+        }
+        // SAFETY: an `Avx2` exists only if the CPU supports AVX2, and the
+        // shapes the kernel relies on were just checked.
+        unsafe { decimate_k(g, ideal, iters, out) };
+        true
+    }
+
+    /// Lanes `j0 .. j0 + 8` below `count`, as a store mask.
+    #[inline(always)]
+    unsafe fn below(j0: usize, count: usize) -> __m256i {
+        let lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        _mm256_cmpgt_epi32(_mm256_set1_epi32(count as i32 - j0 as i32), lane)
+    }
+
+    /// # Safety
+    ///
+    /// AVX2 is available and `shapes_ok(g)`.
+    #[target_feature(enable = "avx2")]
+    unsafe fn decimate_k(g: &Grid, ideal: &[f32; MAX_TEXELS], iters: u8, out: &mut [f32; 64]) {
+        let (jp, fmax, tp) = (g.jp, g.fmax, g.tp);
+        let zero = _mm256_setzero_ps();
+        let k64 = _mm256_set1_ps(64.0);
+        // Gather indices are clamped into the buffers they address, so the
+        // gathers stay in bounds whatever the tables hold: texels < 216,
+        // stored weights < 64 (`build_grid` already guarantees both).
+        let tmax = _mm256_set1_epi32(MAX_TEXELS as i32 - 1);
+        let wmask = _mm256_set1_epi32(63);
+        // SAFETY (all pointer arithmetic below): table loads read 8 lanes at
+        // `f * jp + j0` (< fmax * jp, j0 + 8 <= jp) or `k * tp + t0` (k < 4,
+        // t0 + 8 <= tp) and `feed_csv/denv[j0..j0 + 8]`, inside the tables by
+        // `shapes_ok`; `ideal`/`resid` loads and stores cover `t0..t0 + 8`
+        // with t0 + 8 <= tp <= 216; `out` loads cover `j0..j0 + 8` with
+        // j0 + 8 <= jp <= 64, and its masked stores write only lanes
+        // j0 + l < count <= 64. Unaligned forms throughout.
+        let mut j0 = 0;
+        while j0 < jp {
+            let mut s = zero;
+            for f in 0..fmax {
+                let o = f * jp + j0;
+                let t = _mm256_min_epu32(
+                    _mm256_loadu_si256(g.feed_tv.as_ptr().add(o) as *const __m256i),
+                    tmax,
+                );
+                let c = _mm256_loadu_ps(g.feed_cv.as_ptr().add(o));
+                s = _mm256_add_ps(
+                    s,
+                    _mm256_mul_ps(_mm256_i32gather_ps::<4>(ideal.as_ptr(), t), c),
+                );
+            }
+            let cs = _mm256_loadu_ps(g.feed_csv.as_ptr().add(j0));
+            let q = _mm256_div_ps(_mm256_mul_ps(k64, s), cs);
+            let v = _mm256_blendv_ps(
+                _mm256_set1_ps(32.0),
+                q,
+                _mm256_cmp_ps::<_CMP_GT_OQ>(cs, zero),
+            );
+            _mm256_maskstore_ps(out.as_mut_ptr().add(j0), below(j0, g.count), v);
+            j0 += 8;
+        }
+        if iters == 0 {
+            return;
+        }
+        let mut resid = [0f32; MAX_TEXELS];
+        let k16 = _mm256_set1_ps(1.0 / 16.0);
+        for _ in 0..iters {
+            let mut t0 = 0;
+            while t0 < tp {
+                let mut v = zero;
+                for k in 0..4 {
+                    let o = k * tp + t0;
+                    let i = _mm256_and_si256(
+                        _mm256_loadu_si256(g.tap_iv.as_ptr().add(o) as *const __m256i),
+                        wmask,
+                    );
+                    let c = _mm256_loadu_ps(g.tap_cv.as_ptr().add(o));
+                    v = _mm256_add_ps(
+                        v,
+                        _mm256_mul_ps(_mm256_i32gather_ps::<4>(out.as_ptr(), i), c),
+                    );
+                }
+                let r = _mm256_sub_ps(
+                    _mm256_mul_ps(v, k16),
+                    _mm256_mul_ps(k64, _mm256_loadu_ps(ideal.as_ptr().add(t0))),
+                );
+                _mm256_storeu_ps(resid.as_mut_ptr().add(t0), r);
+                t0 += 8;
+            }
+            let mut j0 = 0;
+            while j0 < jp {
+                let mut num = zero;
+                for f in 0..fmax {
+                    let o = f * jp + j0;
+                    let t = _mm256_min_epu32(
+                        _mm256_loadu_si256(g.feed_tv.as_ptr().add(o) as *const __m256i),
+                        tmax,
+                    );
+                    let c = _mm256_loadu_ps(g.feed_c16v.as_ptr().add(o));
+                    num = _mm256_add_ps(
+                        num,
+                        _mm256_mul_ps(c, _mm256_i32gather_ps::<4>(resid.as_ptr(), t)),
+                    );
+                }
+                let den = _mm256_loadu_ps(g.feed_denv.as_ptr().add(j0));
+                let o = _mm256_loadu_ps(out.as_ptr().add(j0));
+                let x = _mm256_sub_ps(o, _mm256_div_ps(num, den));
+                let x = _mm256_max_ps(zero, _mm256_min_ps(k64, x));
+                let v = _mm256_blendv_ps(o, x, _mm256_cmp_ps::<_CMP_GT_OQ>(den, zero));
+                _mm256_maskstore_ps(out.as_mut_ptr().add(j0), below(j0, g.count), v);
+                j0 += 8;
+            }
+        }
+    }
+
+    /// Twin of `block::residual`, bit for bit: the per-texel terms
+    /// `d * d * tw` eight texels at a time (each lane the scalar's
+    /// operations in its order, no FMA), then summed one at a time in texel
+    /// order, as the scalar sums them. `None` if the grid's tables do not
+    /// have the padded shapes.
+    pub(in crate::astc::encode) fn residual(
+        _: Avx2,
+        g: &Grid,
+        dec: &[f32; 64],
+        ideal: &[f32; MAX_TEXELS],
+        tw: &[f32; MAX_TEXELS],
+    ) -> Option<f32> {
+        if !shapes_ok(g) {
+            return None;
+        }
+        // SAFETY: as in `decimate`.
+        Some(unsafe { residual_k(g, dec, ideal, tw) })
+    }
+
+    /// # Safety
+    ///
+    /// AVX2 is available and `shapes_ok(g)`.
+    #[target_feature(enable = "avx2")]
+    unsafe fn residual_k(
+        g: &Grid,
+        dec: &[f32; 64],
+        ideal: &[f32; MAX_TEXELS],
+        tw: &[f32; MAX_TEXELS],
+    ) -> f32 {
+        let (tp, n) = (g.tp, g.tap_i.len());
+        let k = _mm256_set1_ps(1.0 / (16.0 * 64.0));
+        let wmask = _mm256_set1_epi32(63);
+        let mut e = 0f32;
+        let mut p = [0f32; 8];
+        // SAFETY: table loads at `kk * tp + t0` (kk < 4, t0 + 8 <= tp) are
+        // inside `tap_iv`/`tap_cv`; `ideal`/`tw` loads cover `t0..t0 + 8`
+        // with t0 + 8 <= tp <= 216; gathers from `dec` use indices masked
+        // to 0..64; the store writes the local `p` (8 lanes).
+        let mut t0 = 0;
+        while t0 < tp {
+            let mut v = _mm256_setzero_ps();
+            for kk in 0..4 {
+                let o = kk * tp + t0;
+                let i = _mm256_and_si256(
+                    _mm256_loadu_si256(g.tap_iv.as_ptr().add(o) as *const __m256i),
+                    wmask,
+                );
+                let c = _mm256_loadu_ps(g.tap_cv.as_ptr().add(o));
+                v = _mm256_add_ps(
+                    v,
+                    _mm256_mul_ps(_mm256_i32gather_ps::<4>(dec.as_ptr(), i), c),
+                );
+            }
+            let d = _mm256_sub_ps(_mm256_mul_ps(v, k), _mm256_loadu_ps(ideal.as_ptr().add(t0)));
+            let q = _mm256_mul_ps(_mm256_mul_ps(d, d), _mm256_loadu_ps(tw.as_ptr().add(t0)));
+            _mm256_storeu_ps(p.as_mut_ptr(), q);
+            for &x in &p[..(n - t0).min(8)] {
+                e += x;
+            }
+            t0 += 8;
+        }
+        e
+    }
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::super::block::{part_err_acc_scalar, MAX_TEXELS};
@@ -267,5 +520,77 @@ mod tests {
             super::part_err_acc(&px, &[0, 1], &ep, &w, &w, 4, 4, false, false),
             None
         );
+    }
+
+    /// The AVX2 decimation and residual equal the scalar bit for bit
+    /// (`to_bits`), for every grid of every 2D footprint, iteration counts
+    /// 0..=4, ideal weights including 0, 1 and -0.0; stored weights past the
+    /// grid's count are left untouched. Skipped (with a note) on a CPU
+    /// without AVX2.
+    #[test]
+    fn decimate_and_residual_match_scalar() {
+        use super::super::block::{decimate_scalar, residual_scalar};
+        use super::super::context::Ctx;
+        use crate::astc::footprint::AstcFootprint;
+        let Some(tok) = super::Avx2::detect() else {
+            eprintln!("no AVX2: decimate/residual twins not exercised");
+            return;
+        };
+        let mut rng = Rng::new(0xDEC1_3A7E);
+        let f = |rng: &mut Rng| -> f32 {
+            match rng.below(8) {
+                0 => 0.0,
+                1 => 1.0,
+                2 => -0.0,
+                _ => (rng.next_u64() >> 40) as f32 / (1u64 << 24) as f32,
+            }
+        };
+        let mut grids = 0;
+        for &fp in AstcFootprint::ALL_2D {
+            let ctx = Ctx::new(fp, 1);
+            for g in ctx.grids.iter().filter(|g| !g.full) {
+                grids += 1;
+                for trial in 0..6 {
+                    let mut ideal = [0f32; MAX_TEXELS];
+                    let mut tw = [0f32; MAX_TEXELS];
+                    for i in 0..MAX_TEXELS {
+                        ideal[i] = f(&mut rng);
+                        tw[i] = f(&mut rng).abs() * 1000.0;
+                    }
+                    let iters = (trial % 5) as u8;
+                    let mut a = [f32::NAN; 64];
+                    let mut b = [f32::NAN; 64];
+                    assert!(super::decimate(tok, g, &ideal, iters, &mut a));
+                    decimate_scalar(g, &ideal, iters, &mut b);
+                    for j in 0..64 {
+                        assert_eq!(
+                            a[j].to_bits(),
+                            b[j].to_bits(),
+                            "{fp} grid {}x{} iters {iters} j {j}",
+                            g.w,
+                            g.h
+                        );
+                    }
+                    let mut dec = [0f32; 64];
+                    for v in dec.iter_mut() {
+                        *v = f(&mut rng) * 64.0;
+                    }
+                    let ea = super::residual(tok, g, &dec, &ideal, &tw).unwrap();
+                    let eb = residual_scalar(g, &dec, &ideal, &tw);
+                    assert_eq!(
+                        ea.to_bits(),
+                        eb.to_bits(),
+                        "{fp} grid {}x{} residual",
+                        g.w,
+                        g.h
+                    );
+                    // Also on the decimated weights themselves (the encoder's use).
+                    let ea = super::residual(tok, g, &b, &ideal, &tw).unwrap();
+                    let eb = residual_scalar(g, &b, &ideal, &tw);
+                    assert_eq!(ea.to_bits(), eb.to_bits());
+                }
+            }
+        }
+        assert!(grids > 500, "{grids}");
     }
 }
