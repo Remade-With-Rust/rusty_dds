@@ -120,8 +120,12 @@ struct Line {
     len2b: f32,
 }
 
-/// One partitioning with its ideal fit.
-struct Fit {
+/// One partitioning with its ideal fit. Lives in [`FitPool`] and is
+/// refilled in place for each block: only the cells a reader can reach are
+/// written (`labels`, `w1`, `tw1`, `tw2` for texels `0..n`, each partition's
+/// `idx` row up to its count, and `w2` when there is a second plane, the only
+/// case that reads it).
+pub(crate) struct Fit {
     parts: u8,
     seed: u16,
     labels: [u8; MAX_TEXELS],
@@ -145,6 +149,34 @@ impl Fit {
     fn part(&self, p: usize) -> &[u8] {
         &self.idx[p][..self.cnt[p]]
     }
+
+    fn new() -> Self {
+        Fit {
+            parts: 0,
+            seed: 0,
+            labels: [0; MAX_TEXELS],
+            lines: [Line::default(); 4],
+            w1: [0.0; MAX_TEXELS],
+            w2: [0.0; MAX_TEXELS],
+            ccs: 4,
+            perp: 0.0,
+            tw1: [0.0; MAX_TEXELS],
+            tw2: [0.0; MAX_TEXELS],
+            idx: [[0; MAX_TEXELS]; 4],
+            cnt: [0; 4],
+        }
+    }
+}
+
+/// Fits reused across the blocks of one encode call (the context owns it),
+/// so a fit is neither zero-filled nor moved per block: slot 0 is the
+/// one-partition fit, slot 1 the dual-plane one, slots 2.. the candidate
+/// partitionings. `order` and `top` are the partition ranking's scratch.
+#[derive(Default)]
+pub(crate) struct FitPool {
+    fits: Vec<Fit>,
+    order: Vec<usize>,
+    top: Vec<(u32, usize)>,
 }
 
 /// The best block found so far.
@@ -311,21 +343,15 @@ fn fit_channel(src: &Src, idx: &[u8], c: usize, line: &mut Line, w: &mut [f32; M
     line.len2b = d * d;
 }
 
-fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
-    let mut f = Fit {
-        parts,
-        seed,
-        labels: [0; MAX_TEXELS],
-        lines: [Line::default(); 4],
-        w1: [0.0; MAX_TEXELS],
-        w2: [0.0; MAX_TEXELS],
-        ccs,
-        perp: 0.0,
-        tw1: [0.0; MAX_TEXELS],
-        tw2: [0.0; MAX_TEXELS],
-        idx: [[0; MAX_TEXELS]; 4],
-        cnt: [0; 4],
-    };
+/// Fill `f` with the ideal fit of one partitioning (see [`Fit`] for which
+/// cells are written).
+fn make_fit(f: &mut Fit, src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) {
+    f.parts = parts;
+    f.seed = seed;
+    f.ccs = ccs;
+    f.perp = 0.0;
+    f.lines = [Line::default(); 4];
+    f.cnt = [0; 4];
     f.labels[..src.n].copy_from_slice(&labels[..src.n]);
     for i in 0..src.n {
         let p = f.labels[i] as usize;
@@ -336,22 +362,29 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
     if ccs < 4 {
         mask[ccs] = false;
     }
-    for p in 0..parts {
-        let (idx, cnt) = (f.idx[p as usize], f.cnt[p as usize]);
-        let idx = &idx[..cnt];
-        let (mut line, perp) = fit_line(src, idx, mask, &mut f.w1);
+    let Fit {
+        idx,
+        cnt,
+        w1,
+        w2,
+        lines,
+        perp: total,
+        ..
+    } = f;
+    for p in 0..parts as usize {
+        let idx = &idx[p][..cnt[p]];
+        let (mut line, perp) = fit_line(src, idx, mask, w1);
         if ccs < 4 {
-            fit_channel(src, idx, ccs, &mut line, &mut f.w2);
+            fit_channel(src, idx, ccs, &mut line, w2);
         }
-        f.lines[p as usize] = line;
-        f.perp += perp;
+        lines[p] = line;
+        *total += perp;
     }
     for i in 0..src.n {
         let l = &f.lines[f.labels[i] as usize];
         f.tw1[i] = l.len2;
         f.tw2[i] = l.len2b;
     }
-    f
 }
 
 /// Least-squares fit of per-texel ideal weights (scaled to 0..=64) to a
@@ -1159,8 +1192,15 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
         sym: SymbolicBlock::empty_void_ldr(),
     };
     let zeros = [0u8; MAX_TEXELS];
-    let fit1 = make_fit(&src, 1, 0, &zeros, 4);
-    search_fit(ctx, prm, &src, &fit1, &mut best);
+    let mut pool = ctx.fits.borrow_mut();
+    let FitPool { fits, order, top } = &mut *pool;
+    let most = prm.part_candidates.iter().copied().max().unwrap_or(0);
+    // Grows once per encode call (the slot count depends only on the preset).
+    while fits.len() < 2 + most {
+        fits.push(Fit::new());
+    }
+    make_fit(&mut fits[0], &src, 1, 0, &zeros, 4);
+    search_fit(ctx, prm, &src, &fits[0], &mut best);
     // Early out: stop after the one-partition search when the block is
     // already good enough. The threshold is a per-channel MSE that grows with
     // the square of the texel count (larger blocks are allowed more error),
@@ -1174,8 +1214,8 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
     if prm.dual_plane {
         let (c, r2) = weakest_channel(&src);
         if c < 4 && r2 < prm.dual_corr_limit * prm.dual_corr_limit {
-            let fitd = make_fit(&src, 1, 0, &zeros, c);
-            search_fit(ctx, prm, &src, &fitd, &mut best);
+            make_fit(&mut fits[1], &src, 1, 0, &zeros, c);
+            search_fit(ctx, prm, &src, &fits[1], &mut best);
         }
     }
     for k in 2..=prm.max_partitions.min(4) as usize {
@@ -1186,7 +1226,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
         let mut labels = [0u8; MAX_TEXELS];
         k_means(&src, k, &mut labels);
         // Rank patterns by mismatch with the clustering; best M by insertion.
-        let mut top: Vec<(u32, usize)> = Vec::with_capacity(m + 1);
+        top.clear();
         let pats = match k {
             2 => &ctx.part2,
             3 => &ctx.part3,
@@ -1216,16 +1256,17 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             top.insert(pos, key);
             top.truncate(m);
         }
-        let mut fits: Vec<Fit> = top
-            .iter()
-            .map(|&(_, pi)| {
-                let p = &pats[pi];
-                make_fit(&src, k as u8, p.seed, &p.labels, 4)
-            })
-            .collect();
-        // Stable sort: ties keep the clustering-match order.
-        fits.sort_by(|a, b| a.perp.total_cmp(&b.perp));
-        for fitk in fits.iter().take(prm.part_search[k - 2].max(1)) {
+        for (j, &(_, pi)) in top.iter().enumerate() {
+            let p = &pats[pi];
+            make_fit(&mut fits[2 + j], &src, k as u8, p.seed, &p.labels, 4);
+        }
+        // Order the fits by line error without moving them. Stable sort:
+        // ties keep the clustering-match order.
+        order.clear();
+        order.extend(2..2 + top.len());
+        order.sort_by(|&a, &b| fits[a].perp.total_cmp(&fits[b].perp));
+        for &j in order.iter().take(prm.part_search[k - 2].max(1)) {
+            let fitk = &fits[j];
             if fitk.perp as f64 >= best.err {
                 break;
             }
