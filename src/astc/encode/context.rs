@@ -45,6 +45,8 @@ pub(crate) struct Mode {
 pub(crate) struct Partitioning {
     pub seed: u16,
     pub labels: Vec<u8>,
+    /// Texels in partition 1, as a bitset (texel i is bit i % 64 of word i / 64).
+    pub bits: [u64; 4],
 }
 
 pub(crate) struct Ctx {
@@ -215,9 +217,16 @@ impl Ctx {
                 p.labels == labels || p.labels.iter().zip(&labels).all(|(a, b)| *a != *b)
             });
             if !dup {
+                let mut bits = [0u64; 4];
+                for (i, &l) in labels.iter().enumerate() {
+                    if l == 1 {
+                        bits[i / 64] |= 1 << (i % 64);
+                    }
+                }
                 part2.push(Partitioning {
                     seed: seed as u16,
                     labels,
+                    bits,
                 });
             }
         }

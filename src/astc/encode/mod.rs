@@ -74,14 +74,14 @@ impl AstcEncodeOptions {
 pub(crate) fn params(p: AstcPreset) -> Params {
     match p {
         AstcPreset::Fastest => Params {
-            max_partitions: 1,
-            part2_candidates: 0,
+            max_partitions: 2,
+            part2_candidates: 1,
             exact_candidates: 2,
             refine: 1,
             dual_plane: false,
             dual_corr_limit: 0.0,
             grid_iters: 1,
-            part2_skip_err: 0.0,
+            part2_skip_err: 4.0,
         },
         AstcPreset::Fast => Params {
             max_partitions: 2,

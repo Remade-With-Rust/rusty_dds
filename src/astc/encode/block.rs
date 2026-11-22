@@ -123,6 +123,15 @@ struct Fit {
     ccs: usize,
     /// Fixed error off the fitted lines (not reducible by weights).
     perp: f32,
+    /// Texel indices of each partition, and their counts.
+    idx: [[u8; MAX_TEXELS]; 4],
+    cnt: [usize; 4],
+}
+
+impl Fit {
+    fn part(&self, p: usize) -> &[u8] {
+        &self.idx[p][..self.cnt[p]]
+    }
 }
 
 /// The best block found so far.
@@ -146,11 +155,12 @@ fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
 /// Principal-axis line fit of the texels `idx` over the channels in `mask`.
 /// Returns the line and fills `w` (ideal weights) for those texels; returns
 /// the residual error off the line.
-fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -> (Line, f32) {
+fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -> (Line, f32) {
     let cw = src.tgt.cw;
     let n = idx.len().max(1) as f32;
     let mut mean = [0f32; 4];
     for &i in idx {
+        let i = i as usize;
         for c in 0..4 {
             mean[c] += src.px[i][c] as f32;
         }
@@ -161,6 +171,7 @@ fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]
     // Covariance over the masked channels, weighted.
     let mut cov = [[0f32; 4]; 4];
     for &i in idx {
+        let i = i as usize;
         let mut d = [0f32; 4];
         for c in 0..4 {
             if mask[c] {
@@ -219,6 +230,7 @@ fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]
     let mut tmax = f32::MIN;
     let mut ts = [0f32; MAX_TEXELS];
     for &i in idx {
+        let i = i as usize;
         let mut d = [0f32; 4];
         for c in 0..4 {
             if mask[c] {
@@ -237,6 +249,7 @@ fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]
     let span = tmax - tmin;
     let mut perp = 0f32;
     for &i in idx {
+        let i = i as usize;
         w[i] = if span > 0.0 { (ts[i] - tmin) / span } else { 0.0 };
         for c in 0..4 {
             if mask[c] {
@@ -262,10 +275,11 @@ fn fit_line(src: &Src, idx: &[usize], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]
 }
 
 /// Fit one channel on its own (dual plane): min/max endpoints, ideal weights.
-fn fit_channel(src: &Src, idx: &[usize], c: usize, line: &mut Line, w: &mut [f32; MAX_TEXELS]) {
+fn fit_channel(src: &Src, idx: &[u8], c: usize, line: &mut Line, w: &mut [f32; MAX_TEXELS]) {
     let mut lo = 255u8;
     let mut hi = 0u8;
     for &i in idx {
+        let i = i as usize;
         lo = lo.min(src.px[i][c]);
         hi = hi.max(src.px[i][c]);
     }
@@ -275,6 +289,7 @@ fn fit_channel(src: &Src, idx: &[usize], c: usize, line: &mut Line, w: &mut [f32
     }
     let span = (hi - lo) as f32;
     for &i in idx {
+        let i = i as usize;
         w[i] = if span > 0.0 { (src.px[i][c] - lo) as f32 / span } else { 0.0 };
     }
     line.e0[c] = lo as f32;
@@ -293,17 +308,25 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
         w2: [0.0; MAX_TEXELS],
         ccs,
         perp: 0.0,
+        idx: [[0; MAX_TEXELS]; 4],
+        cnt: [0; 4],
     };
     f.labels[..src.n].copy_from_slice(&labels[..src.n]);
+    for i in 0..src.n {
+        let p = f.labels[i] as usize;
+        f.idx[p][f.cnt[p]] = i as u8;
+        f.cnt[p] += 1;
+    }
     let mut mask = [true, true, true, !src.opaque];
     if ccs < 4 {
         mask[ccs] = false;
     }
     for p in 0..parts {
-        let idx: Vec<usize> = (0..src.n).filter(|&i| f.labels[i] == p).collect();
-        let (mut line, perp) = fit_line(src, &idx, mask, &mut f.w1);
+        let (idx, cnt) = (f.idx[p as usize], f.cnt[p as usize]);
+        let idx = &idx[..cnt];
+        let (mut line, perp) = fit_line(src, idx, mask, &mut f.w1);
         if ccs < 4 {
-            fit_channel(src, &idx, ccs, &mut line, &mut f.w2);
+            fit_channel(src, idx, ccs, &mut line, &mut f.w2);
         }
         f.lines[p as usize] = line;
         f.perp += perp;
@@ -409,9 +432,10 @@ fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
 
 
 /// Least-squares endpoints for one channel given integer weights (0..=64).
-fn refit_channel(src: &Src, idx: &[usize], c: usize, w: &[u8; MAX_TEXELS]) -> Option<(f32, f32)> {
+fn refit_channel(src: &Src, idx: &[u8], c: usize, w: &[u8; MAX_TEXELS]) -> Option<(f32, f32)> {
     let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
     for &i in idx {
+        let i = i as usize;
         let t = w[i] as f32 * (1.0 / 64.0);
         let u = 1.0 - t;
         let x = src.px[i][c] as f32;
@@ -525,7 +549,7 @@ fn encode_endpoints(class: Class, range: usize, e0: [f32; 4], e1: [f32; 4], out:
 /// texel weights (plane 1, plane 2).
 fn exact_part_err(
     src: &Src,
-    idx: &[usize],
+    idx: &[u8],
     ep: &cem::Endpoints,
     w1: &[u8; MAX_TEXELS],
     w2: &[u8; MAX_TEXELS],
@@ -534,6 +558,7 @@ fn exact_part_err(
     let cw = src.tgt.cw;
     let mut acc = [0u64; 4];
     for &i in idx {
+        let i = i as usize;
         for c in 0..4 {
             let w = if c == ccs { w2[i] } else { w1[i] };
             let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
@@ -622,10 +647,12 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
         }
         let g = m.grid as usize;
         if dec_err[g] < 0.0 {
-            decimate(ctx, g, &fit.w1, prm.grid_iters, &mut dec1[g]);
+            // Rank on the one-shot (transpose-average) decimation; the kept
+            // candidates get the least-squares refinement below.
+            decimate(ctx, g, &fit.w1, 0, &mut dec1[g]);
             let mut e = residual(ctx, g, &dec1[g], &fit.w1, fit, false);
             if dual {
-                decimate(ctx, g, &fit.w2, prm.grid_iters, &mut dec2[g]);
+                decimate(ctx, g, &fit.w2, 0, &mut dec2[g]);
                 e += residual(ctx, g, &dec2[g], &fit.w2, fit, true);
             }
             dec_err[g] = e;
@@ -645,27 +672,47 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             cands.push(Cand { est, mode: mi, class, range });
         }
     }
-    // Order by estimate, ties by mode index (a total order: deterministic).
-    cands.sort_by(|a, b| {
-        a.est
-            .partial_cmp(&b.est)
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then(a.mode.cmp(&b.mode))
-    });
-    // Keep the best few, and give each kept mode its other endpoint classes
-    // too (each at the colour range its own value count allows).
+    // The best k by estimate, ties by mode index (a total order), selected
+    // without sorting the whole list.
     let k = prm.exact_candidates.max(1).min(cands.len());
-    let mut keep: Vec<usize> = (0..k).collect();
-    for i in 0..k {
-        for (j, c) in cands.iter().enumerate().skip(k) {
-            if c.mode == cands[i].mode && !keep.contains(&j) {
+    let better = |a: &Cand, b: &Cand| a.est < b.est || (a.est == b.est && a.mode < b.mode);
+    let mut top: Vec<usize> = Vec::with_capacity(k + 1);
+    for (i, c) in cands.iter().enumerate() {
+        if top.len() == k && !better(c, &cands[top[k - 1]]) {
+            continue;
+        }
+        let pos = top.iter().position(|&t| better(c, &cands[t])).unwrap_or(top.len());
+        top.insert(pos, i);
+        top.truncate(k);
+    }
+    // Each kept mode also gets its other endpoint classes (adjacent entries:
+    // candidates are pushed per mode, class after class), each at the colour
+    // range its own value count allows.
+    let mut keep: Vec<usize> = top.clone();
+    for &t in &top {
+        let m = cands[t].mode;
+        let mut j = t;
+        while j > 0 && cands[j - 1].mode == m {
+            j -= 1;
+        }
+        while j < cands.len() && cands[j].mode == m {
+            if !keep.contains(&j) {
                 keep.push(j);
             }
+            j += 1;
         }
     }
+    let mut refined = alloc::vec![false; ng];
     for &i in &keep {
         let c = &cands[i];
         let g = ctx.modes[c.mode].grid as usize;
+        if !refined[g] && prm.grid_iters > 0 {
+            decimate(ctx, g, &fit.w1, prm.grid_iters, &mut dec1[g]);
+            if dual {
+                decimate(ctx, g, &fit.w2, prm.grid_iters, &mut dec2[g]);
+            }
+            refined[g] = true;
+        }
         let count = ctx.grids[g].count;
         let mut gw1 = [0u8; 64];
         let mut gw2 = [0u8; 64];
@@ -712,9 +759,6 @@ fn exact_candidate(
     let parts = fit.parts as usize;
     let mut gw1 = gw1;
     let mut gw2 = gw2;
-    let idx: Vec<Vec<usize>> = (0..parts)
-        .map(|p| (0..src.n).filter(|&i| fit.labels[i] as usize == p).collect())
-        .collect();
     let mut encs: Vec<(u8, [u8; 8])> = Vec::new();
     let mut eff1 = [0u8; MAX_TEXELS];
     let mut eff2 = [0u8; MAX_TEXELS];
@@ -729,7 +773,7 @@ fn exact_candidate(
         for p in 0..parts {
             for c in 0..4 {
                 let w = if c == fit.ccs { &eff2 } else { &eff1 };
-                if let Some((a, b)) = refit_channel(src, &idx[p], c, w) {
+                if let Some((a, b)) = refit_channel(src, fit.part(p), c, w) {
                     lines[p].e0[c] = a;
                     lines[p].e1[c] = b;
                 }
@@ -758,7 +802,7 @@ fn exact_candidate(
             for &(cemv, v) in encs.iter() {
                 let raw = cem::decode(cemv, &v);
                 let ep = cem::expand(&raw, src.tgt.profile);
-                let e = exact_part_err(src, &idx[p], &ep, &eff1, &eff2, fit.ccs);
+                let e = exact_part_err(src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
                 seen[cemv as usize] = true;
                 if e < chosen[cemv as usize][p].0 {
                     chosen[cemv as usize][p] = (e, v);
@@ -821,7 +865,8 @@ fn exact_candidate(
         for p in 0..parts {
             let v = chosen[cemv][p].1;
             let ep = cem::expand(&cem::decode(cemv as u8, &v), src.tgt.profile);
-            for &i in &idx[p] {
+            for &i in fit.part(p) {
+                let i = i as usize;
                 let (mut num, mut den) = (0f32, 0f32);
                 for c in 0..4 {
                     if c == fit.ccs {
@@ -1002,18 +1047,27 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
     if prm.max_partitions >= 2 && prm.part2_candidates > 0 && per_texel > prm.part2_skip_err as f64 {
         let mut labels = [0u8; MAX_TEXELS];
         two_means(&src, &mut labels);
-        // Rank patterns by mismatch with the clustering (either labelling).
-        let mut ranked: Vec<(u32, usize)> = ctx
-            .part2
-            .iter()
-            .enumerate()
-            .map(|(pi, p)| {
-                let mis = p.labels.iter().zip(&labels[..n]).filter(|(a, b)| a != b).count() as u32;
-                (mis.min(n as u32 - mis), pi)
-            })
-            .collect();
-        ranked.sort();
-        for &(_, pi) in ranked.iter().take(prm.part2_candidates) {
+        // Rank patterns by mismatch with the clustering (either labelling):
+        // popcount of the XOR of bitsets, best M kept by insertion.
+        let mut lb = [0u64; 4];
+        for i in 0..n {
+            if labels[i] == 1 {
+                lb[i / 64] |= 1 << (i % 64);
+            }
+        }
+        let m = prm.part2_candidates;
+        let mut top: Vec<(u32, usize)> = Vec::with_capacity(m + 1);
+        for (pi, p) in ctx.part2.iter().enumerate() {
+            let mis = (0..4).map(|w| (p.bits[w] ^ lb[w]).count_ones()).sum::<u32>();
+            let key = (mis.min(n as u32 - mis), pi);
+            if top.len() == m && key >= top[m - 1] {
+                continue;
+            }
+            let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+            top.insert(pos, key);
+            top.truncate(m);
+        }
+        for &(_, pi) in top.iter() {
             let p = &ctx.part2[pi];
             let fit2 = make_fit(&src, 2, p.seed, &p.labels, 4);
             search_fit(ctx, prm, &src, &fit2, &mut best);
