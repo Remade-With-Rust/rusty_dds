@@ -78,6 +78,10 @@ mod swizzle;
 
 #[cfg(feature = "decode")]
 mod decode;
+
+#[cfg(all(feature = "astc", feature = "decode"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "astc", feature = "decode"))))]
+pub mod astc;
 #[cfg(feature = "decode")]
 pub use decode::reference;
 #[cfg(feature = "decode")]

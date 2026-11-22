@@ -1,0 +1,63 @@
+# Build gates the portfolio harness does not cover (it runs `cargo test` on
+# stable with default features). Plan: docs/plans/astc.md, gates DC6/DC7.
+#
+# - msrv:      the library builds on its declared rust-version (1.73).
+# - no-simd:   without `simd` the crate is `forbid(unsafe_code)`; it must build.
+# - wasm32:    pure Rust, no C: the decode/encode/astc surface builds for
+#              wasm32-unknown-unknown.
+# - release:   the ASTC robustness test at full size (10^6 arbitrary blocks per
+#              footprint) and the oracle golden vectors, optimised.
+
+name: build-gates
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.73"
+      # The lockfile (v4) and the dev-dependencies need a newer cargo; the MSRV
+      # promise is for the library, so build it from a manifest without them.
+      - name: Library-only manifest
+        run: |
+          python3 - <<'PY'
+          s = open('Cargo.toml', encoding='utf-8').read()
+          open('Cargo.toml', 'w', encoding='utf-8').write(s[:s.index('[dev-dependencies]')])
+          PY
+          rm -f Cargo.lock
+      - run: cargo build --lib --features astc
+
+  no-simd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --lib --no-default-features --features decode,encode,astc
+      - run: cargo test --lib --no-default-features --features decode,encode,astc astc
+
+  wasm32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo build --lib --target wasm32-unknown-unknown --no-default-features --features decode,encode,astc
+
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --lib astc

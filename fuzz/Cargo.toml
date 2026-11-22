@@ -28,7 +28,7 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.rusty_dds]
 path = ".."
-features = ["decode", "encode"]
+features = ["decode", "encode", "astc"]
 
 [profile.release]
 debug = 1
@@ -48,5 +48,11 @@ doc = false
 [[bin]]
 name = "encode_roundtrip"
 path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "astc_decode"
+path = "fuzz_targets/astc_decode.rs"
 test = false
 doc = false
