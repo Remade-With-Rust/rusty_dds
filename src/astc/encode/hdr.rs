@@ -453,6 +453,20 @@ fn repair_best(
     }
 }
 
+/// Insert `c` into `top`, kept ascending by `lt` and at most `k` long: the
+/// first `k` entries a stable sort by `lt` would give over everything
+/// offered. Callers offer candidates in index order and break ties in `lt`
+/// by that index, so `lt` is a strict total order and an entry tied on the
+/// estimate lands after the earlier ones, as a stable sort leaves it.
+fn push_top<T>(top: &mut Vec<T>, k: usize, c: T, lt: impl Fn(&T, &T) -> bool) {
+    if top.len() == k && !lt(&c, &top[k - 1]) {
+        return;
+    }
+    let pos = top.iter().position(|t| lt(&c, t)).unwrap_or(top.len());
+    top.insert(pos, c);
+    top.truncate(k);
+}
+
 /// Principal-axis line fit of the texels `idx` of `t` over `chans` channels
 /// (interpolation domain): fills `ideal` (weights in 0..=1) for those
 /// texels and returns the squared line length over the channels.
@@ -689,10 +703,10 @@ fn search_two_partitions(
             let lc = LEVELS[r as usize] as f32;
             let step = 65535.0 / (lc - 1.0);
             let cq = n as f32 * step * step / 12.0 * 0.5;
-            cands.push((res[g] + wq + cq, mi, r as usize));
+            push_top(&mut cands, exact.max(1), (res[g] + wq + cq, mi, r as usize), |a, b| {
+                a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).is_lt()
+            });
         }
-        cands.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        cands.truncate(exact.max(1));
         for &(_, mi, range) in &cands {
             let m = ctx.modes[mi];
             let g = m.grid as usize;
@@ -938,14 +952,15 @@ pub(crate) fn encode_block_hdr(
         let lc = LEVELS[r as usize] as f32;
         let step = 65535.0 / (lc - 1.0);
         let cq = n as f32 * step * step / 12.0 * 0.5;
-        cands.push((res[g] + wq + cq, mi, r as usize));
+        // The estimate is a sum of finite non-negative terms (never NaN), so
+        // this comparison is the strict total order the sort used.
+        push_top(&mut cands, exact.max(1), (res[g] + wq + cq, mi, r as usize), |a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+                .is_lt()
+        });
     }
-    cands.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then(a.1.cmp(&b.1))
-    });
-    cands.truncate(exact.max(1));
     let mut best = Best {
         err: f64::MAX,
         sym: SymbolicBlock::empty(BlockKind::VoidHdr, 0),
