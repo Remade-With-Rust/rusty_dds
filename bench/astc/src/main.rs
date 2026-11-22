@@ -226,6 +226,30 @@ fn ir_decode(args: &[String]) {
     println!("ir-decode {}: files {} blocks {blocks} illegal {illegal} hdr_in_ldr {hdr} bytes {bytes} hash {h:016x}", args[0], inputs.len());
 }
 
+/// `--ir-rows <file[@rows]>...`: 8-bit (`Ldr`) decode through the job-system
+/// seam, `decode_block_rows_into`, one block row per call (what a caller
+/// splitting a surface across workers does). Same anchors as `--ir-decode`.
+fn ir_rows(args: &[String]) {
+    let inputs: Vec<Input> = args.iter().map(|s| load_cropped(s)).collect();
+    let (mut blocks, mut bytes, mut calls) = (0u64, 0u64, 0u64);
+    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    let mut row = Vec::new();
+    for inp in &inputs {
+        let rows = astc::block_rows(inp.h, inp.fp);
+        for r in 0..rows {
+            let y0 = r * inp.fp.height();
+            let y1 = (y0 + inp.fp.height()).min(inp.h);
+            row.resize((inp.w * (y1 - y0) * 4) as usize, 0);
+            let rep = astc::decode_block_rows_into(&inp.payload, inp.w, inp.h, inp.fp, AstcProfile::Ldr, r..r + 1, &mut row).unwrap();
+            fnv_words(&mut h, &row);
+            blocks += rep.blocks;
+            bytes += row.len() as u64;
+            calls += 1;
+        }
+    }
+    println!("ir-rows: files {} calls {calls} blocks {blocks} bytes {bytes} hash {h:016x}", inputs.len());
+}
+
 /// `png[@x,y,w,h]` to RGBA8.
 fn load_png_cropped(spec: &str) -> (u32, u32, Vec<u8>) {
     let (path, crop) = match spec.split_once('@') {
@@ -342,13 +366,93 @@ fn ir_container(args: &[String]) {
     println!("ir-container: files {} surfaces {surfaces} texels {texels} inflated {inflated} hash {h:016x}", args.len());
 }
 
+fn median_of(mut v: Vec<f64>) -> f64 {
+    median(&mut v)
+}
+
+/// `--time-decode <samples> <file.astc>...`: rusty_dds 8-bit (`Ldr`) decode
+/// only, into a buffer allocated once, for an A/B of two library versions
+/// built into two binaries (the process-level ABBA order, pinning and null
+/// arm are the driver's job: `.agent-scratch/abba.sh`). Per file: one warm-up,
+/// K decodes per sample (K set so a sample is >= 50 ms), `samples` samples on
+/// the thread CPU clock. Prints `file fp K min_ms med_ms med_MTs hash`.
+fn time_decode(args: &[String]) {
+    let samples: usize = args[0].parse().unwrap();
+    for f in &args[1..] {
+        let inp = load(f);
+        let px = (inp.w * inp.h) as usize;
+        let mut out = vec![0u8; px * 4];
+        let mut dec = || {
+            astc::decode_rgba8_into(&inp.payload, inp.w, inp.h, 1, inp.fp, AstcProfile::Ldr, &mut out).unwrap();
+        };
+        dec();
+        let t = clock_now();
+        dec();
+        let k = ((0.05 / (clock_now() - t)).ceil() as usize).max(1);
+        let mut ms = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let t = clock_now();
+            for _ in 0..k {
+                dec();
+            }
+            ms.push((clock_now() - t) * 1e3 / k as f64);
+        }
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        fnv_words(&mut h, &out);
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        let med = median_of(ms);
+        println!("{} {} {k} {min:.4} {med:.4} {:.2} {h:016x}", inp.name, inp.fp, px as f64 / (med * 1e3));
+    }
+}
+
+/// `--time-encode <preset> <fp,fp,...> <samples> <png>...`: total encode time
+/// of all images per footprint (`encode_rgba8_into`, output allocated once),
+/// `samples` samples on the thread CPU clock. Prints
+/// `preset fp min_ms med_ms med_MTs hash`.
+fn time_encode(args: &[String]) {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let samples: usize = args[2].parse().unwrap();
+    let imgs: Vec<(u32, u32, Vec<u8>)> = args[3..].iter().map(|s| load_png_cropped(s)).collect();
+    let px: f64 = imgs.iter().map(|(w, h, _)| (*w * *h) as f64).sum();
+    for f in args[1].split(',') {
+        let v: Vec<u32> = f.split('x').map(|t| t.parse().unwrap()).collect();
+        let fp = AstcFootprint::new_2d(v[0], v[1]).unwrap();
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+        let mut outs: Vec<Vec<u8>> = imgs.iter().map(|(w, h, _)| vec![0u8; astc::payload_len(*w, *h, 1, fp).unwrap()]).collect();
+        let mut ms = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let t = clock_now();
+            for ((w, h, img), out) in imgs.iter().zip(outs.iter_mut()) {
+                astc::encode_rgba8_into(img, *w, *h, &opts, out).unwrap();
+            }
+            ms.push((clock_now() - t) * 1e3);
+        }
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        for o in &outs {
+            fnv_words(&mut h, o);
+        }
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        let med = median_of(ms);
+        println!("{} {fp} {min:.3} {med:.3} {:.4} {h:016x}", args[0], px / (med * 1e3));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("--encode") => return encode_mode(&args[1..]),
+        Some("--time-decode") => return time_decode(&args[1..]),
+        Some("--time-encode") => return time_encode(&args[1..]),
         Some("--ir-decode") => return ir_decode(&args[1..]),
         Some("--ir-encode") => return ir_encode(&args[1..]),
         Some("--ir-container") => return ir_container(&args[1..]),
+        Some("--ir-rows") => return ir_rows(&args[1..]),
         _ => {}
     }
     #[cfg(feature = "internals")]
