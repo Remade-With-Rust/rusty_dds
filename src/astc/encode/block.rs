@@ -1199,17 +1199,28 @@ fn exact_candidate(
         for p in 0..parts {
             let v = chosen[cemv][p].1;
             let ep = cem::expand(&cem::decode(cemv as u8, &v), src.tgt.profile);
+            // Per channel: the line direction d and start e0 (in the 16-bit
+            // domain). `den` depends on neither the texel nor x, so it is
+            // summed once per partition, in the per-texel loop's channel
+            // order: the same value the loop computed for every texel.
+            let d: [f32; 4] = core::array::from_fn(|c| ep.e1[c] as f32 - ep.e0[c] as f32);
+            let e0: [f32; 4] = core::array::from_fn(|c| ep.e0[c] as f32);
+            let cw = src.tgt.cw;
+            let mut den = 0f32;
+            for c in 0..4 {
+                if c != fit.ccs {
+                    den += d[c] * d[c] * cw[c];
+                }
+            }
             for &i in fit.part(p) {
                 let i = i as usize;
-                let (mut num, mut den) = (0f32, 0f32);
+                let mut num = 0f32;
                 for c in 0..4 {
                     if c == fit.ccs {
                         continue;
                     }
-                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
-                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
-                    num += d * x * src.tgt.cw[c];
-                    den += d * d * src.tgt.cw[c];
+                    let x = src.px[i][c] as f32 * 257.0 - e0[c];
+                    num += d[c] * x * cw[c];
                 }
                 w1[i] = if den > 0.0 {
                     (num / den).clamp(0.0, 1.0)
@@ -1218,10 +1229,9 @@ fn exact_candidate(
                 };
                 if dual {
                     let c = fit.ccs;
-                    let d = ep.e1[c] as f32 - ep.e0[c] as f32;
-                    let x = src.px[i][c] as f32 * 257.0 - ep.e0[c] as f32;
-                    w2[i] = if d != 0.0 {
-                        (x / d).clamp(0.0, 1.0)
+                    let x = src.px[i][c] as f32 * 257.0 - e0[c];
+                    w2[i] = if d[c] != 0.0 {
+                        (x / d[c]).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
