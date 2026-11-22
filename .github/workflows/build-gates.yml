@@ -5,6 +5,9 @@
 # - no-simd:   without `simd` the crate is `forbid(unsafe_code)`; it must build.
 # - wasm32:    pure Rust, no C: the decode/encode/astc surface builds for
 #              wasm32-unknown-unknown.
+# - clippy:    `cargo clippy --all-targets --all-features` is clean outside
+#              src/astc/ (the ASTC encoder rewrite cleans its own; drop the
+#              path filter once it lands).
 # - release:   the ASTC robustness test at full size (10^6 arbitrary blocks per
 #              footprint) and the oracle golden vectors, optimised.
 
@@ -91,3 +94,39 @@ jobs:
           export PATH="$HOME/.wasmtime/bin:$PATH"
           wasmtime --version
           CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test --release --target wasm32-wasip1 --no-default-features --features decode,encode,astc --test astc_determinism
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Every warning outside src/astc/ fails the job. src/astc/ is excluded
+      # until the ASTC encoder rewrite lands with its own clippy pass; then this
+      # becomes plain `cargo clippy --all-targets --all-features -- -D warnings`.
+      - name: clippy (outside src/astc)
+        run: |
+          cargo clippy --all-targets --all-features --message-format=json > clippy.json || true
+          python3 - clippy.json <<'PY'
+          import json, sys
+          bad, astc = set(), 0
+          for line in open(sys.argv[1], encoding='utf-8'):
+              try:
+                  m = json.loads(line)
+              except ValueError:
+                  continue
+              if m.get('reason') != 'compiler-message':
+                  continue
+              msg = m['message']
+              if msg['level'] not in ('warning', 'error') or not msg['spans']:
+                  continue
+              if msg['spans'][0]['file_name'].startswith('src/astc/'):
+                  astc += 1
+                  continue
+              bad.add(msg['rendered'])
+          for r in sorted(bad):
+              print(r)
+          print(f'clippy: {len(bad)} finding(s) outside src/astc/ ({astc} inside, not gated)')
+          sys.exit(1 if bad else 0)
+          PY
