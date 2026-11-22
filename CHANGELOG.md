@@ -3,6 +3,32 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.0](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.10.1...v0.11.0) - 2026-11-22
+
+### Added
+
+- *(astc)* tune encoder presets so every footprint meets the quality targets
+- *(astc)* scalar reference decoder, astcenc oracle and differential harness
+
+### Other
+
+- *(astc)* ES1 passes after the shortlist; artifacts and README updated
+- *(astc)* float infill/feed contributions precomputed per grid
+- *(astc)* per-footprint block-mode shortlist for Medium (plan E6)
+- *(astc)* install a pinned wasmtime release for the wasm32 determinism job
+- *(astc)* measured decode/encode artifacts and README section
+- *(astc)* refit all channels of a partition in one pass
+- *(astc)* skip grid residuals that cannot reach the top-k estimate
+- *(astc)* faster Medium encode (partition pre-ranking, retuned limits, hoists)
+- *(astc)* container fuzz result
+- *(astc)* DC6 fuzz result in the conformance artifact
+- *(astc)* decoder conformance and census artifacts, ledger
+- *(astc)* build gates, fuzz target and decode bench harness
+- *(astc)* oracle golden vectors, robustness and surface tests
+- keep LF line endings on shell scripts
+- *(release)* bump the minor version on feat commits
+- 4,492 active installs
+
 ## 0.10.1 - 2026-11-21
 
 ### Fixed — legacy uncompressed 32-bit headers refused by `decode_rgba8`
