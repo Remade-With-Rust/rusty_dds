@@ -34,6 +34,7 @@ mod block_mode;
 mod cem;
 pub mod container;
 pub(crate) mod decode;
+mod fast;
 #[cfg(feature = "encode")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encode")))]
 pub mod encode;
@@ -46,6 +47,7 @@ mod parse;
 mod partition;
 mod quant;
 pub mod reference;
+mod tables;
 mod texel;
 
 #[cfg(any(test, feature = "__astc_internals"))]
@@ -108,7 +110,7 @@ pub struct AstcDecodeReport {
     pub hdr_in_ldr_blocks: u64,
 }
 
-decode::surface_api!(decode::Reference);
+decode::surface_api!(decode::Fast);
 
 /// Internal stages, exposed only for the differential harness in
 /// `tools/astc-harness`. Not a stable API: the feature is dev-only.

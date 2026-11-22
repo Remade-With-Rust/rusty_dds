@@ -225,3 +225,41 @@ fn error_colours_follow_the_cell() {
     decode_block_f16(&blk, fp, AstcProfile::Hdr, &mut t16);
     assert_eq!(t16[15], [0xFFFF; 4]);
 }
+
+/// DC7: the fast kernel (the public surface API) is byte-identical to the
+/// frozen reference on every golden block plus extra legal-biased and
+/// uniform blocks, in all six cells, block by block and through surfaces.
+#[test]
+fn fast_kernel_equals_reference() {
+    let extra = if cfg!(debug_assertions) { 2_000 } else { 50_000 };
+    for fp in all_fps() {
+        let mut blocks = testgen::golden_blocks(fp);
+        let mut rng = Rng::new(0xFA57 ^ fp.texels() as u64);
+        let legal = testgen::legal_modes(fp);
+        for i in 0..extra {
+            blocks.push(if i % 2 == 0 { testgen::mixed(&mut rng, fp, &legal) } else { rng.block() });
+        }
+        let n = fp.texels() as usize;
+        for &(prof, out) in CELLS.iter() {
+            let mut ctx = super::fast::FastCtx::new(fp);
+            let mut a = [[0u16; 4]; 216];
+            let mut b = [[0u16; 4]; 216];
+            for blk in &blocks {
+                let sa = ctx.decode(blk, prof, out, &mut a);
+                let sb = decode_block(blk, fp, prof, out, &mut b);
+                assert_eq!(&a[..n], &b[..n], "{fp} {prof:?} block {blk:02x?}");
+                assert_eq!(sa, sb);
+            }
+        }
+        // Surfaces: public (fast) vs reference.
+        if !fp.is_3d() {
+            let (w, h) = (fp.width() * 7 + 3, fp.height() * 5 + 1);
+            let data = sample_surface(fp, w, h, 1, 77);
+            let mut x = vec![0u16; (w * h * 4) as usize];
+            let mut y = vec![0u16; (w * h * 4) as usize];
+            decode_rgba_f16_into(&data, w, h, 1, fp, AstcProfile::Hdr, &mut x).unwrap();
+            reference::decode_rgba_f16_into(&data, w, h, 1, fp, AstcProfile::Hdr, &mut y).unwrap();
+            assert_eq!(x, y, "{fp} surface");
+        }
+    }
+}

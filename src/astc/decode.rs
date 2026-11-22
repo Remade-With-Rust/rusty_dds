@@ -13,9 +13,12 @@ use super::texel::f16_to_f32;
 use super::{AstcBlockStatus, AstcDecodeReport, AstcProfile};
 use crate::Error;
 
-/// A block decoder: `[u8; 16]` to texels in (z, y, x) order.
+/// A block decoder: `[u8; 16]` to texels in (z, y, x) order. Stateful, so a
+/// kernel can keep per-surface caches; one instance decodes one surface.
 pub(crate) trait BlockDecoder {
+    fn new(fp: AstcFootprint) -> Self;
     fn decode(
+        &mut self,
         block: &[u8; 16],
         fp: AstcFootprint,
         profile: AstcProfile,
@@ -24,11 +27,15 @@ pub(crate) trait BlockDecoder {
     ) -> AstcBlockStatus;
 }
 
-/// The reference kernel.
+/// The reference kernel (frozen oracle).
 pub(crate) struct Reference;
 impl BlockDecoder for Reference {
+    fn new(_: AstcFootprint) -> Self {
+        Reference
+    }
     #[inline]
     fn decode(
+        &mut self,
         block: &[u8; 16],
         fp: AstcFootprint,
         profile: AstcProfile,
@@ -36,6 +43,25 @@ impl BlockDecoder for Reference {
         out: &mut [[u16; 4]],
     ) -> AstcBlockStatus {
         super::reference::decode_block(block, fp, profile, out_kind, out)
+    }
+}
+
+/// The fast scalar kernel, byte-identical to [`Reference`].
+pub(crate) struct Fast(super::fast::FastCtx);
+impl BlockDecoder for Fast {
+    fn new(fp: AstcFootprint) -> Self {
+        Fast(super::fast::FastCtx::new(fp))
+    }
+    #[inline]
+    fn decode(
+        &mut self,
+        block: &[u8; 16],
+        _fp: AstcFootprint,
+        profile: AstcProfile,
+        out_kind: Out,
+        out: &mut [[u16; 4]],
+    ) -> AstcBlockStatus {
+        self.0.decode(block, profile, out_kind, out)
     }
 }
 
@@ -130,13 +156,14 @@ fn decode_region<D: BlockDecoder, T: Sink>(
     let out_h = (y1 - y0) as usize;
     let mut report = AstcDecodeReport::default();
     let mut tmp = [[0u16; 4]; 216];
+    let mut dec = D::new(fp);
     for bz in 0..nbz {
         for by in rows.clone() {
             for bx in 0..nbx {
                 let idx = ((bz as usize * nby as usize + by as usize) * nbx as usize + bx as usize) * 16;
                 let mut blk = [0u8; 16];
                 blk.copy_from_slice(&data[idx..idx + 16]);
-                let st = D::decode(&blk, fp, profile, T::KIND, &mut tmp);
+                let st = dec.decode(&blk, fp, profile, T::KIND, &mut tmp);
                 tally(&mut report, st);
                 let mut t = 0usize;
                 for tz in 0..bd {
