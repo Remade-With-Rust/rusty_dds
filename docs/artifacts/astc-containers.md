@@ -21,6 +21,7 @@ Command: `tools/astc-harness`: `astc_harness containers` and `astc_harness dds` 
 | C3 refactor | `tests/layout_snapshot.rs`: 4,063 layout lines (every fixture plus every DXGI format x odd/POT sizes x mips/arrays/cubes/volumes), recorded before the change | unchanged |
 | C3 DDS | image-dds's 14 ASTC DDS files (129x66, 8 mip levels, every 2D footprint): parse, the exact mip chain accounts for every payload byte, level 0 equals astcenc decoding the payload | 14 / 14 |
 | C3 DDS | DDS files written by `Dds::new_dxgi` with ASTC formats (6x6 64x48; 8x5 37x29 with 3 mips; 12x12 100x100) read by the `dds` 0.2 crate | pixels equal astc-decode 0.3.1 on the same payload (the decoder the `dds` crate uses) |
+| Fuzz | libFuzzer `astc_container` (`.astc`, KTX 1.0, KTX 2.0, zstd inflate; decodes every parsed subresource up to 64k texels), 30 minutes | 43,996 executions, 0 crashes, 486 new units, peak RSS 386 MB |
 | Robustness | `tests/astc_containers.rs`: every truncation, every bit flip in the first 128 bytes, 3,000 seeded arbitrary payloads behind each magic | no panic |
 
 Behaviour change: a DDS whose DX10 header names DXGI 133..=187 used to fail with
