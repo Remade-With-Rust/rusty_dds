@@ -21,7 +21,10 @@ L.append('//! Block-mode shortlist per 2D footprint, harvested from this crate\'
          '//! `astc_harness modehist medium <images>`. Do not edit.\n')
 L.append('')
 L.append('/// (footprint width, height, [(raw block mode, per mille of blocks covered before it)]).')
-L.append('pub(crate) static SHORTLIST: &[(u8, u8, &[(u16, u16)])] = &[')
+L.append('/// One footprint\'s entry: width, height, its block modes.')
+L.append("pub(crate) type ShortlistEntry = (u8, u8, &'static [(u16, u16)]);")
+L.append('')
+L.append('pub(crate) static SHORTLIST: &[ShortlistEntry] = &[')
 for fp in order:
     v = sorted(d[fp], key=lambda x: (-x[0], x[1]))
     tot = sum(c for c, _ in v)

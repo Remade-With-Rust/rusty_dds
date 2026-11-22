@@ -105,6 +105,8 @@ impl FastCtx {
     }
 
     /// Decode one block; identical to [`decode_block`].
+    // One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+    #[allow(clippy::needless_range_loop)]
     pub(crate) fn decode(
         &mut self,
         block: &[u8; 16],
@@ -264,25 +266,6 @@ impl FastCtx {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn u8_from_8bit_equals_the_16bit_lerp() {
-        for c0 in 0..=255u16 {
-            for c1 in 0..=255u16 {
-                for w in 0..=64u8 {
-                    let lin = lerp(c0 * 257, c1 * 257, w) >> 8;
-                    assert_eq!(u8_from_8bit(c0, c1, w, false), lin);
-                    let srgb = lerp((c0 << 8) | 0x80, (c1 << 8) | 0x80, w) >> 8;
-                    assert_eq!(u8_from_8bit(c0, c1, w, true), srgb);
-                }
-            }
-        }
-    }
-}
-
 /// Endpoint pairs (8-bit values, four channels) per partition.
 pub(crate) type Ends = [([u16; 4], [u16; 4]); 4];
 
@@ -325,4 +308,23 @@ pub(crate) fn wv(w1: &[u8; 216], w2: &[u8; 216], ccs: usize, t: usize) -> [u16; 
         if ccs == 2 { b } else { a },
         if ccs == 3 { b } else { a },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u8_from_8bit_equals_the_16bit_lerp() {
+        for c0 in 0..=255u16 {
+            for c1 in 0..=255u16 {
+                for w in 0..=64u8 {
+                    let lin = lerp(c0 * 257, c1 * 257, w) >> 8;
+                    assert_eq!(u8_from_8bit(c0, c1, w, false), lin);
+                    let srgb = lerp((c0 << 8) | 0x80, (c1 << 8) | 0x80, w) >> 8;
+                    assert_eq!(u8_from_8bit(c0, c1, w, true), srgb);
+                }
+            }
+        }
+    }
 }

@@ -331,6 +331,8 @@ mod inverse_tests {
     use crate::astc::ise::LEVELS;
 
     #[test]
+    // One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+    #[allow(clippy::needless_range_loop)]
     fn inverses_invert() {
         for r in MIN_COLOR_RANGE..RANGE_COUNT {
             for v in 0..LEVELS[r] as usize {

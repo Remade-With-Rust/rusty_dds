@@ -24,9 +24,9 @@ pub(crate) struct Grid {
     /// contributions as f32 (exact conversions of the u8 values).
     pub tap_i: Vec<[u8; 4]>,
     pub tap_c: Vec<[f32; 4]>,
-    /// Transpose: the texels each stored weight feeds and how much, flattened;
-    /// stored weight j owns `feed[feed_at[j]..feed_at[j + 1]]`.
-    pub feed: Vec<(u8, u8)>,
+    /// Transpose: the texels each stored weight feeds and how much, flattened
+    /// (`feed_t`/`feed_c` below); stored weight j owns entries
+    /// `feed_at[j]..feed_at[j + 1]`.
     pub feed_at: Vec<u16>,
     /// Per stored weight: the sum of its contributions, and the sum of the
     /// squared contributions / 16, each accumulated in `feed` order (the
@@ -244,7 +244,6 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         taps4,
         tap_i,
         tap_c,
-        feed,
         feed_at,
         feed_cs,
         feed_den,

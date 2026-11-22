@@ -76,9 +76,10 @@ pub(crate) struct Target {
 pub(super) const MAX_TEXELS: usize = 216;
 
 /// Squared colour quantisation step (255 / (levels - 1))^2 per range
-/// (baked literals: float const fn needs Rust 1.82).
+/// (baked literals: float const fn needs Rust 1.82; each is the shortest
+/// decimal for the f32 nearest the f64 quotient, `qstep2_table` checks).
 #[rustfmt::skip]
-static QSTEP2: [f32; 21] = [65025.0, 16256.25, 7225.0, 4064.0625, 2601.0, 1327.0408163265308, 802.7777777777777, 537.3966942148761, 289.0, 180.12465373961217, 122.92060491493385, 67.66389177939648, 42.751479289940825, 29.4363965595292, 16.383219954648524, 10.419003364845377, 7.204986149584487, 4.031558063116126, 2.5720897116411536, 1.7824346920314682, 1.0];
+static QSTEP2: [f32; 21] = [65025.0, 16256.25, 7225.0, 4064.0625, 2601.0, 1327.0408, 802.7778, 537.39667, 289.0, 180.12465, 122.92061, 67.663895, 42.75148, 29.436396, 16.38322, 10.4190035, 7.204986, 4.031558, 2.5720897, 1.7824347, 1.0];
 
 /// Endpoint classes searched (the value count decides the colour range).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +214,8 @@ fn dot4(a: [f32; 4], b: [f32; 4]) -> f32 {
 /// Principal-axis line fit of the texels `idx` over the channels in `mask`.
 /// Returns the line and fills `w` (ideal weights) for those texels; returns
 /// the residual error off the line.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -> (Line, f32) {
     let cw = src.tgt.cw;
     let n = idx.len().max(1) as f32;
@@ -436,6 +439,8 @@ pub(super) fn decimate(
 
 /// The scalar body of [`decimate`] for a grid that is not the identity: the
 /// oracle of `simd::decimate`, and the kernel without AVX2.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn decimate_scalar(
     g: &crate::astc::tables::Grid,
     ideal: &[f32; MAX_TEXELS],
@@ -497,7 +502,7 @@ const fn build_wq_lut() -> [[u8; 257]; 12] {
             while v < n {
                 let l = crate::astc::quant::WEIGHT_UNQUANT_C[r][v] as u32;
                 let x = i as u32;
-                let d = if 4 * l > x { 4 * l - x } else { x - 4 * l };
+                let d = (4 * l).abs_diff(x);
                 if d < bd || (d == bd && (l as u8) < best) {
                     bd = d;
                     best = l as u8;
@@ -1076,6 +1081,8 @@ pub(super) fn residual_scalar(
 #[allow(clippy::too_many_arguments)]
 /// Encode one candidate exactly with `refine` weight/endpoint passes; updates
 /// `best` and returns the lowest exact error this candidate reached.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn exact_candidate(
     ctx: &Ctx,
     prm: &Params,
@@ -1257,6 +1264,8 @@ fn exact_candidate(
 
 /// k-means clustering (k = 2..=4) of the block's colours; deterministic
 /// farthest-point seeding and a fixed iteration count. Returns labels.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn k_means(src: &Src, k: usize, labels: &mut [u8; MAX_TEXELS]) {
     let n = src.n;
     let col = |i: usize| -> [f32; 4] {
@@ -1489,6 +1498,8 @@ fn best_matching(cm: &[[u32; 4]; 4], n: u32, k: usize) -> u32 {
 
 /// Lowest absolute correlation between a channel and the others, and that
 /// channel (for the dual-plane gate).
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 fn weakest_channel(src: &Src) -> (usize, f32) {
     let n = src.n as f32;
     let mut mean = [0f32; 4];
@@ -1533,6 +1544,8 @@ fn weakest_channel(src: &Src) -> (usize, f32) {
 
 /// Encode one block of `n` texels (z, y, x order; edge texels already
 /// clamped). Returns the symbolic block and its exact error.
+// One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]]) -> Best {
     let n = ctx.texels;
     let first = px[0];
@@ -1660,6 +1673,16 @@ impl SymbolicBlock {
 #[cfg(test)]
 mod oracle_tests {
     use super::*;
+
+    /// QSTEP2 holds (255 / (levels - 1))^2 computed in f64 and rounded to f32.
+    #[test]
+    fn qstep2_table() {
+        for (r, &q) in QSTEP2.iter().enumerate() {
+            let levels = LEVELS[r] as f64;
+            let x = 255.0 / (levels - 1.0);
+            assert_eq!(q.to_bits(), ((x * x) as f32).to_bits(), "range {r}");
+        }
+    }
     use crate::astc::testgen::Rng;
 
     /// The bitset mismatch equals the per-texel walk, for every texel count

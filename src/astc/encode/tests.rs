@@ -154,11 +154,7 @@ fn encoder_reconstruction_is_the_decode() {
             let best = block::encode_block(&ctx, &prm, tgt, &px[..48]);
             let blk = crate::astc::pack::pack(&best.sym, fp);
             let mut dec = [[0u16; 4]; 216];
-            let out = if unorm8 {
-                crate::astc::reference::Out::U8
-            } else {
-                crate::astc::reference::Out::U8
-            };
+            let out = crate::astc::reference::Out::U8;
             // Compare in the 16-bit domain when unorm8 is off: decode the
             // interpolated values through the F16-free path by re-deriving
             // them is not public; the 8-bit check below covers both targets'
