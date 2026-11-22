@@ -265,3 +265,62 @@ pub fn encode_block_rows_into(
 
 #[cfg(test)]
 mod tests;
+
+/// Encode a 3D texture: `depth` slices of tightly packed RGBA8 (`z` slowest),
+/// with a 3D footprint (E8). Blocks are row-major x, then y, then z; edge
+/// texels are clamped to the volume in all three axes.
+pub fn encode_volume_rgba8(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    depth: u32,
+    opts: &AstcEncodeOptions,
+) -> Result<Vec<u8>, Error> {
+    let fp = opts.footprint;
+    if width == 0 || height == 0 || depth == 0 {
+        return Err(Error::InvalidField("ASTC encode: zero dimension".into()));
+    }
+    if !fp.is_3d() || !matches!(opts.profile, AstcProfile::Ldr | AstcProfile::LdrSrgb) {
+        return Err(Error::UnsupportedFormat);
+    }
+    let need = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(depth as usize))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or(Error::OutOfBounds)?;
+    if pixels.len() != need {
+        return Err(Error::OutOfBounds);
+    }
+    let total = payload_len(width, height, depth, fp).ok_or(Error::OutOfBounds)?;
+    let mut out = alloc::vec![0u8; total];
+    let prm = params(opts.preset);
+    let ctx = Ctx::new(fp, prm.max_partitions);
+    let tgt = target(opts);
+    let (bw, bh, bd) = (fp.width(), fp.height(), fp.depth());
+    let (nbx, nby, nbz) = fp.block_counts(width, height, depth);
+    let mut px = [[0u8; 4]; 216];
+    let mut o = 0usize;
+    for bz in 0..nbz {
+        for by in 0..nby {
+            for bx in 0..nbx {
+                let mut i = 0;
+                for tz in 0..bd {
+                    let z = (bz * bd + tz).min(depth - 1) as usize;
+                    for ty in 0..bh {
+                        let y = (by * bh + ty).min(height - 1) as usize;
+                        for tx in 0..bw {
+                            let x = (bx * bw + tx).min(width - 1) as usize;
+                            let s = ((z * height as usize + y) * width as usize + x) * 4;
+                            px[i] = [pixels[s], pixels[s + 1], pixels[s + 2], pixels[s + 3]];
+                            i += 1;
+                        }
+                    }
+                }
+                let best = encode_block(&ctx, &prm, tgt, &px[..i]);
+                out[o..o + 16].copy_from_slice(&super::pack::pack(&best.sym, fp));
+                o += 16;
+            }
+        }
+    }
+    Ok(out)
+}

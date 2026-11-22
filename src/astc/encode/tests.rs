@@ -162,3 +162,29 @@ fn rejects_unsupported() {
     let o = AstcEncodeOptions::new(AstcFootprint::B4X4, AstcProfile::Ldr);
     assert!(encode_rgba8(&img[..10], 4, 4, &o).is_err());
 }
+
+#[test]
+fn volume_encode_is_legal_and_close() {
+    for &fp in &[AstcFootprint::B3X3X3, AstcFootprint::B4X4X4, AstcFootprint::B6X5X5] {
+        let (w, h, d) = (13u32, 9u32, 7u32);
+        let mut px = Vec::new();
+        for z in 0..d {
+            for y in 0..h {
+                for x in 0..w {
+                    px.extend_from_slice(&[(x * 17) as u8, (y * 23) as u8, (z * 31) as u8, 255]);
+                }
+            }
+        }
+        let opts = AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(AstcPreset::Fast);
+        let data = encode_volume_rgba8(&px, w, h, d, &opts).unwrap();
+        for b in data.chunks_exact(16) {
+            assert!(!matches!(parse(b.try_into().unwrap(), fp).kind, BlockKind::Illegal(_)));
+        }
+        let mut dec = vec![0u8; px.len()];
+        decode_rgba8_into(&data, w, h, d, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        let p = psnr(&px, &dec);
+        // R, G and B vary along three axes inside each block (no single
+        // colour line), so this is a sanity floor; EC1 is checked by the harness.
+        assert!(p > 24.0, "{fp}: {p:.2} dB");
+    }
+}
