@@ -165,24 +165,28 @@ fn decode_region<D: BlockDecoder, T: Sink>(
                 blk.copy_from_slice(&data[idx..idx + 16]);
                 let st = dec.decode(&blk, fp, profile, T::KIND, &mut tmp);
                 tally(&mut report, st);
-                let mut t = 0usize;
+                // Copy the visible part of the block row by row: the crop is
+                // decided once per block, not per texel.
+                let xs = (bx * bw) as usize;
+                let vis_w = (width - bx * bw).min(bw) as usize;
                 for tz in 0..bd {
                     let z = bz * bd + tz;
+                    if z >= depth {
+                        break;
+                    }
                     for ty in 0..bh {
                         let y = by * bh + ty;
-                        for tx in 0..bw {
-                            let x = bx * bw + tx;
-                            if x < width && y < height && z < depth {
-                                let o = ((z as usize * out_h + (y - y0) as usize) * width as usize
-                                    + x as usize)
-                                    * 4;
-                                let px = &tmp[t];
-                                out[o] = T::from_value(px[0]);
-                                out[o + 1] = T::from_value(px[1]);
-                                out[o + 2] = T::from_value(px[2]);
-                                out[o + 3] = T::from_value(px[3]);
-                            }
-                            t += 1;
+                        if y >= height {
+                            break;
+                        }
+                        let row = (z as usize * out_h + (y - y0) as usize) * width as usize + xs;
+                        let src = &tmp[((tz * bh + ty) * bw) as usize..][..vis_w];
+                        let dst = &mut out[row * 4..(row + vis_w) * 4];
+                        for (d, px) in dst.chunks_exact_mut(4).zip(src) {
+                            d[0] = T::from_value(px[0]);
+                            d[1] = T::from_value(px[1]);
+                            d[2] = T::from_value(px[2]);
+                            d[3] = T::from_value(px[3]);
                         }
                     }
                 }

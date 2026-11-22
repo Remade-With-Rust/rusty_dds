@@ -140,6 +140,20 @@ impl FastCtx {
         };
         let out = &mut out[..n];
         match out_kind {
+            Out::U8 if parts == 1 && ccs == 4 => {
+                // One partition, one plane: the common case, no per-texel
+                // partition lookup or plane select.
+                let e = &eps[0];
+                for t in 0..n {
+                    let w = w1[t];
+                    out[t] = [
+                        lerp(e.e0[0], e.e1[0], w) >> 8,
+                        lerp(e.e0[1], e.e1[1], w) >> 8,
+                        lerp(e.e0[2], e.e1[2], w) >> 8,
+                        lerp(e.e0[3], e.e1[3], w) >> 8,
+                    ];
+                }
+            }
             Out::U8 => {
                 for t in 0..n {
                     let e = &eps[if parts > 1 { pmap[t] as usize } else { 0 }];

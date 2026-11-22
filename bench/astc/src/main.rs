@@ -119,6 +119,31 @@ fn main() {
     if args.first().map(|s| s.as_str()) == Some("--encode") {
         return encode_mode(&args[1..]);
     }
+    #[cfg(feature = "internals")]
+    if args.first().map(|s| s.as_str()) == Some("--parse") {
+        // Parse-only time vs full fast decode, same blocks.
+        for f in &args[1..] {
+            let inp = load(f);
+            let blocks: Vec<[u8; 16]> = inp.payload.chunks_exact(16).map(|c| c.try_into().unwrap()).collect();
+            let mut best_p = f64::MAX;
+            let mut best_d = f64::MAX;
+            let mut out = vec![0u8; (inp.w * inp.h * 4) as usize];
+            for _ in 0..5 {
+                let t = Instant::now();
+                let mut acc = 0u32;
+                for b in &blocks {
+                    acc = acc.wrapping_add(rusty_dds::astc::internals::parse(b, inp.fp).color_count as u32);
+                }
+                black_box(acc);
+                best_p = best_p.min(t.elapsed().as_secs_f64());
+                let t = Instant::now();
+                astc::decode_rgba8_into(&inp.payload, inp.w, inp.h, 1, inp.fp, AstcProfile::Ldr, &mut out).unwrap();
+                best_d = best_d.min(t.elapsed().as_secs_f64());
+            }
+            println!("{} {}: parse {:.1} ms, full decode {:.1} ms ({:.0}% parse)", inp.name, inp.fp, best_p * 1e3, best_d * 1e3, 100.0 * best_p / best_d);
+        }
+        return;
+    }
     let mut rounds = 15usize;
     let mut profile = AstcProfile::Ldr;
     let mut files = Vec::new();

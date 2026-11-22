@@ -22,3 +22,5 @@ debug = 1
 [features]
 # Dev-only: RUSTY_DDS_ASTC_* search-limit overrides (rusty_dds `tuning`).
 tuning = ["rusty_dds/tuning"]
+# Dev-only: expose the decoder stages for parse-only timing.
+internals = ["rusty_dds/__astc_internals"]
