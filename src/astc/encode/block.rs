@@ -747,6 +747,7 @@ fn encode_endpoints(
 /// Exact error of one partition's texels for decoded endpoints `ep` and
 /// texel weights (plane 1, plane 2).
 fn exact_part_err(
+    ctx: &Ctx,
     src: &Src,
     idx: &[u8],
     ep: &cem::Endpoints,
@@ -761,6 +762,7 @@ fn exact_part_err(
     let (px, unorm8) = (src.px, src.tgt.unorm8);
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let acc = super::simd::part_err_acc(
+        ctx.avx2,
         px,
         idx,
         ep,
@@ -773,7 +775,10 @@ fn exact_part_err(
     )
     .unwrap_or_else(|| part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8));
     #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
-    let acc = part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8);
+    let acc = {
+        let _ = ctx;
+        part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8)
+    };
     let scale = if src.tgt.unorm8 {
         1.0
     } else {
@@ -1135,7 +1140,7 @@ fn exact_candidate(
             for &(cemv, v) in encs.iter() {
                 let raw = cem::decode(cemv, &v);
                 let ep = cem::expand(&raw, src.tgt.profile);
-                let e = exact_part_err(src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
+                let e = exact_part_err(ctx, src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
                 seen[cemv as usize] = true;
                 if e < chosen[cemv as usize][p].0 {
                     chosen[cemv as usize][p] = (e, v);

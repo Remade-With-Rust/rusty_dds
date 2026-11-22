@@ -146,8 +146,13 @@ mod sse2 {
     /// Returns `None` (the caller falls back to the scalar) if an endpoint is
     /// not in the LDR form above, which `cem::expand` never produces under an
     /// LDR profile.
+    ///
+    /// With an [`Avx2`](super::Avx2) token the texels go four at a time
+    /// through `avx2::part_err_quads` (the same lane arithmetic in 256-bit
+    /// registers) and the remainder through this kernel.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::astc::encode) fn part_err_acc(
+        wide: Option<super::Avx2>,
         px: &[[u8; 4]],
         idx: &[u8],
         ep: &Endpoints,
@@ -193,6 +198,22 @@ mod sse2 {
         let (e0, e1) = (lanes(c0) as i64, lanes(c1) as i64);
         let keep = keep as i64;
         let mut acc = [0u64; 4];
+        let mut start = 0;
+        if let Some(t) = wide {
+            start = idx.len() / 4 * 4;
+            let lanes = super::avx2::QuadLanes {
+                e0,
+                e1,
+                keep,
+                pmask,
+                plane2,
+                dual,
+                unorm8,
+                srgb,
+            };
+            acc = super::avx2::part_err_quads(t, px, &idx[..start], w1, w2, &lanes);
+        }
+        let idx = &idx[start..];
         let mut out = [0u64; 4];
         let pairs = idx.len() / 2;
         // SAFETY: SSE2 is unconditionally present on x86_64. Every operand
@@ -258,7 +279,9 @@ mod sse2 {
             _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, lo);
             _mm_storeu_si128(out.as_mut_ptr().add(2) as *mut __m128i, hi);
         }
-        acc.copy_from_slice(&out);
+        for c in 0..4 {
+            acc[c] += out[c];
+        }
         // The odd texel, if any, as the scalar does it.
         if idx.len() % 2 == 1 {
             let i = idx[idx.len() - 1] as usize;
@@ -336,13 +359,18 @@ mod avx2 {
     use super::super::block::MAX_TEXELS;
     use crate::astc::tables::Grid;
     use core::arch::x86_64::{
-        __m128i, __m256i, _mm256_add_epi32, _mm256_add_ps, _mm256_and_si256, _mm256_blendv_ps,
-        _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_cvtepu8_epi32, _mm256_cvttps_epi32,
-        _mm256_div_ps, _mm256_i32gather_epi32, _mm256_i32gather_ps, _mm256_loadu_ps,
-        _mm256_loadu_si256, _mm256_maskstore_ps, _mm256_max_ps, _mm256_min_epu32, _mm256_min_ps,
-        _mm256_mul_ps, _mm256_mullo_epi32, _mm256_set1_epi32, _mm256_set1_ps, _mm256_setr_epi32,
-        _mm256_setzero_ps, _mm256_setzero_si256, _mm256_srli_epi32, _mm256_storeu_ps,
-        _mm256_storeu_si256, _mm256_sub_ps, _mm_loadl_epi64, _CMP_GT_OQ,
+        __m128i, __m256i, _mm256_add_epi16, _mm256_add_epi32, _mm256_add_epi64, _mm256_add_ps,
+        _mm256_and_si256, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_cmpgt_epi32,
+        _mm256_cvtepu8_epi16, _mm256_cvtepu8_epi32, _mm256_cvttps_epi32, _mm256_div_ps,
+        _mm256_i32gather_epi32, _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_loadu_si256,
+        _mm256_maskstore_ps, _mm256_max_ps, _mm256_min_epu32, _mm256_min_ps, _mm256_mul_ps,
+        _mm256_mulhi_epu16, _mm256_mullo_epi16, _mm256_mullo_epi32, _mm256_or_si256,
+        _mm256_set1_epi16, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_set1_ps,
+        _mm256_set_epi64x, _mm256_setr_epi32, _mm256_setzero_ps, _mm256_setzero_si256,
+        _mm256_slli_epi16, _mm256_srli_epi16, _mm256_srli_epi32, _mm256_storeu_ps,
+        _mm256_storeu_si256, _mm256_sub_epi16, _mm256_sub_ps, _mm256_subs_epu16,
+        _mm256_unpackhi_epi16, _mm256_unpackhi_epi32, _mm256_unpacklo_epi16, _mm256_unpacklo_epi32,
+        _mm_loadl_epi64, _mm_set_epi32, _CMP_GT_OQ,
     };
 
     /// Proof that the CPU supports AVX2: only [`Avx2::detect`] makes one.
@@ -517,6 +545,117 @@ mod avx2 {
                 j0 += 8;
             }
         }
+    }
+
+    /// The per-call lane constants of `sse2::part_err_acc`.
+    pub(in crate::astc::encode) struct QuadLanes {
+        pub e0: i64,
+        pub e1: i64,
+        pub keep: i64,
+        pub pmask: u64,
+        pub plane2: u32,
+        pub dual: bool,
+        pub unorm8: bool,
+        pub srgb: bool,
+    }
+
+    /// `sse2::part_err_acc`'s loop four texels per 256-bit register (texels
+    /// in the order of `idx`, whose length is a multiple of 4): the same
+    /// 16/32/64-bit lane arithmetic, exact by the range table there, so the
+    /// per-channel integer sums are identical.
+    pub(in crate::astc::encode) fn part_err_quads(
+        _: Avx2,
+        px: &[[u8; 4]],
+        idx: &[u8],
+        w1: &[u8; MAX_TEXELS],
+        w2: &[u8; MAX_TEXELS],
+        l: &QuadLanes,
+    ) -> [u64; 4] {
+        // SAFETY: an `Avx2` exists only if the CPU supports AVX2; the kernel
+        // reads memory only through safe indexing.
+        unsafe { quads_k(px, idx, w1, w2, l) }
+    }
+
+    /// # Safety
+    ///
+    /// AVX2 is available.
+    #[target_feature(enable = "avx2")]
+    unsafe fn quads_k(
+        px: &[[u8; 4]],
+        idx: &[u8],
+        w1: &[u8; MAX_TEXELS],
+        w2: &[u8; MAX_TEXELS],
+        l: &QuadLanes,
+    ) -> [u64; 4] {
+        let wl = |i: usize| -> i64 {
+            let w = (w1[i] as u64) * 0x0001_0001_0001_0001;
+            (if l.dual {
+                (w & l.pmask) | (w2[i] as u64) << l.plane2
+            } else {
+                w
+            }) as i64
+        };
+        let z = _mm256_setzero_si256();
+        let va = _mm256_set1_epi64x(l.e0);
+        let vb = _mm256_set1_epi64x(l.e1);
+        let vkeep = _mm256_set1_epi64x(l.keep);
+        let k64 = _mm256_set1_epi16(64);
+        let k32 = _mm256_set1_epi16(32);
+        let k128 = _mm256_set1_epi16(128);
+        let (mut lo, mut hi, mut a32) = (z, z, z);
+        for q in idx.chunks_exact(4) {
+            let i: [usize; 4] = core::array::from_fn(|k| q[k] as usize);
+            let vw = _mm256_set_epi64x(wl(i[3]), wl(i[2]), wl(i[1]), wl(i[0]));
+            let x = _mm256_add_epi16(
+                _mm256_mullo_epi16(va, _mm256_sub_epi16(k64, vw)),
+                _mm256_mullo_epi16(vb, vw),
+            );
+            let x4 = _mm256_slli_epi16(x, 2);
+            let v = if l.srgb {
+                _mm256_add_epi16(x4, k128)
+            } else {
+                _mm256_add_epi16(x4, _mm256_srli_epi16(_mm256_add_epi16(x, k32), 6))
+            };
+            let p = |k: usize| i32::from_le_bytes(px[i[k]]);
+            let s = _mm256_cvtepu8_epi16(_mm_set_epi32(p(3), p(2), p(1), p(0)));
+            if l.unorm8 {
+                let v8 = _mm256_srli_epi16(v, 8);
+                let d = _mm256_or_si256(_mm256_subs_epu16(v8, s), _mm256_subs_epu16(s, v8));
+                let d = _mm256_and_si256(d, vkeep);
+                let sq = _mm256_mullo_epi16(d, d);
+                a32 = _mm256_add_epi32(a32, _mm256_unpacklo_epi16(sq, z));
+                a32 = _mm256_add_epi32(a32, _mm256_unpackhi_epi16(sq, z));
+            } else {
+                let t = _mm256_or_si256(_mm256_slli_epi16(s, 8), s);
+                let d = _mm256_or_si256(_mm256_subs_epu16(v, t), _mm256_subs_epu16(t, v));
+                let d = _mm256_and_si256(d, vkeep);
+                let (ql, qh) = (_mm256_mullo_epi16(d, d), _mm256_mulhi_epu16(d, d));
+                // Per 128-bit half: 32-bit squares of its first texel's
+                // channels (q0) and its second's (q1).
+                let q0 = _mm256_unpacklo_epi16(ql, qh);
+                let q1 = _mm256_unpackhi_epi16(ql, qh);
+                lo = _mm256_add_epi64(lo, _mm256_unpacklo_epi32(q0, z));
+                hi = _mm256_add_epi64(hi, _mm256_unpackhi_epi32(q0, z));
+                lo = _mm256_add_epi64(lo, _mm256_unpacklo_epi32(q1, z));
+                hi = _mm256_add_epi64(hi, _mm256_unpackhi_epi32(q1, z));
+            }
+        }
+        let mut acc = [0u64; 4];
+        if l.unorm8 {
+            let mut a = [0u32; 8];
+            // SAFETY: one 32-byte store into the local `a`.
+            _mm256_storeu_si256(a.as_mut_ptr() as *mut __m256i, a32);
+            for c in 0..4 {
+                acc[c] = a[c] as u64 + a[c + 4] as u64;
+            }
+        } else {
+            let (mut a, mut b) = ([0u64; 4], [0u64; 4]);
+            // SAFETY: one 32-byte store each into the locals `a` and `b`.
+            _mm256_storeu_si256(a.as_mut_ptr() as *mut __m256i, lo);
+            _mm256_storeu_si256(b.as_mut_ptr() as *mut __m256i, hi);
+            acc = [a[0] + a[2], a[1] + a[3], b[0] + b[2], b[1] + b[3]];
+        }
+        acc
     }
 
     /// Twin of `block::infill_eff_scalar`: the specification's infill
@@ -706,7 +845,12 @@ mod tests {
                 lns: [false; 4],
                 hdr_in_ldr: false,
             };
-            let a = super::part_err_acc(&px, &idx, &ep, &w1, &w2, ccs, chans, unorm8, srgb);
+            let wide = if trial % 2 == 1 {
+                super::Avx2::detect()
+            } else {
+                None
+            };
+            let a = super::part_err_acc(wide, &px, &idx, &ep, &w1, &w2, ccs, chans, unorm8, srgb);
             let b = part_err_acc_scalar(&px, &idx, &ep, &w1, &w2, ccs, chans, unorm8);
             assert_eq!(
                 a,
@@ -723,7 +867,7 @@ mod tests {
         };
         let (w, px) = ([0u8; MAX_TEXELS], [[0u8; 4]; 2]);
         assert_eq!(
-            super::part_err_acc(&px, &[0, 1], &ep, &w, &w, 4, 4, false, false),
+            super::part_err_acc(None, &px, &[0, 1], &ep, &w, &w, 4, 4, false, false),
             None
         );
     }
