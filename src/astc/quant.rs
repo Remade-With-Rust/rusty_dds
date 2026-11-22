@@ -211,7 +211,7 @@ const fn build_color_inverse() -> [[u8; 256]; RANGE_COUNT] {
 }
 
 const COLOR_UNQUANT_C: [[u8; 256]; RANGE_COUNT] = build_color();
-const WEIGHT_UNQUANT_C: [[u8; 32]; 12] = build_weight();
+pub(crate) const WEIGHT_UNQUANT_C: [[u8; 32]; 12] = build_weight();
 
 const fn build_color_nearest() -> [[u8; 256]; RANGE_COUNT] {
     // COLOR_NEAREST[r][x] = the representable unquantised value closest to x
@@ -264,14 +264,6 @@ pub static COLOR_NEAREST: [[u8; 256]; RANGE_COUNT] = build_color_nearest();
 /// Raw ISE value for a representable unquantised weight (0..=64).
 pub static WEIGHT_INV: [[u8; 65]; 12] = build_weight_inverse();
 
-/// Sorted representable unquantised weights of a weight range.
-pub fn weight_levels(range: usize) -> ([u8; 32], usize) {
-    let n = super::ise::LEVELS[range] as usize;
-    let mut v = [0u8; 32];
-    v[..n].copy_from_slice(&WEIGHT_UNQUANT[range][..n]);
-    v[..n].sort_unstable();
-    (v, n)
-}
 
 #[cfg(test)]
 mod inverse_tests {

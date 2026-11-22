@@ -23,6 +23,9 @@ pub(crate) struct Grid {
     pub feeds: Vec<Vec<(u8, u8)>>,
     /// The grid equals the footprint (infill is the identity).
     pub full: bool,
+    /// Mean over texels of sum((contribution / 16)^2): how much infill
+    /// averages away independent quantisation noise on the stored weights.
+    pub noise: f32,
 }
 
 /// A legal block mode for the footprint.
@@ -33,7 +36,9 @@ pub(crate) struct Mode {
     /// Weight range 0..=11.
     pub range: u8,
     pub dual: bool,
-    pub weight_bits: u8,
+    /// Colour range per (partitions - 1, class value count / 2 - 1), 0xFF if
+    /// the configuration does not fit (more than 18 values or too few bits).
+    pub crange: [[u8; 4]; 2],
 }
 
 /// A distinct, non-degenerate partitioning.
@@ -124,7 +129,16 @@ fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
             feeds[idx as usize].push((t as u8, c));
         }
     }
+    let mut noise = 0f32;
+    for &(n, tp) in taps.iter() {
+        for &(_, c) in &tp[..n as usize] {
+            let f = c as f32 / 16.0;
+            noise += f * f;
+        }
+    }
+    noise /= taps.len().max(1) as f32;
     Grid {
+        noise,
         w: gw as u8,
         h: gh as u8,
         d: gd as u8,
@@ -159,12 +173,26 @@ impl Ctx {
             {
                 continue;
             }
+            let mut crange = [[0xFFu8; 4]; 2];
+            for (pi, row) in crange.iter_mut().enumerate() {
+                let parts = pi as u32 + 1;
+                let config = if parts == 1 { 17 } else { 29 } + if g.dual_plane { 2 } else { 0 };
+                let avail = 128u32.saturating_sub(config + g.weight_bits());
+                for (vi, slot) in row.iter_mut().enumerate() {
+                    let values = 2 * (vi as u32 + 1) * parts;
+                    if values <= 18 {
+                        if let Some(r) = crate::astc::quant::color_range(values, avail) {
+                            *slot = r as u8;
+                        }
+                    }
+                }
+            }
             modes.push(Mode {
                 mode: m as u16,
                 grid: gi as u16,
                 range: g.range,
                 dual: g.dual_plane,
-                weight_bits: g.weight_bits() as u8,
+                crange,
             });
         }
         let small = texels < 31;

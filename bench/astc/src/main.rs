@@ -60,8 +60,65 @@ fn median(v: &mut [f64]) -> f64 {
     }
 }
 
+fn load_png(path: &str) -> (u32, u32, Vec<u8>) {
+    let dec = png::Decoder::new(std::fs::File::open(path).unwrap_or_else(|e| panic!("{path}: {e}")));
+    let mut r = dec.read_info().unwrap();
+    let mut buf = vec![0; r.output_buffer_size()];
+    let info = r.next_frame(&mut buf).unwrap();
+    let px = (info.width * info.height) as usize;
+    let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => buf[..px * 4].to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => buf[..px * 3].chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        other => panic!("{path}: png {other:?}"),
+    };
+    (info.width, info.height, rgba)
+}
+
+/// `--encode <preset> <fp> <png>...`: single-threaded encode rate and PSNR.
+fn encode_mode(args: &[String]) {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let v: Vec<u32> = args[1].split('x').map(|t| t.parse().unwrap()).collect();
+    let fp = AstcFootprint::new_2d(v[0], v[1]).unwrap();
+    println!("allocator: rusty_alloc; encode {preset:?} {fp}; best of 3");
+    let mut tot_px = 0f64;
+    let mut tot_s = 0f64;
+    for f in &args[2..] {
+        let (w, h, img) = load_png(f);
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+        let mut best = f64::MAX;
+        let mut data = Vec::new();
+        for _ in 0..3 {
+            let t = Instant::now();
+            data = astc::encode_rgba8(&img, w, h, &opts).unwrap();
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        let mut dec = vec![0u8; img.len()];
+        astc::decode_rgba8_into(&data, w, h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
+        let se: f64 = img.chunks_exact(4).zip(dec.chunks_exact(4)).map(|(a, b)| (0..3).map(|c| (a[c] as f64 - b[c] as f64).powi(2)).sum::<f64>()).sum();
+        let psnr = 10.0 * (255.0f64 * 255.0 * 3.0 * (w * h) as f64 / se).log10();
+        let mut hsh: u64 = 0xCBF2_9CE4_8422_2325;
+        for &b in &data {
+            hsh ^= b as u64;
+            hsh = hsh.wrapping_mul(0x100_0000_01B3);
+        }
+        println!("{f}: {:.3} MT/s  PSNR {psnr:.3} dB  hash {hsh:016x}", (w * h) as f64 / best / 1e6);
+        tot_px += (w * h) as f64;
+        tot_s += best;
+    }
+    println!("total: {:.3} MT/s", tot_px / tot_s / 1e6);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("--encode") {
+        return encode_mode(&args[1..]);
+    }
     let mut rounds = 15usize;
     let mut profile = AstcProfile::Ldr;
     let mut files = Vec::new();

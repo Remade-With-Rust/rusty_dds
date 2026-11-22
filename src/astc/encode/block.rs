@@ -28,7 +28,7 @@ use super::context::{Ctx, Mode};
 use crate::astc::cem;
 use crate::astc::ise::LEVELS;
 use crate::astc::parse::{BlockKind, SymbolicBlock};
-use crate::astc::quant::{color_range, weight_levels, COLOR_NEAREST};
+use crate::astc::quant::COLOR_NEAREST;
 use crate::astc::texel::lerp;
 use crate::astc::AstcProfile;
 
@@ -64,6 +64,11 @@ pub(crate) struct Target {
 }
 
 const MAX_TEXELS: usize = 216;
+
+/// Squared colour quantisation step (255 / (levels - 1))^2 per range
+/// (baked literals: float const fn needs Rust 1.82).
+#[rustfmt::skip]
+static QSTEP2: [f32; 21] = [65025.0, 16256.25, 7225.0, 4064.0625, 2601.0, 1327.0408163265308, 802.7777777777777, 537.3966942148761, 289.0, 180.12465373961217, 122.92060491493385, 67.66389177939648, 42.751479289940825, 29.4363965595292, 16.383219954648524, 10.419003364845377, 7.204986149584487, 4.031558063116126, 2.5720897116411536, 1.7824346920314682, 1.0];
 
 /// Endpoint classes searched (the value count decides the colour range).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,22 +357,43 @@ fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters: u8, out: &
     }
 }
 
+const fn build_wq_lut() -> [[u8; 257]; 12] {
+    // WQ_LUT[range][round(4 g)] = the weight level nearest g (0..=64), ties to
+    // the lower level.
+    let mut t = [[0u8; 257]; 12];
+    let mut r = 0;
+    while r < 12 {
+        let n = LEVELS[r] as usize;
+        let mut i = 0;
+        while i < 257 {
+            let mut best = 0u8;
+            let mut bd = u32::MAX;
+            let mut v = 0;
+            while v < n {
+                let l = crate::astc::quant::WEIGHT_UNQUANT_C[r][v] as u32;
+                let x = i as u32;
+                let d = if 4 * l > x { 4 * l - x } else { x - 4 * l };
+                if d < bd || (d == bd && (l as u8) < best) {
+                    bd = d;
+                    best = l as u8;
+                }
+                v += 1;
+            }
+            t[r][i] = best;
+            i += 1;
+        }
+        r += 1;
+    }
+    t
+}
+
+static WQ_LUT: [[u8; 257]; 12] = build_wq_lut();
+
 /// Quantise grid weights (0..=64 float) to the weight range's levels.
 fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
-    let (lv, n) = weight_levels(range);
-    let lv = &lv[..n];
+    let lut = &WQ_LUT[range];
     for (o, &v) in out.iter_mut().zip(g) {
-        // Levels are sorted; pick the nearest (ties to the lower).
-        let mut best = lv[0];
-        let mut bd = f32::MAX;
-        for &l in lv {
-            let d = (l as f32 - v).abs();
-            if d < bd {
-                bd = d;
-                best = l;
-            }
-        }
-        *o = best;
+        *o = lut[((v * 4.0 + 0.5) as usize).min(256)];
     }
 }
 
@@ -381,9 +407,6 @@ fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
     }
 }
 
-fn config_bits(parts: u8, dual: bool) -> u32 {
-    (if parts == 1 { 17 } else { 29 }) + if dual { 2 } else { 0 }
-}
 
 /// Least-squares endpoints for one channel given integer weights (0..=64).
 fn refit_channel(src: &Src, idx: &[usize], c: usize, w: &[u8; MAX_TEXELS]) -> Option<(f32, f32)> {
@@ -538,94 +561,157 @@ struct Cand {
     mode: usize,
     class: Class,
     range: usize,
-    gw1: [u8; 64],
-    gw2: [u8; 64],
 }
 
 /// Encode one partitioning: rank modes by estimate, then encode the best few
 /// exactly. Updates `best`.
+///
+/// The estimate of a mode is the grid's decimation residual (computed once per
+/// grid) plus the expected quantisation noise of its weight range (scaled by
+/// how much the grid's infill averages it away) plus the expected endpoint
+/// quantisation error at the colour range the remaining bits allow.
 fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     let dual = fit.ccs < 4;
     let n = src.n;
-    // Decimated ideal weights per grid (computed lazily per grid).
-    let mut dec1: Vec<Option<[f32; 64]>> = alloc::vec![None; ctx.grids.len()];
-    let mut dec2: Vec<Option<[f32; 64]>> = alloc::vec![None; ctx.grids.len()];
-    let mut cands: Vec<Cand> = Vec::new();
-    let mut eff1 = [0u8; MAX_TEXELS];
-    let mut eff2 = [0u8; MAX_TEXELS];
     let cls = classes(src);
+    // Sum of squared line lengths over texels (plane 1 and plane 2).
+    let mut sum_len2 = 0f32;
+    let mut sum_len2b = 0f32;
+    for i in 0..n {
+        let l = &fit.lines[fit.labels[i] as usize];
+        sum_len2 += l.len2;
+        sum_len2b += l.len2b;
+    }
+    // Model error of each class: base+scale forces e0 onto the line through
+    // the origin and e1 (s * e1); weigh the endpoint miss by the texels near e0.
+    let mut scale_err = [0f32; 2];
+    for (ci, &class) in cls.iter().enumerate() {
+        if matches!(class, Class::RgbScale | Class::RgbScaleA) {
+            for p in 0..fit.parts as usize {
+                let l = &fit.lines[p];
+                let e1 = [l.e1[0], l.e1[1], l.e1[2], 0.0];
+                let e0 = [l.e0[0], l.e0[1], l.e0[2], 0.0];
+                let ll = dot4(e1, e1);
+                let sc = if ll > 0.0 { dot4(e0, e1) / ll } else { 0.0 };
+                let mut miss = 0f32;
+                for c in 0..3 {
+                    let d = (e0[c] - sc * e1[c]) * src.tgt.cw[c];
+                    miss += d * d;
+                }
+                let mut wsum = 0f32;
+                for i in 0..n {
+                    if fit.labels[i] as usize == p {
+                        let u = 1.0 - fit.w1[i];
+                        wsum += u * u;
+                    }
+                }
+                scale_err[ci] += miss * wsum;
+            }
+        }
+    }
+    // Per grid: decimated weights and the residual of their (unquantised) infill.
+    let ng = ctx.grids.len();
+    let mut dec_err: Vec<f32> = alloc::vec![-1.0; ng];
+    let mut dec1: Vec<[f32; 64]> = alloc::vec![[0.0; 64]; ng];
+    let mut dec2: Vec<[f32; 64]> = alloc::vec![[0.0; 64]; ng];
+    let mut cands: Vec<Cand> = Vec::new();
+    let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
     for (mi, m) in ctx.modes.iter().enumerate() {
         if m.dual != dual {
             continue;
         }
         let g = m.grid as usize;
-        let count = ctx.grids[g].count;
-        if dec1[g].is_none() {
-            let mut d = [0f32; 64];
-            decimate(ctx, g, &fit.w1, prm.grid_iters, &mut d);
-            dec1[g] = Some(d);
+        if dec_err[g] < 0.0 {
+            decimate(ctx, g, &fit.w1, prm.grid_iters, &mut dec1[g]);
+            let mut e = residual(ctx, g, &dec1[g], &fit.w1, fit, false);
             if dual {
-                let mut d2 = [0f32; 64];
-                decimate(ctx, g, &fit.w2, prm.grid_iters, &mut d2);
-                dec2[g] = Some(d2);
+                decimate(ctx, g, &fit.w2, prm.grid_iters, &mut dec2[g]);
+                e += residual(ctx, g, &dec2[g], &fit.w2, fit, true);
             }
+            dec_err[g] = e;
         }
-        let mut gw1 = [0u8; 64];
-        let mut gw2 = [0u8; 64];
-        quantize_weights(m.range as usize, &dec1[g].as_ref().unwrap()[..count], &mut gw1[..count]);
-        infill_eff(ctx, g, &gw1, &mut eff1);
-        if dual {
-            quantize_weights(m.range as usize, &dec2[g].as_ref().unwrap()[..count], &mut gw2[..count]);
-            infill_eff(ctx, g, &gw2, &mut eff2);
-        }
-        let mut werr = 0f32;
-        for i in 0..n {
-            let l = &fit.lines[fit.labels[i] as usize];
-            let d = eff1[i] as f32 * (1.0 / 64.0) - fit.w1[i];
-            werr += d * d * l.len2;
-            if dual {
-                let d2 = eff2[i] as f32 * (1.0 / 64.0) - fit.w2[i];
-                werr += d2 * d2 * l.len2b;
-            }
-        }
-        let avail = 128u32.saturating_sub(config_bits(fit.parts, dual) + m.weight_bits as u32);
-        for &class in cls {
-            let values = class.values() * fit.parts as u32;
-            if values > 18 {
+        let levels_w = LEVELS[m.range as usize] as f32;
+        let step_w = 1.0 / (levels_w - 1.0);
+        let wq = step_w * step_w * (1.0 / 12.0) * ctx.grids[g].noise * (sum_len2 + sum_len2b);
+        for (ci, &class) in cls.iter().enumerate() {
+            let r = m.crange[fit.parts as usize - 1][(class.values() / 2 - 1) as usize];
+            if r == 0xFF {
                 continue;
             }
-            let Some(range) = color_range(values, avail) else { continue };
-            let levels = LEVELS[range] as f32;
-            let step = 255.0 / (levels - 1.0);
-            let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
-            let qerr = n as f32 * (2.0 / 3.0) * step * step * (1.0 / 12.0) * class.channels() * cw_mean;
-            let est = werr + qerr + fit.perp;
-            cands.push(Cand {
-                est,
-                mode: mi,
-                class,
-                range,
-                gw1,
-                gw2,
-            });
+            let range = r as usize;
+            let step = QSTEP2[range];
+            let qerr = n as f32 * (2.0 / 3.0) * step * (1.0 / 12.0) * class.channels() * cw_mean;
+            let est = dec_err[g] + wq + qerr + fit.perp + scale_err[ci];
+            cands.push(Cand { est, mode: mi, class, range });
         }
     }
-    // Best few by estimate (stable: ties keep mode order).
-    cands.sort_by(|a, b| a.est.partial_cmp(&b.est).unwrap_or(core::cmp::Ordering::Equal));
-    cands.truncate(prm.exact_candidates.max(1));
-    for c in &cands {
-        exact_candidate(ctx, prm, src, fit, c, best);
+    // Order by estimate, ties by mode index (a total order: deterministic).
+    cands.sort_by(|a, b| {
+        a.est
+            .partial_cmp(&b.est)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then(a.mode.cmp(&b.mode))
+    });
+    // Keep the best few, and give each kept mode its other endpoint classes
+    // too (each at the colour range its own value count allows).
+    let k = prm.exact_candidates.max(1).min(cands.len());
+    let mut keep: Vec<usize> = (0..k).collect();
+    for i in 0..k {
+        for (j, c) in cands.iter().enumerate().skip(k) {
+            if c.mode == cands[i].mode && !keep.contains(&j) {
+                keep.push(j);
+            }
+        }
+    }
+    for &i in &keep {
+        let c = &cands[i];
+        let g = ctx.modes[c.mode].grid as usize;
+        let count = ctx.grids[g].count;
+        let mut gw1 = [0u8; 64];
+        let mut gw2 = [0u8; 64];
+        quantize_weights(ctx.modes[c.mode].range as usize, &dec1[g][..count], &mut gw1[..count]);
+        if dual {
+            quantize_weights(ctx.modes[c.mode].range as usize, &dec2[g][..count], &mut gw2[..count]);
+        }
+        exact_candidate(ctx, prm, src, fit, c, gw1, gw2, best);
     }
 }
 
-fn exact_candidate(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, cand: &Cand, best: &mut Best) {
+/// Weighted squared error of the unquantised infill of decimated weights
+/// against the ideal per-texel weights.
+fn residual(ctx: &Ctx, grid: usize, dec: &[f32; 64], ideal: &[f32; MAX_TEXELS], fit: &Fit, plane2: bool) -> f32 {
+    let g = &ctx.grids[grid];
+    let mut e = 0f32;
+    for (t, &(n, tp)) in g.taps.iter().enumerate() {
+        let mut v = 0f32;
+        for &(k, c) in &tp[..n as usize] {
+            v += dec[k as usize] * c as f32;
+        }
+        let d = v * (1.0 / (16.0 * 64.0)) - ideal[t];
+        let l = &fit.lines[fit.labels[t] as usize];
+        e += d * d * if plane2 { l.len2b } else { l.len2 };
+    }
+    e
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_candidate(
+    ctx: &Ctx,
+    prm: &Params,
+    src: &Src,
+    fit: &Fit,
+    cand: &Cand,
+    gw1: [u8; 64],
+    gw2: [u8; 64],
+    best: &mut Best,
+) {
     let m: Mode = ctx.modes[cand.mode];
     let g = m.grid as usize;
     let count = ctx.grids[g].count;
     let dual = fit.ccs < 4;
     let parts = fit.parts as usize;
-    let mut gw1 = cand.gw1;
-    let mut gw2 = cand.gw2;
+    let mut gw1 = gw1;
+    let mut gw2 = gw2;
     let idx: Vec<Vec<usize>> = (0..parts)
         .map(|p| (0..src.n).filter(|&i| fit.labels[i] as usize == p).collect())
         .collect();
@@ -659,6 +745,15 @@ fn exact_candidate(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, cand: &Cand, b
         let mut chosen: [[(f64, [u8; 8]); 4]; 16] = [[(f64::MAX, [0; 8]); 4]; 16];
         for p in 0..parts {
             encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, &mut encs);
+            // Same-budget alternatives: a class with no more values fits the
+            // candidate's colour range too.
+            let mut extra: Vec<(u8, [u8; 8])> = Vec::new();
+            for &alt in classes(src) {
+                if alt != cand.class && alt.values() == cand.class.values() {
+                    encode_endpoints(alt, cand.range, lines[p].e0, lines[p].e1, &mut extra);
+                    encs.extend_from_slice(&extra);
+                }
+            }
             let mut seen = [false; 16];
             for &(cemv, v) in encs.iter() {
                 let raw = cem::decode(cemv, &v);
