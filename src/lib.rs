@@ -200,9 +200,7 @@ impl Dds {
         };
         let array_stride = get_array_stride(size, min_mipmap_size, mml);
 
-        let data_size = array_stride;
-
-        Ok(Dds {
+        let mut dds = Dds {
             header: Header::new_d3d(
                 params.height,
                 params.width,
@@ -212,8 +210,16 @@ impl Dds {
                 params.caps2,
             )?,
             header10: None,
-            data: vec![0; data_size as usize],
-        })
+            data: Vec::new(),
+        };
+        // Same exact per-level sizing the reader applies (`has_exact_mip_chain`).
+        let data_size = if dds.has_exact_mip_chain() {
+            dds.get_array_stride()?
+        } else {
+            array_stride
+        };
+        dds.data = vec![0; data_size as usize];
+        Ok(dds)
     }
 
     /// Create a new DirectDraw Surface with a DxgiFormat
@@ -268,7 +274,8 @@ impl Dds {
             header10: Some(header10),
             data: Vec::new(),
         };
-        // ASTC sizes each mip level exactly (see `has_exact_mip_chain`).
+        // Block-compressed formats size each mip level exactly (see
+        // `has_exact_mip_chain`); the quarter chain above is the fallback.
         let data_size = if dds.has_exact_mip_chain() {
             dds.get_array_stride()?
                 .checked_mul(params.array_layers.unwrap_or(1))
@@ -566,13 +573,20 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         Ok(get_array_stride(size, min_mipmap_size, mml))
     }
 
-    /// Formats whose mip chain is sized exactly from the block grid of each
-    /// level (ASTC). Every other format keeps the historical chain, where
-    /// each level is a quarter of the previous one (clamped to the minimum
-    /// mip size); changing that would move existing subresource offsets.
+    /// True when every mip level is sized exactly from its own dimensions:
+    /// `max(1, ceil(w_l / bw)) * max(1, ceil(h_l / bh)) * block_bytes * d_l`,
+    /// whole blocks per level, the DXGI / DirectXTex rule. This covers every
+    /// block-compressed format: BCn / DXTn (4x4) and ASTC (its footprint).
+    ///
+    /// Other formats keep the historical chain: mip 0 from the header, each
+    /// later level a quarter of the previous one, clamped to the minimum mip
+    /// size. That quarter chain is exact only for square power-of-two 2D
+    /// surfaces; for an NPOT BCn texture it truncated `ceil(w / 4)` blocks
+    /// to `w / 4` and misplaced every later level (#12).
     pub(crate) fn has_exact_mip_chain(&self) -> bool {
-        self.get_dxgi_format()
-            .is_some_and(|f| f.astc_info().is_some())
+        self.format_of().is_some_and(|f| {
+            f.get_block_size().is_some() && f.get_pitch_height() != 0 && f.get_pitch(1).is_some()
+        })
     }
 
     /// Exact bytes of mip `level` of one slice: block columns x block rows x
