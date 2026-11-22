@@ -29,6 +29,16 @@ One line per brick: state, gate result, commit. Refuted ideas go in the second t
 | C4b KTX 2.0 write | done | KTX-Software 4.4.2 `ktx validate` accepts all five written files (6x6 UNORM 9 mips, 8x5 sRGB, 4x4 SFLOAT, 12x12 sRGB 9 mips, 4x4x4 3D) | 958d069 |
 | E1 pack | done | parse(pack(parse(b))) == parse(b) on > 50,000 legal blocks; ISE encode round trip all ranges/lengths | ef446cf |
 | E2/E3 encoder | first cut | EC1 0 bad blocks; EC2 standing test; harvest below | ef446cf |
+| E4 presets | first cut | Fastest (2 partitions, 1 pattern), Fast, Medium; early out per preset; quality validation in progress | 08acc3a, 4526a22 |
+| E5 Thorough | first cut | 3 and 4 partitions by k-means + confusion-matrix pattern ranking; kodim03 4x4 +0.67 dB over Medium | 4526a22 |
+| E6 Exhaustive | first cut | 16/8/4 patterns, 12 exact candidates, no early out; skip-gate harvest not done yet | 4526a22 |
+| E7 HDR encode | v1 | modes 11/14/15, one partition, LNS domain; legal in both HDR profiles (unit test); EC1 + quality vs astcenc in harness `ec1x` | 3056661 |
+| E8 3D encode | done | `encode_volume_rgba8`; legal (unit test); EC1 in harness `ec1x` | 2696e37 |
+| EC3 determinism | done | 96 frozen hashes identical on x86_64 (simd on/off, debug/release) and wasm32 (wasmtime); aarch64 CI job | 6ec2a71 |
+| DC6 fuzz | done | `astc_decode` 3,380,934 execs / 1 CPU-hour, 0 crashes; `astc_container` 30 min, 0 crashes | d90afb0, d582d3b |
+| P1 decoder scalar | done | fast kernel byte-identical to reference (all golden blocks + 50,000/footprint, six cells); claim-grade timing pending | f8dd16c, 1ef2333, faec493, f9dfb0c |
+| P2 decoder SIMD | step 1 | SSE2/NEON 8-bit output twin, matches scalar on 20,000 random cases | 7ebde45 |
+| I1 API + CLI | done | `inspect_block`, `Dds::encode_astc_from_rgba8`, CLI round trip test (.astc/.ktx/.ktx2/.dds) | 97a4ec7, 42a9921 |
 
 ## E3 harvest (2026-11-21)
 
@@ -50,3 +60,4 @@ Decision: the section 2.3 quality targets stand; Medium is within reach, so the 
 | Rank every mode by its own quantised weights | 0.041 MT/s Fast 6x6; per-grid residual + analytic noise term gives 0.111 MT/s at -0.04 dB | replaced |
 | Endpoint class chosen by estimate alone | base+scale picked on lines far from the origin: kodim03 4x4 Fastest 36.3 dB vs 42.4 after adding the class model error and evaluating each kept mode in every class | fixed |
 | Precomputed per-mode colour range table | byte-identical, no measurable speed change (mode ranking no longer the bottleneck) | kept (simpler), not a win |
+| "First pure-Rust ASTC encoder" claim | crates.io survey 2026-11-21: ktx-rs 4.4.4 (astcenc port, encode + decode) and oxideav-dds 0.0.7 (LDR encoder) exist | claim dropped |
