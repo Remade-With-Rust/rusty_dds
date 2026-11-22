@@ -6,10 +6,16 @@
 //! hash maps, no time or randomness, fixed floating-point operation order and
 //! no libm; it is identical however the caller splits block rows.
 
+// `unsafe` is denied in the encoder; the SIMD module opts back in locally
+// (intrinsics only, behind safe functions, each block with a SAFETY note).
+#![deny(unsafe_code)]
+
 mod block;
 mod context;
 mod hdr;
 mod shortlist;
+#[cfg(feature = "simd")]
+mod simd;
 
 use alloc::vec::Vec;
 

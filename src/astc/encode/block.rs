@@ -691,30 +691,60 @@ fn exact_part_err(
     ccs: usize,
 ) -> f64 {
     let cw = src.tgt.cw;
-    let mut acc = [0u64; 4];
     // Opaque blocks are only ever given alpha-free endpoint classes, whose
     // decoded alpha is 0xFFFF: the alpha error is exactly 0, so skip it.
     let chans = if src.opaque { 3 } else { 4 };
-    for &i in idx {
-        let i = i as usize;
-        for c in 0..chans {
-            let w = if c == ccs { w2[i] } else { w1[i] };
-            let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
-            let s = src.px[i][c] as i64;
-            let d = if src.tgt.unorm8 {
-                (v >> 8) - s
-            } else {
-                v - s * 257
-            };
-            acc[c] += (d * d) as u64;
-        }
-    }
+    let (px, unorm8) = (src.px, src.tgt.unorm8);
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let acc = super::simd::part_err_acc(
+        px,
+        idx,
+        ep,
+        w1,
+        w2,
+        ccs,
+        chans,
+        unorm8,
+        src.tgt.profile == AstcProfile::LdrSrgb,
+    )
+    .unwrap_or_else(|| part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8));
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let acc = part_err_acc_scalar(px, idx, ep, w1, w2, ccs, chans, unorm8);
     let scale = if src.tgt.unorm8 {
         1.0
     } else {
         1.0 / (257.0 * 257.0)
     };
     (0..4).map(|c| acc[c] as f64 * cw[c] as f64 * scale).sum()
+}
+
+/// Per-channel sums of squared errors (8-bit target domain under
+/// `decode_unorm8`, 16-bit otherwise) of the texels `idx`; channels at or
+/// past `chans` stay 0. The oracle of `simd::part_err_acc`, and the kernel
+/// on targets without it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn part_err_acc_scalar(
+    px: &[[u8; 4]],
+    idx: &[u8],
+    ep: &cem::Endpoints,
+    w1: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+    chans: usize,
+    unorm8: bool,
+) -> [u64; 4] {
+    let mut acc = [0u64; 4];
+    for &i in idx {
+        let i = i as usize;
+        for c in 0..chans {
+            let w = if c == ccs { w2[i] } else { w1[i] };
+            let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
+            let s = px[i][c] as i64;
+            let d = if unorm8 { (v >> 8) - s } else { v - s * 257 };
+            acc[c] += (d * d) as u64;
+        }
+    }
+    acc
 }
 
 /// Candidate classes for this block.
