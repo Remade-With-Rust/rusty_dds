@@ -59,6 +59,9 @@ pub(crate) struct Params {
     /// Stop after the one-partition search when its per-channel MSE (8-bit
     /// domain) is at most this times (texels / 16)^2.
     pub part2_skip_err: f32,
+    /// Search only the most used block modes covering this share of blocks
+    /// (per mille, see `shortlist.rs`); 1000 searches every mode.
+    pub mode_coverage: u16,
 }
 
 /// What the error is measured against.

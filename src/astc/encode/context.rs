@@ -86,6 +86,28 @@ fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
 }
 
 impl Ctx {
+    /// Keep only the modes of the footprint's shortlist needed to cover
+    /// `coverage` per mille of blocks (2D footprints with a shortlist; 1000
+    /// or more keeps every mode). The grids stay; unreferenced ones are
+    /// simply never ranked.
+    pub(crate) fn restrict_modes(&mut self, fp: AstcFootprint, coverage: u16) {
+        if coverage >= 1000 || fp.depth() != 1 {
+            return;
+        }
+        let Some(&(_, _, list)) = super::shortlist::SHORTLIST
+            .iter()
+            .find(|e| e.0 as u32 == fp.width() && e.1 as u32 == fp.height())
+        else {
+            return;
+        };
+        let keep: Vec<u16> = list.iter().take_while(|e| e.1 < coverage).map(|e| e.0).collect();
+        let kept: Vec<Mode> = self.modes.iter().copied().filter(|m| keep.contains(&m.mode)).collect();
+        // Never leave the search empty.
+        if !kept.is_empty() {
+            self.modes = kept;
+        }
+    }
+
     pub(crate) fn new(fp: AstcFootprint, max_partitions: u8) -> Self {
         let texels = fp.texels() as usize;
         let mut grids: Vec<Grid> = Vec::new();
