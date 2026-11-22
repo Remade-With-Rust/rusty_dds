@@ -9,6 +9,7 @@
 mod block;
 mod context;
 mod hdr;
+mod shortlist;
 
 use alloc::vec::Vec;
 
@@ -84,6 +85,7 @@ pub(crate) fn params(p: AstcPreset) -> Params {
         if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part_candidates[0] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PART3") { prm.part_candidates[1] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PART4") { prm.part_candidates[2] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_COVERAGE") { prm.mode_coverage = v as u16; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH2") { prm.part_search[0] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH3") { prm.part_search[1] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH4") { prm.part_search[2] = v as usize; }
@@ -111,6 +113,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_corr_limit: 0.9,
             grid_iters: 1,
             part2_skip_err: 4.0,
+            mode_coverage: 1000,
         },
         AstcPreset::Fast => Params {
             refine_top: 1,
@@ -123,6 +126,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_corr_limit: 0.95,
             grid_iters: 2,
             part2_skip_err: 2.0,
+            mode_coverage: 1000,
         },
         AstcPreset::Medium => Params {
             refine_top: 2,
@@ -135,6 +139,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_corr_limit: 0.99,
             grid_iters: 3,
             part2_skip_err: 1.5,
+            mode_coverage: 990,
         },
         AstcPreset::Thorough => Params {
             refine_top: 3,
@@ -147,6 +152,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_corr_limit: 1.0,
             grid_iters: 4,
             part2_skip_err: 0.2,
+            mode_coverage: 1000,
         },
         AstcPreset::Exhaustive => Params {
             refine_top: 4,
@@ -159,6 +165,7 @@ fn preset_params(p: AstcPreset) -> Params {
             dual_corr_limit: 1.0,
             grid_iters: 4,
             part2_skip_err: 0.0,
+            mode_coverage: 1000,
         },
     }
 }
@@ -238,7 +245,8 @@ pub fn encode_block_rows_into(
         return Err(Error::OutOfBounds);
     }
     let prm = params(opts.preset);
-    let ctx = Ctx::new(fp, prm.max_partitions);
+    let mut ctx = Ctx::new(fp, prm.max_partitions);
+    ctx.restrict_modes(fp, prm.mode_coverage);
     let tgt = target(opts);
     let (bw, bh) = (fp.width(), fp.height());
     let mut px = [[0u8; 4]; 216];

@@ -292,9 +292,8 @@ Every number here comes from a committed artifact that records its command, mach
   −0.31 to −0.46 dB. Every emitted block decodes identically in astcenc.
   [docs/artifacts/astc-encode-quality.md](docs/artifacts/astc-encode-quality.md)
 - **Encode speed.** Scalar code, at equal quality against `astcenc-none` (its `-quality`
-  bisected to our PSNR). `Fast` runs at 0.62× to 0.85× of astcenc's speed. `Medium` runs at
-  0.45× to 0.58×, and its 12x12 point is below our own 0.5× floor. Against `astcenc-avx2`:
-  0.15× to 0.30×. [docs/artifacts/astc-encode-speed.md](docs/artifacts/astc-encode-speed.md)
+  bisected to our PSNR). `Fast` runs at 0.65× to 0.86× of astcenc's speed, and `Medium` at
+  0.50× to 0.64× (12x12 is the slowest point). Against `astcenc-avx2`: 0.17× to 0.31×. [docs/artifacts/astc-encode-speed.md](docs/artifacts/astc-encode-speed.md)
 
 The encoder is written from the ASTC specification. astcenc is used only as a black-box
 oracle (`tools/astc-oracle`, outside the dependency graph), and no astcenc source is

@@ -1054,6 +1054,39 @@ fn cmd_mosaic(args: &[String]) -> bool {
     true
 }
 
+/// Block-mode usage of our encoder: for every 2D footprint, encode each image
+/// at `preset` and count the normal blocks per raw block mode. Prints
+/// `fp mode count` lines (input to the mode-shortlist generator).
+///   astch modehist <preset> <png>...
+fn cmd_modehist(args: &[String]) -> bool {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let imgs: Vec<(u32, u32, Vec<u8>)> = args[1..].iter().map(|p| load_rgba(p)).collect();
+    for &fp in AstcFootprint::ALL_2D {
+        let mut hist = std::collections::BTreeMap::<u16, u64>::new();
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+        for (w, h, img) in &imgs {
+            let data = astc::encode_rgba8(img, *w, *h, &opts).unwrap();
+            for b in data.chunks_exact(16) {
+                let s = ai::parse(b.try_into().unwrap(), fp);
+                if matches!(s.kind, ai::BlockKind::Normal) {
+                    *hist.entry(s.mode).or_default() += 1;
+                }
+            }
+        }
+        for (m, c) in hist {
+            println!("{fp} {m} {c}");
+        }
+        eprintln!("{fp} done");
+    }
+    true
+}
+
 /// PSNR over RGB for opaque sources, over RGBA otherwise.
 fn psnr_img(src: &[u8], dec: &[u8]) -> f64 {
     let opaque = src.chunks_exact(4).all(|p| p[3] == 255);
@@ -1606,6 +1639,7 @@ fn main() {
         Some("blockdbg") => cmd_blockdbg(&args[2..]),
         Some("es1") => cmd_es1(&args[2..]),
         Some("mosaic") => cmd_mosaic(&args[2..]),
+        Some("modehist") => cmd_modehist(&args[2..]),
         Some("ktx2out") => cmd_ktx2out(&args[2..]),
         Some("ec1x") => cmd_ec1x(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
