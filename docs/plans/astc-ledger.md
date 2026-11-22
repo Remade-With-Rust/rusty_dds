@@ -53,6 +53,33 @@ Kodak 01, 03, 08, 15; 4x4 / 6x6 / 8x8 / 12x12; mean PSNR gap ours - astcenc 5.7.
 
 Decision: the section 2.3 quality targets stand; Medium is within reach, so the fallback cut (decoder-only 0.11.0) is not taken. The open problem is speed (Fast 6x6 0.10 MT/s single-thread vs astcenc-none ~3.6).
 
+## Preset tuning (2026-11-21)
+
+Before tuning, 4x4 failed its target at every preset (Fastest -0.484, Fast -0.425, Medium -0.575). Swept with the dev-only `tuning` env overrides, Kodak 01/03/05/08/13/15/19/23, 4x4 mean gap vs astcenc 5.7.1 at the same preset:
+
+| Medium 4x4 knob (from the shipped Medium) | mean gap | MT/s |
+|---|---|---|
+| baseline (2 partitions, dual gate 0.85) | -0.575 | 0.27 |
+| 3 partitions, 2 three-partition candidates | -0.490 | 0.19 |
+| + 4 partitions | -0.479 | 0.17 |
+| early-out 0.75 -> 0.3 | -0.535 | 0.23 |
+| 3 partitions + 8 exact candidates | -0.450 | 0.16 |
+| 3 partitions + dual gate 0.95 | -0.361 | 0.16 |
+| 3 partitions (1 candidate) + dual gate 0.99 | **-0.326** | 0.20 |
+
+The dual-plane correlation gate is the main lever at small blocks (Fastest with dual plane on at 0.9: -0.484 -> +0.080; Fast 0.65 -> 0.95: -0.425 -> -0.031). Shipped: Fastest dual on 0.9; Fast 0.95; Medium 3 partitions `[4, 1, 0]` + 0.99; Thorough 1.0. Frozen hashes regenerated.
+
+Full sweep after tuning (8 Kodak images, mean / worst gap in dB, ours single-thread MT/s in WSL):
+
+| Preset | 4x4 | 5x5 | 6x6 | 8x8 | 10x10 | 12x12 | worst | MT/s |
+|---|---|---|---|---|---|---|---|---|
+| Fastest | +0.080 | +0.095 | -0.121 | -0.141 | -0.156 | +0.057 | -0.741 | 1.31-2.17 |
+| Fast | -0.031 | +0.089 | +0.043 | +0.027 | +0.034 | +0.185 | -0.541 | 0.68-0.98 |
+| Medium | -0.326 | -0.290 | -0.250 | -0.387 | -0.358 | -0.277 | -0.657 | 0.25-0.29 |
+| Thorough | -0.384 | -0.293 | -0.313 | -0.425 | -0.458 | -0.460 | -0.658 | 0.04-0.06 |
+
+Targets (section 2.3: Fastest/Fast mean >= -0.30, Medium >= -0.50, worst >= -1.5): all met.
+
 ## Refuted or deferred ideas
 
 | Idea | Measurement | Verdict |
@@ -61,3 +88,4 @@ Decision: the section 2.3 quality targets stand; Medium is within reach, so the 
 | Endpoint class chosen by estimate alone | base+scale picked on lines far from the origin: kodim03 4x4 Fastest 36.3 dB vs 42.4 after adding the class model error and evaluating each kept mode in every class | fixed |
 | Precomputed per-mode colour range table | byte-identical, no measurable speed change (mode ranking no longer the bottleneck) | kept (simpler), not a win |
 | "First pure-Rust ASTC encoder" claim | crates.io survey 2026-11-21: ktx-rs 4.4.4 (astcenc port, encode + decode) and oxideav-dds 0.0.7 (LDR encoder) exist | claim dropped |
+| Lower early-out threshold for small blocks | Medium 4x4 0.75 -> 0.3: +0.04 dB for -15% speed; dual-plane gate gives +0.25 | not taken |
