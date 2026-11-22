@@ -662,22 +662,20 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     let (dec_err, dec1, dec2, refined) = (&mut sc.dec_err, &mut sc.dec1, &mut sc.dec2, &mut sc.refined);
     let mut cands: Vec<Cand> = Vec::with_capacity(ctx.modes.len() * 2);
     let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
+    // The best k by estimate, ties by candidate index (a total order; index
+    // order is mode order), kept while the candidates are generated. The grid
+    // residual (decimation + infill, the expensive part) is computed only
+    // for a candidate that could still enter the top k: its estimate is the
+    // residual (>= 0) plus a cheap rest, and once the k-th estimate is below
+    // that rest the candidate cannot get in (the k-th estimate only falls).
+    // The selected set is exactly the one a full evaluation selects.
+    let k = prm.exact_candidates.max(1);
+    let mut top: Vec<usize> = Vec::with_capacity(k + 1);
     for (mi, m) in ctx.modes.iter().enumerate() {
         if m.dual != dual {
             continue;
         }
         let g = m.grid as usize;
-        if dec_err[g] < 0.0 {
-            // Rank on the one-shot (transpose-average) decimation; the kept
-            // candidates get the least-squares refinement below.
-            decimate(ctx, g, &fit.w1, 0, &mut dec1[g]);
-            let mut e = residual(ctx, g, &dec1[g], &fit.w1, fit, false);
-            if dual {
-                decimate(ctx, g, &fit.w2, 0, &mut dec2[g]);
-                e += residual(ctx, g, &dec2[g], &fit.w2, fit, true);
-            }
-            dec_err[g] = e;
-        }
         let levels_w = LEVELS[m.range as usize] as f32;
         let step_w = 1.0 / (levels_w - 1.0);
         let wq = step_w * step_w * (1.0 / 12.0) * ctx.grids[g].noise * (sum_len2 + sum_len2b);
@@ -689,22 +687,35 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             let range = r as usize;
             let step = QSTEP2[range];
             let qerr = n as f32 * (2.0 / 3.0) * step * (1.0 / 12.0) * class.channels() * cw_mean;
+            let i = cands.len();
+            if top.len() == k && dec_err[g] < 0.0 {
+                let rest = wq + qerr + fit.perp + scale_err[ci];
+                if rest * (1.0 - 1e-5) > cands[top[k - 1]].est {
+                    cands.push(Cand { est: f32::INFINITY, mode: mi, class, range });
+                    continue;
+                }
+            }
+            if dec_err[g] < 0.0 {
+                // Rank on the one-shot (transpose-average) decimation; the
+                // kept candidates get the least-squares refinement below.
+                decimate(ctx, g, &fit.w1, 0, &mut dec1[g]);
+                let mut e = residual(ctx, g, &dec1[g], &fit.w1, fit, false);
+                if dual {
+                    decimate(ctx, g, &fit.w2, 0, &mut dec2[g]);
+                    e += residual(ctx, g, &dec2[g], &fit.w2, fit, true);
+                }
+                dec_err[g] = e;
+            }
             let est = dec_err[g] + wq + qerr + fit.perp + scale_err[ci];
             cands.push(Cand { est, mode: mi, class, range });
+            let better = |a: usize, b: usize| cands[a].est < cands[b].est || (cands[a].est == cands[b].est && a < b);
+            if top.len() == k && !better(i, top[k - 1]) {
+                continue;
+            }
+            let pos = top.iter().position(|&t| better(i, t)).unwrap_or(top.len());
+            top.insert(pos, i);
+            top.truncate(k);
         }
-    }
-    // The best k by estimate, ties by mode index (a total order), selected
-    // without sorting the whole list.
-    let k = prm.exact_candidates.max(1).min(cands.len());
-    let better = |a: &Cand, b: &Cand| a.est < b.est || (a.est == b.est && a.mode < b.mode);
-    let mut top: Vec<usize> = Vec::with_capacity(k + 1);
-    for (i, c) in cands.iter().enumerate() {
-        if top.len() == k && !better(c, &cands[top[k - 1]]) {
-            continue;
-        }
-        let pos = top.iter().position(|&t| better(c, &cands[t])).unwrap_or(top.len());
-        top.insert(pos, i);
-        top.truncate(k);
     }
     // Each kept mode also gets its other endpoint classes (adjacent entries:
     // candidates are pushed per mode, class after class), each at the colour
