@@ -455,11 +455,14 @@ fn fit_indices_alpha4(alpha: &[u8; 16], pal: &[u8; 4]) -> ([u8; 16], i32) {
     fit_indices_alpha8(alpha, &pal8)
 }
 
+/// Quantised mode-4 colour endpoints and indices: (q0, q1, indices).
+type Mode4ColorFit = ([u8; 3], [u8; 3], [u8; 16]);
+
 pub(super) fn fit_color_mode4(
     pixels: &[[u8; 4]; 16],
     e0: [u8; 3],
     e1: [u8; 3],
-) -> (([u8; 3], [u8; 3], [u8; 16]), i32) {
+) -> (Mode4ColorFit, i32) {
     let mut q0 = [0u8; 3];
     let mut q1 = [0u8; 3];
     for c in 0..3 {
@@ -741,7 +744,6 @@ pub(super) fn pack_bc7_mode5(
 }
 
 /// BC7 mode 6: single subset, RGBA 7-bit endpoints + P-bits, 4-bit indices.
-
 pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, u8, u8) {
     let mut best_bits = [0u8; 16];
     let mut best_err = i64::MAX;
@@ -793,7 +795,6 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, 
     if do_ls {
         if let Some(base) = best_fit {
             let (bits, err) = mode6_refine(pixels, base).pack();
-            if err < best_err {}
             if err <= best_err {
                 best_bits = bits;
                 best_err = err;
@@ -837,8 +838,8 @@ pub(super) fn push_seed(seeds: &mut [Seed; 5], n: &mut usize, s: Seed) {
     *n += 1;
 }
 
-/// The two cheap seeds, always worth trying: they win 93.6% of blocks between
-/// them (74.3% + 19.3%, counted over 21 847 blocks).
+// The two cheap seeds, always worth trying: they win 93.6% of blocks between
+// them (74.3% + 19.3%, counted over 21 847 blocks).
 // Two further gates of this shape were built and REFUTED, and the numbers are
 // here so they are not rebuilt:
 //
@@ -884,6 +885,9 @@ pub(super) fn bc7_mode6_seeds_base(ex: Seed, cm: Seed) -> ([Seed; 5], usize) {
 /// so instead they are gated on the error the cheap seeds left behind: a block
 /// the first two already fit well cannot be rescued by a third seed, and a
 /// block they fit badly is exactly where the extras earn their cost.
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn bc7_mode6_seeds_extra(
     pixels: &[[u8; 4]; 16],
     ex: Seed,

@@ -308,6 +308,8 @@ fn snorm_u8_bits_to_unorm(b: u8) -> u8 {
     ((s * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+// Example harness helper; a parameter struct would only add noise.
+#[allow(clippy::too_many_arguments)]
 fn dxtex_roundtrip(
     exe: &Path,
     work: &Path,

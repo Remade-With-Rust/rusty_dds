@@ -635,11 +635,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 
     pub fn get_num_mipmap_levels(&self) -> u32 {
-        if let Some(mmc) = self.header.mip_map_count {
-            mmc
-        } else {
-            1 // just the main image
-        }
+        self.header.mip_map_count.unwrap_or(1) // 1: just the main image
     }
 
     pub fn get_min_mipmap_size_in_bytes(&self) -> u32 {

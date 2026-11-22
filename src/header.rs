@@ -151,7 +151,7 @@ impl Header {
         if compressed {
             header.flags |= HeaderFlags::LINEARSIZE;
             let pitch_height = format.get_pitch_height();
-            let raw_height = (height + (pitch_height - 1)) / pitch_height;
+            let raw_height = height.div_ceil(pitch_height);
             header.linear_size = Some(pitch * raw_height * depth);
         } else {
             header.flags |= HeaderFlags::PITCH;
@@ -213,7 +213,7 @@ impl Header {
         if compressed {
             header.flags |= HeaderFlags::LINEARSIZE;
             let pitch_height = format.get_pitch_height();
-            let raw_height = (height + (pitch_height - 1)) / pitch_height;
+            let raw_height = height.div_ceil(pitch_height);
             header.linear_size = Some(pitch * raw_height * depth);
         } else {
             header.flags |= HeaderFlags::PITCH;

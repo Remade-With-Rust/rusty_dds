@@ -98,15 +98,12 @@ fn main() {
 }
 
 fn content_allowed(content: DecodeContent, ctx: &Ctx) -> bool {
-    if ctx.name == "X-CUBE"
-        && !matches!(
+    // X-CUBE only takes BC1, BC3, BC7 and RGBA8.
+    ctx.name != "X-CUBE"
+        || matches!(
             content,
             DecodeContent::Bc1 | DecodeContent::Bc3 | DecodeContent::Bc7 | DecodeContent::Rgba8
         )
-    {
-        return false;
-    }
-    true
 }
 
 fn dxgi_name(content: DecodeContent) -> &'static str {
@@ -383,9 +380,8 @@ fn summarize_vs_dxtex(rows: &[serde_json::Value]) -> serde_json::Value {
 }
 
 fn time_result(f: impl Fn() -> Result<usize, String>) -> (f64, bool) {
-    match f() {
-        Err(_) => return (0.0, false),
-        Ok(_) => {}
+    if f().is_err() {
+        return (0.0, false);
     }
     for _ in 0..2 {
         let _ = f();

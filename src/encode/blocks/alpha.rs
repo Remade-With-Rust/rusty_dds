@@ -177,6 +177,9 @@ pub(super) fn unsigned_window_sweep(samples: &[u8; 16], best: &mut [u8; 8], best
 }
 
 /// Collect up to `cap` uniques; returns `cap+1` if busier (no full sort).
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn unique_values_u_capped(samples: &[u8; 16], cap: usize) -> (usize, [u8; 16]) {
     let mut uniq = [0u8; 16];
     let mut n = 0usize;
@@ -413,9 +416,7 @@ impl AlphaSelect {
             let m = sum >> 1;
             // s > thr[k] selects the HIGH side. Odd sum: no exact tie.
             // Even sum: tie at m goes to the lower ORIGINAL index.
-            thr[k] = if sum & 1 == 1 {
-                m
-            } else if idxs[k] < idxs[k + 1] {
+            thr[k] = if sum & 1 == 1 || idxs[k] < idxs[k + 1] {
                 m
             } else {
                 m - 1
@@ -425,6 +426,9 @@ impl AlphaSelect {
     }
 
     #[inline]
+    // Hot kernel: the indexed loop is the instruction-count-tuned form; not
+    // restructured for a style lint (flagged from clippy 1.100).
+    #[allow(clippy::needless_range_loop)]
     pub(super) fn select(&self, s: u8) -> u8 {
         let s = s as i32;
         let mut rank = 0usize;
@@ -571,6 +575,9 @@ fn pack_alpha_indices_err_scalar(
 }
 
 /// Least-squares endpoints from current indices (6-lerp weights). Falls back to None on 4-lerp.
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn ls_alpha_endpoints_u(samples: &[u8; 16], block: &[u8; 8]) -> Option<(u8, u8)> {
     let a0 = block[0];
     let a1 = block[1];
@@ -768,6 +775,9 @@ pub(super) fn signed_sweep(
     }
 }
 
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn unique_values_s_capped(vals: &[i32; 16], cap: usize) -> (usize, [i32; 16]) {
     let mut uniq = [0i32; 16];
     let mut n = 0usize;
@@ -987,6 +997,9 @@ pub(super) fn pack_alpha_indices_s_err(
     Some((out, err))
 }
 
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 pub(super) fn ls_alpha_endpoints_s(vals: &[i32; 16], block: &[u8; 8]) -> Option<(i32, i32)> {
     let a0 = block[0] as i8 as i32;
     let a1 = block[1] as i8 as i32;
@@ -1047,6 +1060,9 @@ pub(super) fn alpha_sse_u(samples: &[u8; 16], block: &[u8; 8]) -> i32 {
 /// Kept OUT of line: the fallback arm of an AVX2 dispatch.
 #[cold]
 #[inline(never)]
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 fn alpha_fixed_sse_scalar(samples: &[u8; 16], palette: &[u8; 8], bits: u64) -> i32 {
     let mut err = 0i32;
     for i in 0..16 {
