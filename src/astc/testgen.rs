@@ -41,7 +41,9 @@ fn set_bits(b: &mut u128, pos: u32, n: u32, v: u128) {
 pub fn legal_modes(fp: AstcFootprint) -> Vec<(u16, bool)> {
     (0..2048u32)
         .filter_map(|m| match block_mode::classify(m, fp) {
-            ModeClass::Grid(g) if block_mode::check(&g, fp).is_ok() => Some((m as u16, g.dual_plane)),
+            ModeClass::Grid(g) if block_mode::check(&g, fp).is_ok() => {
+                Some((m as u16, g.dual_plane))
+            }
             _ => None,
         })
         .collect()
@@ -57,7 +59,11 @@ pub fn mixed(rng: &mut Rng, fp: AstcFootprint, legal: &[(u16, bool)]) -> [u8; 16
         set_bits(&mut b, 0, 9, 0x1FC);
         set_bits(&mut b, 9, 1, hdr);
         if !fp.is_3d() {
-            let rsv = if rng.below(8) == 0 { rng.below(4) as u128 } else { 3 };
+            let rsv = if rng.below(8) == 0 {
+                rng.below(4) as u128
+            } else {
+                3
+            };
             set_bits(&mut b, 10, 2, rsv);
             match rng.below(3) {
                 0 => set_bits(&mut b, 12, 52, (1u128 << 52) - 1),
@@ -96,7 +102,8 @@ pub const GOLDEN_CHUNK: usize = 16;
 
 /// The golden block sequence for a footprint.
 pub fn golden_blocks(fp: AstcFootprint) -> Vec<[u8; 16]> {
-    let seed = 0x601D_0000 ^ ((fp.width() as u64) << 16) ^ ((fp.height() as u64) << 8) ^ fp.depth() as u64;
+    let seed =
+        0x601D_0000 ^ ((fp.width() as u64) << 16) ^ ((fp.height() as u64) << 8) ^ fp.depth() as u64;
     let mut rng = Rng::new(seed);
     let legal = legal_modes(fp);
     let mut v = Vec::with_capacity(GOLDEN_MIXED + GOLDEN_RANDOM);

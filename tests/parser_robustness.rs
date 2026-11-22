@@ -43,7 +43,6 @@ impl Rng {
     }
 }
 
-
 fn fixtures() -> Vec<(String, Vec<u8>)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut v = Vec::new();
@@ -55,13 +54,20 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         let p = e.path();
         if p.extension().and_then(|s| s.to_str()) == Some("dds") {
             if let Ok(b) = std::fs::read(&p) {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 v.push((name, b));
             }
         }
     }
     v.sort_by(|a, b| a.0.cmp(&b.0));
-    assert!(!v.is_empty(), "no .dds fixtures found - harness would be vacuous");
+    assert!(
+        !v.is_empty(),
+        "no .dds fixtures found - harness would be vacuous"
+    );
     v
 }
 
@@ -143,7 +149,10 @@ fn mutate(base: &[u8], rng: &mut Rng) -> Vec<u8> {
 #[ignore]
 fn dump_repro() {
     let want_file = std::env::var("REPRO_FILE").unwrap_or_default();
-    let want_seed: u64 = std::env::var("REPRO_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let want_seed: u64 = std::env::var("REPRO_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     for (name, base) in fixtures() {
         if name != want_file {
             continue;
@@ -265,7 +274,11 @@ fn read_into_reuse_does_not_leak_the_previous_payload() {
     // And it must agree byte-for-byte with the owning path on the same bytes.
     let owned = Dds::read(&base[..]).expect("owned");
     let view = DdsView::read_into(&base[..], &mut buf).expect("reused");
-    assert_eq!(view.data, &owned.data[..], "reused buffer diverged from Dds::read");
+    assert_eq!(
+        view.data,
+        &owned.data[..],
+        "reused buffer diverged from Dds::read"
+    );
 }
 
 /// `read_into_limited` inherits `read_limited`'s posture: a hard ceiling that
@@ -308,7 +321,9 @@ fn view_and_owned_agree() {
 fn decode_into_reuse_matches_fresh_decodes() {
     let mut buf = Vec::new();
     for (name, bytes) in fixtures() {
-        let Ok(dds) = DdsView::parse(&bytes) else { continue };
+        let Ok(dds) = DdsView::parse(&bytes) else {
+            continue;
+        };
         let mips = dds.get_num_mipmap_levels();
         // Largest mip first, then a smaller one, through the same buffer: a
         // stale tail from the first would survive into the second.
@@ -334,7 +349,9 @@ fn decode_into_reuse_matches_fresh_decodes() {
 #[test]
 fn decode_block_rows_reassemble_into_the_whole_surface() {
     for (name, bytes) in fixtures() {
-        let Ok(dds) = DdsView::parse(&bytes) else { continue };
+        let Ok(dds) = DdsView::parse(&bytes) else {
+            continue;
+        };
         let id = rusty_dds::SubresourceId::mip_layer(0, 0);
         let (Ok(whole), Ok(rows)) = (dds.decode_rgba8(id), dds.block_rows(id)) else {
             continue;
@@ -351,7 +368,10 @@ fn decode_block_rows_reassemble_into_the_whole_surface() {
         {
             continue;
         }
-        assert_eq!(split, whole.pixels, "{name}: split decode differs from whole");
+        assert_eq!(
+            split, whole.pixels,
+            "{name}: split decode differs from whole"
+        );
     }
 }
 

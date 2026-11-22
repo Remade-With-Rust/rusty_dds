@@ -17,10 +17,9 @@ fn main() {
     // SAFETY: single-threaded example; set before any encode touches OnceLock.
     std::env::set_var("RUSTY_DDS_BC45_REFINE_HARVEST", &csv);
 
-    let manifest: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(corpus.join("manifest.json")).expect("manifest"),
-    )
-    .expect("json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(corpus.join("manifest.json")).expect("manifest"))
+            .expect("json");
 
     for entry in manifest["entries"].as_array().unwrap() {
         let role = entry["role"].as_str().unwrap();

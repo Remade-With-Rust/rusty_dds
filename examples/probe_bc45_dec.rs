@@ -3,7 +3,7 @@
 //! per-block chain dominates and a ~6-cycle chain change is visible; both
 //! signs, both formats — the palette build runs once per BC4 block and twice
 //! per BC5 block.
-use rusty_dds::{DecodeContent, Dds, EncodeLayout, SubresourceId};
+use rusty_dds::{Dds, DecodeContent, EncodeLayout, SubresourceId};
 use std::time::Instant;
 
 fn main() {
@@ -27,8 +27,7 @@ fn main() {
                 255,
             ]);
         }
-        let dds =
-            Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side)).unwrap();
+        let dds = Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side)).unwrap();
         let id = SubresourceId::mip_layer(0, 0);
         let mut buf: Vec<u8> = Vec::new();
         dds.decode_rgba8_into(id, &mut buf).unwrap();

@@ -132,7 +132,6 @@ pub(super) fn encode_bc1_bytes(pixels: [[u8; 4]; 16]) -> [u8; 8] {
     best
 }
 
-
 pub(super) fn consider_bc1(
     pixels: &[[u8; 4]; 16],
     e0: [u8; 3],
@@ -460,7 +459,11 @@ pub(super) fn lattice_refine_bc1(
                     *best_err = e;
                     // The accepted pair, without re-reading the block bytes.
                     // `pack_bc1_scored_565` orders them larger-first.
-                    let (hi, lo) = if cand > other { (cand, other) } else { (other, cand) };
+                    let (hi, lo) = if cand > other {
+                        (cand, other)
+                    } else {
+                        (other, cand)
+                    };
                     c0 = hi;
                     c1 = lo;
                     if e == 0 {
@@ -653,7 +656,10 @@ pub(super) fn pca_extremes_rgb_scalar(pixels: &[[u8; 4]; 16]) -> Option<([u8; 3]
 
 /// LS endpoints from a packed BC1 block's indices (4-color mode only).
 /// Weights toward c1: idx0=0, idx1=1, idx2=1/3, idx3=2/3.
-pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Option<([u8; 3], [u8; 3])> {
+pub(super) fn ls_endpoints_bc1(
+    pixels: &[[u8; 4]; 16],
+    block: &[u8; 8],
+) -> Option<([u8; 3], [u8; 3])> {
     let c0 = u16::from_le_bytes([block[0], block[1]]);
     let c1 = u16::from_le_bytes([block[2], block[3]]);
     if c0 <= c1 {
@@ -700,7 +706,6 @@ pub(super) fn ls_endpoints_bc1(pixels: &[[u8; 4]; 16], block: &[u8; 8]) -> Optio
     }
     Some((e0, e1))
 }
-
 
 pub(super) fn channel_minmax_rgb(pixels: &[[u8; 4]; 16]) -> ([u8; 3], [u8; 3]) {
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
@@ -786,7 +791,9 @@ pub fn encode_bc3(pixels: [[u8; 4]; 16], out: &mut [u8]) {
     //
     // Narrowed once, as in `encode_bc2`: both halves are then provably inside.
     let out = &mut out[..16];
-    out[..8].copy_from_slice(&encode_alpha_block_unsigned(super::alpha::alpha_channel(&pixels)));
+    out[..8].copy_from_slice(&encode_alpha_block_unsigned(super::alpha::alpha_channel(
+        &pixels,
+    )));
     out[8..16].copy_from_slice(&encode_bc1_bytes(pixels));
 }
 

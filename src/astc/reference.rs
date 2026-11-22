@@ -58,7 +58,11 @@ pub(crate) fn decode_block(
     let texels = fp.texels() as usize;
     let out = &mut out[..texels];
     let ldr_profile = matches!(profile, AstcProfile::Ldr | AstcProfile::LdrSrgb);
-    let error = if out_kind == Out::U8 { MAGENTA_U8 } else { NAN_F16 };
+    let error = if out_kind == Out::U8 {
+        MAGENTA_U8
+    } else {
+        NAN_F16
+    };
     let s = parse::parse(block, fp);
     let convert = |c: u16, lns: bool| -> u16 {
         match out_kind {

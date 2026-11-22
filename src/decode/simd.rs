@@ -27,12 +27,11 @@
 //! rearrangement that halved the multiply count also doubled the lane count.
 
 use core::arch::x86_64::{
-    __m128i, _mm_add_epi16, _mm_and_si128, _mm_cvtsi64_si128, _mm_loadl_epi64, _mm_setr_epi16,
-    _mm_setr_epi8, _mm_srli_epi16,
-    _mm_or_si128, _mm_set1_epi32, _mm_set_epi32, _mm_unpacklo_epi64, _mm_loadu_si128, _mm_mullo_epi16, _mm_packus_epi16,
-    _mm_set1_epi16, _mm_set_epi16, _mm_set_epi64x, _mm_shuffle_epi8, _mm_srai_epi16,
-    _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
-    _mm_unpacklo_epi16, _mm_unpacklo_epi8,
+    __m128i, _mm_add_epi16, _mm_and_si128, _mm_cvtsi64_si128, _mm_loadl_epi64, _mm_loadu_si128,
+    _mm_mullo_epi16, _mm_or_si128, _mm_packus_epi16, _mm_set1_epi16, _mm_set1_epi32, _mm_set_epi16,
+    _mm_set_epi32, _mm_set_epi64x, _mm_setr_epi16, _mm_setr_epi8, _mm_shuffle_epi8, _mm_srai_epi16,
+    _mm_srli_epi16, _mm_storel_epi64, _mm_storeu_si128, _mm_unpackhi_epi16, _mm_unpackhi_epi8,
+    _mm_unpacklo_epi16, _mm_unpacklo_epi64, _mm_unpacklo_epi8,
 };
 
 // The register pre-packing (`pack4`, `pack_bd3`, `pack_bd4`, ...) and the
@@ -112,7 +111,6 @@ pub(super) fn write2_split(
     }
 }
 
-
 /// Can this CPU run the BC5 gather profitably?
 ///
 /// Cached feature probe.
@@ -176,7 +174,6 @@ pub(super) fn has_ssse3() -> bool {
 // `pdep` is issued on any CPU and there is nothing left to detect. A
 // microarchitecture-specific CPUID hazard is a maintenance liability with a
 // shelf life — prefer deleting the dependency to modelling the hardware.
-
 
 /// Sixteen 3-bit indices, one per byte, entirely in registers — and WITHOUT
 /// `pdep` (inline-exe §5.2k.2).
@@ -371,7 +368,6 @@ unsafe fn bc5_gather_ssse3(
     }
 }
 
-
 /// Is hardware half-float conversion available?
 ///
 /// `vcvtph2ps` converts **eight** halves per instruction. BC6H decode spends
@@ -408,7 +404,6 @@ unsafe fn half48_to_f32_f16c(src: &[u16; 48], dst: &mut [f32; 48]) {
         _mm256_storeu_ps(dst.as_mut_ptr().add(i * 8), _mm256_cvtph_ps(h));
     }
 }
-
 
 /// Is plain SSSE3 available?
 ///
@@ -469,17 +464,12 @@ pub(super) unsafe fn bc1_blocks_ssse3(
             let blk = core::slice::from_raw_parts(src.add(bi), 8);
             let pal = super::bcn::bc1_palette(blk, false);
             // Four u32 in registers straight into one xmm: no stack round trip.
-            let p = _mm_set_epi32(
-                pal[3] as i32,
-                pal[2] as i32,
-                pal[1] as i32,
-                pal[0] as i32,
-            );
+            let p = _mm_set_epi32(pal[3] as i32, pal[2] as i32, pal[1] as i32, pal[0] as i32);
             let idx = u32::from_le_bytes([blk[4], blk[5], blk[6], blk[7]]);
             let o = (by * 4 * out_w + bx * 4) * 4;
             for row in 0..4usize {
                 let sel = _mm_loadu_si128(
-                    BC1_SEL[((idx >> (8 * row)) & 0xff) as usize].as_ptr() as *const __m128i,
+                    BC1_SEL[((idx >> (8 * row)) & 0xff) as usize].as_ptr() as *const __m128i
                 );
                 _mm_storeu_si128(
                     dst.add(o + row * pitch) as *mut __m128i,
@@ -489,7 +479,6 @@ pub(super) unsafe fn bc1_blocks_ssse3(
         }
     }
 }
-
 
 /// Per-pixel mask keeping RGB and clearing alpha, so a decoded alpha byte can be
 /// `or`ed straight in.
@@ -578,12 +567,8 @@ pub(super) unsafe fn bc2_blocks_ssse3(
                     ),
                 );
                 let alpha = _mm_unpacklo_epi64(
-                    _mm_loadl_epi64(
-                        BC2_ALPHA[blk[row * 2] as usize].as_ptr() as *const __m128i
-                    ),
-                    _mm_loadl_epi64(
-                        BC2_ALPHA[blk[row * 2 + 1] as usize].as_ptr() as *const __m128i
-                    ),
+                    _mm_loadl_epi64(BC2_ALPHA[blk[row * 2] as usize].as_ptr() as *const __m128i),
+                    _mm_loadl_epi64(BC2_ALPHA[blk[row * 2 + 1] as usize].as_ptr() as *const __m128i),
                 );
                 _mm_storeu_si128(
                     dst.add(o + row * pitch) as *mut __m128i,
@@ -712,7 +697,6 @@ pub(super) unsafe fn bc3_blocks_ssse3(
     }
 }
 
-
 /// Is AVX2 available?
 ///
 /// Decode keeps its own check rather than borrowing the encoder's, so the
@@ -769,9 +753,8 @@ unsafe fn bc6h_interp_avx2_impl(
     out: &mut [u16; 48],
 ) {
     use core::arch::x86_64::{
-        __m256i, _mm256_add_epi32, _mm256_castsi256_si128, _mm256_loadu_si256,
-        _mm256_mullo_epi32, _mm256_packus_epi32, _mm256_permute4x64_epi64, _mm256_set1_epi32,
-        _mm256_srai_epi32,
+        __m256i, _mm256_add_epi32, _mm256_castsi256_si128, _mm256_loadu_si256, _mm256_mullo_epi32,
+        _mm256_packus_epi32, _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_srai_epi32,
     };
     let wv = [
         _mm256_loadu_si256(w.as_ptr() as *const __m256i),
@@ -782,10 +765,7 @@ unsafe fn bc6h_interp_avx2_impl(
         let bv = _mm256_set1_epi32(base[ch]);
         let dv = _mm256_set1_epi32(delta[ch]);
         for half in 0..2usize {
-            let v = _mm256_srai_epi32(
-                _mm256_add_epi32(bv, _mm256_mullo_epi32(dv, wv[half])),
-                6,
-            );
+            let v = _mm256_srai_epi32(_mm256_add_epi32(bv, _mm256_mullo_epi32(dv, wv[half])), 6);
             // finish_unquantize: scale by 31/64. The result IS the half pattern.
             let v = _mm256_srai_epi32(_mm256_mullo_epi32(v, s31), 6);
             // `packus` folds within 128-bit lanes, so qwords 0 and 2 hold the
@@ -798,7 +778,6 @@ unsafe fn bc6h_interp_avx2_impl(
         }
     }
 }
-
 
 /// Decode a whole BC5 surface, both channels gathered per block.
 ///
@@ -888,7 +867,6 @@ pub(super) unsafe fn bc4_blocks_ssse3(
     }
 }
 
-
 /// Convert one BC6H block's planar halves straight to RGBA `f32` rows, without
 /// ever materialising an intermediate `f32` array.
 ///
@@ -935,7 +913,7 @@ unsafe fn bc6h_planar_to_rgba_f16c(src: &[u16; 48], dst: *mut f32, pitch: usize)
     for g in 0..2usize {
         let ld = |ch: usize| {
             _mm256_cvtph_ps(_mm_loadu_si128(
-                src.as_ptr().add(ch * 16 + g * 8) as *const __m128i,
+                src.as_ptr().add(ch * 16 + g * 8) as *const __m128i
             ))
         };
         let (rf, gf, bf) = (ld(0), ld(1), ld(2));
@@ -1178,8 +1156,7 @@ mod tests {
                         let mut got = [0u8; 8];
                         write2(bp, dp, bp, dp, w0, w1, &mut got);
                         for (k, w) in [w0, w1].into_iter().enumerate() {
-                            let want =
-                                ((base[0] + w as i32 * delta[0]) >> 6) as u8;
+                            let want = ((base[0] + w as i32 * delta[0]) >> 6) as u8;
                             for c in 0..4 {
                                 assert_eq!(
                                     got[k * 4 + c],
@@ -1216,7 +1193,16 @@ mod tests {
         let delta = pack4([100, 100, 100, 100]);
         for alpha_lane in 0..4usize {
             let mut got = [0u8; 8];
-            write2_split(base, delta, base, delta, (0, 0), (64, 64), alpha_lane, &mut got);
+            write2_split(
+                base,
+                delta,
+                base,
+                delta,
+                (0, 0),
+                (64, 64),
+                alpha_lane,
+                &mut got,
+            );
             let starts = [10, 20, 30, 40];
             for lane in 0..4usize {
                 let want = if lane == alpha_lane {
@@ -1322,8 +1308,7 @@ mod tests {
                 // must still read as four-colour.
                 3 => {
                     for b in 0..BX * BY {
-                        data[b * 16 + 8..b * 16 + 12]
-                            .copy_from_slice(&[0x34, 0x12, 0x34, 0x12]);
+                        data[b * 16 + 8..b * 16 + 12].copy_from_slice(&[0x34, 0x12, 0x34, 0x12]);
                     }
                 }
                 _ => {
@@ -1364,7 +1349,12 @@ mod tests {
                         }
                     }
                 }
-                assert_eq!(got, want, "case {case}, {}", if which == 0 { "bc2" } else { "bc3" });
+                assert_eq!(
+                    got,
+                    want,
+                    "case {case}, {}",
+                    if which == 0 { "bc2" } else { "bc3" }
+                );
             }
         }
     }
@@ -1445,7 +1435,8 @@ mod tests {
                         }
                     }
                     assert_eq!(
-                        got, want,
+                        got,
+                        want,
                         "case {case}, {} signed={is_signed}",
                         if is_bc5 { "bc5" } else { "bc4" }
                     );

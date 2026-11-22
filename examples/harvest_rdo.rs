@@ -79,8 +79,7 @@ fn main() {
             let layout = EncodeLayout::flat_2d(content, *w, *h).with_rdo(Rdo::lambda(lam));
             let dds = Dds::encode_from_rgba8(rgba, layout).expect("encode");
             total_raw += dds.data.len();
-            total_deflate +=
-                miniz_oxide::deflate::compress_to_vec(&dds.data, 8).len();
+            total_deflate += miniz_oxide::deflate::compress_to_vec(&dds.data, 8).len();
             let img = dds
                 .decode_rgba8(SubresourceId::mip_layer(0, 0))
                 .expect("decode");

@@ -183,9 +183,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     pub fn subresource_range(&self, id: SubresourceId) -> Result<Range<usize>, Error> {
         let (offset, size) = self.subresource_offset_and_size(id)?;
         let start = offset as usize;
-        let end = start
-            .checked_add(size as usize)
-            .ok_or(Error::OutOfBounds)?;
+        let end = start.checked_add(size as usize).ok_or(Error::OutOfBounds)?;
         if end > self.data.as_ref().len() {
             return Err(Error::TruncatedData);
         }

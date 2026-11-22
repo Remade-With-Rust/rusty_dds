@@ -6,7 +6,7 @@
 //! (one pixel short, scalar) and 1020×1023 (width aligned, height not).
 //! Per-pixel rates are directly comparable — if the gate is over-strict, the
 //! NPOT column is the size of the prize.
-use rusty_dds::{DecodeContent, Dds, EncodeLayout, SubresourceId};
+use rusty_dds::{Dds, DecodeContent, EncodeLayout, SubresourceId};
 use std::time::Instant;
 
 fn main() {

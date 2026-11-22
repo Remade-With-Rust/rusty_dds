@@ -54,13 +54,7 @@ fn fill_for_content(
     v
 }
 
-fn solid_rgba(
-    width: u32,
-    height: u32,
-    depth: u32,
-    layers: u32,
-    color: [u8; 4],
-) -> Vec<u8> {
+fn solid_rgba(width: u32, height: u32, depth: u32, layers: u32, color: [u8; 4]) -> Vec<u8> {
     let n = (width * height * depth * layers) as usize;
     let mut v = Vec::with_capacity(n * 4);
     for _ in 0..n {
@@ -118,9 +112,8 @@ fn snorm_u8_bits_to_unorm(b: u8) -> u8 {
 }
 
 fn assert_roundtrip(layout: EncodeLayout, pixels: &[u8], min_psnr: f64) {
-    let dds = Dds::encode_from_rgba8(pixels, layout).unwrap_or_else(|e| {
-        panic!("encode {}: {e}", layout.content.name())
-    });
+    let dds = Dds::encode_from_rgba8(pixels, layout)
+        .unwrap_or_else(|e| panic!("encode {}: {e}", layout.content.name()));
     assert_eq!(dds.decode_content().unwrap(), layout.content);
 
     let layers = dds.subresource_layer_count();
@@ -294,9 +287,7 @@ fn solid_color_bc7_high_psnr() {
     let layout = EncodeLayout::flat_2d(DecodeContent::Bc7, 16, 16);
     let px = solid_rgba(16, 16, 1, 1, [10, 20, 30, 240]);
     let dds = Dds::encode_from_rgba8(&px, layout).unwrap();
-    let img = dds
-        .decode_rgba8(SubresourceId::mip_layer(0, 0))
-        .unwrap();
+    let img = dds.decode_rgba8(SubresourceId::mip_layer(0, 0)).unwrap();
     let psnr = psnr_rgba8(&img.pixels, &px).unwrap();
     assert!(psnr > 40.0, "solid BC7 PSNR {psnr}");
 }

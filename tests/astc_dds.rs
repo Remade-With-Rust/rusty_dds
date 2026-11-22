@@ -7,7 +7,8 @@
 
 use rusty_dds::astc::{self, AstcFootprint, AstcProfile};
 use rusty_dds::{
-    AlphaMode, D3D10ResourceDimension, Dds, DdsView, DecodeOptions, DxgiFormat, NewDxgiParams, SubresourceId,
+    AlphaMode, D3D10ResourceDimension, Dds, DdsView, DecodeOptions, DxgiFormat, NewDxgiParams,
+    SubresourceId,
 };
 
 fn sample_dds(w: u32, h: u32, fp: AstcFootprint, srgb: bool, mips: u32, layers: u32) -> Vec<u8> {
@@ -27,7 +28,9 @@ fn sample_dds(w: u32, h: u32, fp: AstcFootprint, srgb: bool, mips: u32, layers: 
     .unwrap();
     // Deterministic void-extent blocks with varying colours: legal everywhere.
     for (i, b) in d.data.chunks_exact_mut(16).enumerate() {
-        b.copy_from_slice(&[0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
+        b.copy_from_slice(&[
+            0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF,
+        ]);
         b[9] = (i * 37) as u8;
         b[11] = (i * 91) as u8;
         b[13] = (i * 13) as u8;
@@ -78,7 +81,12 @@ fn exact_mip_chain_and_routing() {
             // The DDS entry points equal the ASTC module on the same bytes.
             let s = dds.astc_surface(id).unwrap();
             let img = dds.decode_rgba8(id).unwrap();
-            assert_eq!(img.pixels, astc::decode_rgba8(s.data, mw, mh, fp, AstcProfile::Ldr).unwrap().pixels);
+            assert_eq!(
+                img.pixels,
+                astc::decode_rgba8(s.data, mw, mh, fp, AstcProfile::Ldr)
+                    .unwrap()
+                    .pixels
+            );
             let f = dds.decode_rgba_f32(id).unwrap();
             let mut want = vec![0f32; (mw * mh * 4) as usize];
             astc::decode_rgba_f32_into(s.data, mw, mh, 1, fp, AstcProfile::Hdr, &mut want).unwrap();
@@ -110,8 +118,12 @@ fn srgb_f32_is_the_8bit_value_over_255_and_override_works() {
     }
     // Override: astcenc's half-float sRGB values instead.
     let mut over = Vec::new();
-    dds.decode_rgba_f32_into_with(id, &mut over, DecodeOptions::new().astc_profile(AstcProfile::LdrSrgb))
-        .unwrap();
+    dds.decode_rgba_f32_into_with(
+        id,
+        &mut over,
+        DecodeOptions::new().astc_profile(AstcProfile::LdrSrgb),
+    )
+    .unwrap();
     let s = dds.astc_surface(id).unwrap();
     let mut want = vec![0f32; over.len()];
     astc::decode_rgba_f32_into(s.data, 20, 14, 1, fp, AstcProfile::LdrSrgb, &mut want).unwrap();
@@ -129,12 +141,16 @@ fn upload_plans_carry_the_footprint() {
     assert_eq!(g.dxgi_name, "ASTC_8X5_UNorm_sRGB");
     assert_eq!(g.vulkan_name, "VK_FORMAT_ASTC_8x5_SRGB_BLOCK");
     assert_eq!((g.block_width, g.block_height, g.block_bytes), (8, 5, 16));
-    let p = dds.upload_plan_compressed(SubresourceId::new(1, 0, 0)).unwrap();
+    let p = dds
+        .upload_plan_compressed(SubresourceId::new(1, 0, 0))
+        .unwrap();
     assert_eq!((p.width, p.height), (18, 14));
     assert_eq!(p.bytes_per_row, 3 * 16);
     assert_eq!(p.rows_per_image, 3);
     assert_eq!(p.data_len, 3 * 3 * 16);
-    let d = dds.upload_plan_decoded_rgba8(SubresourceId::new(0, 0, 0)).unwrap();
+    let d = dds
+        .upload_plan_decoded_rgba8(SubresourceId::new(0, 0, 0))
+        .unwrap();
     assert_eq!(d.data_len, 37 * 29 * 4);
 }
 
@@ -145,7 +161,10 @@ fn encode_astc_dds_round_trip() {
     let px: Vec<u8> = (0..w * h)
         .flat_map(|i| [(i * 7) as u8, (i * 3) as u8, (i / 5) as u8, 255])
         .collect();
-    for &(fp, prof) in &[(AstcFootprint::B6X6, AstcProfile::Ldr), (AstcFootprint::B8X5, AstcProfile::LdrSrgb)] {
+    for &(fp, prof) in &[
+        (AstcFootprint::B6X6, AstcProfile::Ldr),
+        (AstcFootprint::B8X5, AstcProfile::LdrSrgb),
+    ] {
         let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Fastest);
         let dds = Dds::encode_astc_from_rgba8(&px, w, h, &opts).unwrap();
         let mut bytes = Vec::new();
@@ -155,6 +174,9 @@ fn encode_astc_dds_round_trip() {
         assert_eq!((c.footprint, c.srgb), (fp, prof == AstcProfile::LdrSrgb));
         let img = v.decode_rgba8(SubresourceId::new(0, 0, 0)).unwrap();
         let direct = astc::encode_rgba8(&px, w, h, &opts).unwrap();
-        assert_eq!(astc::decode_rgba8(&direct, w, h, fp, prof).unwrap().pixels, img.pixels);
+        assert_eq!(
+            astc::decode_rgba8(&direct, w, h, fp, prof).unwrap().pixels,
+            img.pixels
+        );
     }
 }

@@ -8,25 +8,25 @@
 //! in-house.
 
 mod bc6h;
-pub(crate) mod float;
 pub(crate) mod bcn;
+pub(crate) mod float;
 #[cfg(all(feature = "simd", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod interp_pack;
 #[cfg(all(feature = "simd", target_arch = "aarch64"))]
 pub(crate) mod neon;
+pub mod reference;
 #[cfg(all(feature = "simd", target_arch = "x86_64"))]
 pub(crate) mod simd;
 mod uncompressed;
-pub mod reference;
 
 use crate::content::{
     slice_payload_bytes, DecodeContent, HdrDecodeContent, ImageRgba8, ImageRgbaF32,
 };
-use float::{F32Kind, PlainFormat};
-pub use float::{DecodeOptions, SingleChannel};
 use crate::error::Error;
 use crate::surface::SubresourceId;
 use crate::DdsBase;
+pub use float::{DecodeOptions, SingleChannel};
+use float::{F32Kind, PlainFormat};
 
 impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Decode one subresource to tightly packed RGBA8.
@@ -58,7 +58,8 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         #[cfg(feature = "astc")]
         if let Ok(c) = self.astc_content() {
             let mut pixels = Vec::new();
-            let (width, height, depth) = self.astc_decode_rgba8_into(id, c, DecodeOptions::new(), &mut pixels)?;
+            let (width, height, depth) =
+                self.astc_decode_rgba8_into(id, c, DecodeOptions::new(), &mut pixels)?;
             return Ok(ImageRgba8 {
                 width,
                 height,
@@ -235,7 +236,9 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         // Validate the source before sizing the destination: `w` and `h` are
         // header fields, and the output is 16 bytes a pixel.
         let slice_bytes = kind.slice_bytes(w, h)?;
-        let need = slice_bytes.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
+        let need = slice_bytes
+            .checked_mul(d as usize)
+            .ok_or(Error::OutOfBounds)?;
         if surf.data.len() < need {
             return Err(Error::TruncatedData);
         }
@@ -244,7 +247,9 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             .checked_mul(h as usize)
             .and_then(|n| n.checked_mul(4))
             .ok_or(Error::OutOfBounds)?;
-        let total = out_slice.checked_mul(d as usize).ok_or(Error::OutOfBounds)?;
+        let total = out_slice
+            .checked_mul(d as usize)
+            .ok_or(Error::OutOfBounds)?;
         // A correctly sized buffer costs nothing here — the whole point of
         // handing one back in. A buffer that must grow is replaced by a zeroed
         // allocation, which the OS hands over already zero; `resize` would
@@ -425,12 +430,24 @@ fn decode_rows_f32(
         }
         // Uncompressed 8-bit needs no 8-bit decode first: widen straight from
         // the payload instead of through a scratch band.
-        F32Kind::Ldr(DecodeContent::Rgba8) => {
-            decode_rows_f32(F32Kind::Plain(PlainFormat::Rgba8Un), src, width, height, grey, threads, dst)
-        }
-        F32Kind::Ldr(DecodeContent::Bgra8) => {
-            decode_rows_f32(F32Kind::Plain(PlainFormat::Bgra8), src, width, height, grey, threads, dst)
-        }
+        F32Kind::Ldr(DecodeContent::Rgba8) => decode_rows_f32(
+            F32Kind::Plain(PlainFormat::Rgba8Un),
+            src,
+            width,
+            height,
+            grey,
+            threads,
+            dst,
+        ),
+        F32Kind::Ldr(DecodeContent::Bgra8) => decode_rows_f32(
+            F32Kind::Plain(PlainFormat::Bgra8),
+            src,
+            width,
+            height,
+            grey,
+            threads,
+            dst,
+        ),
         F32Kind::Ldr(k) => decode_ldr_widen(k, src, width, height, threads, dst),
         F32Kind::Plain(p) => {
             let row = kind.row_bytes(width)?;

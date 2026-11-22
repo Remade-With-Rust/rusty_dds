@@ -32,8 +32,14 @@ impl<'a> AstcFile<'a> {
             return Err(Error::BadMagicNumber);
         }
         let footprint = AstcFootprint::new_3d(bytes[4] as u32, bytes[5] as u32, bytes[6] as u32)
-            .ok_or_else(|| Error::InvalidField(format!("ASTC block size {}x{}x{}", bytes[4], bytes[5], bytes[6])))?;
-        let dim = |o: usize| bytes[o] as u32 | (bytes[o + 1] as u32) << 8 | (bytes[o + 2] as u32) << 16;
+            .ok_or_else(|| {
+                Error::InvalidField(format!(
+                    "ASTC block size {}x{}x{}",
+                    bytes[4], bytes[5], bytes[6]
+                ))
+            })?;
+        let dim =
+            |o: usize| bytes[o] as u32 | (bytes[o + 1] as u32) << 8 | (bytes[o + 2] as u32) << 16;
         let (width, height, depth) = (dim(7), dim(10), dim(13));
         if footprint.is_3d() && depth == 0 {
             return Err(Error::InvalidField("ASTC 3D image with zero depth".into()));
@@ -61,7 +67,9 @@ impl<'a> AstcFile<'a> {
     ) -> Result<(), Error> {
         for v in [width, height, depth] {
             if v == 0 || v > 0xFF_FFFF {
-                return Err(Error::InvalidField(format!(".astc dimension {v} out of range")));
+                return Err(Error::InvalidField(format!(
+                    ".astc dimension {v} out of range"
+                )));
             }
         }
         if payload.len() != surface_len(footprint, width, height, depth)? {
@@ -84,6 +92,14 @@ impl<'a> AstcFile<'a> {
 
     /// The file as a container-neutral surface (no sRGB or HDR tag).
     pub fn surface(&self) -> AstcSurface<'a> {
-        AstcSurface::new(self.footprint, self.width, self.height, self.depth, None, None, self.data)
+        AstcSurface::new(
+            self.footprint,
+            self.width,
+            self.height,
+            self.depth,
+            None,
+            None,
+            self.data,
+        )
     }
 }

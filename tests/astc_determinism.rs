@@ -23,7 +23,12 @@ fn image(kind: u32, w: u32, h: u32) -> Vec<u8> {
     for y in 0..h {
         for xx in 0..w {
             let p: [u8; 4] = match kind {
-                0 => [(xx * 255 / w) as u8, (y * 255 / h) as u8, ((xx ^ y) * 9) as u8, 255],
+                0 => [
+                    (xx * 255 / w) as u8,
+                    (y * 255 / h) as u8,
+                    ((xx ^ y) * 9) as u8,
+                    255,
+                ],
                 1 => {
                     let n = next();
                     [n as u8, (n >> 8) as u8, (n >> 16) as u8, (n >> 24) as u8]
@@ -57,7 +62,12 @@ fn table() -> String {
     let (w, h) = (29u32, 23u32);
     for kind in 0..4 {
         let img = image(kind, w, h);
-        for fp in [AstcFootprint::B4X4, AstcFootprint::B6X5, AstcFootprint::B8X8, AstcFootprint::B12X10] {
+        for fp in [
+            AstcFootprint::B4X4,
+            AstcFootprint::B6X5,
+            AstcFootprint::B8X8,
+            AstcFootprint::B12X10,
+        ] {
             for preset in [AstcPreset::Fastest, AstcPreset::Fast, AstcPreset::Medium] {
                 for prof in [AstcProfile::Ldr, AstcProfile::LdrSrgb] {
                     let opts = AstcEncodeOptions::new(fp, prof).with_preset(preset);
@@ -72,7 +82,10 @@ fn table() -> String {
 
 #[test]
 fn encoder_output_is_frozen() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/astc/encode_hashes.txt");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/astc/encode_hashes.txt"
+    );
     let now = table();
     if std::env::var_os("UPDATE_ASTC_HASHES").is_some() {
         std::fs::write(path, &now).unwrap();

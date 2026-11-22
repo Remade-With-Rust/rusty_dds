@@ -106,7 +106,13 @@ mod ceiling_probe {
                 sources.push((format!("{asset}_mask"), vec![(w, h, r)]));
             }
         }
-        for tex in ["tex_bark", "tex_straw", "tex_water", "tex_wool", "tex_brick_1024"] {
+        for tex in [
+            "tex_bark",
+            "tex_straw",
+            "tex_water",
+            "tex_wool",
+            "tex_brick_1024",
+        ] {
             let p = format!("{root}/corpus/raw_tif/{tex}.tiff");
             if let Some((w, h, v)) = load_tiff_gray(&p) {
                 sources.push((tex.to_string(), vec![(w, h, v)]));
@@ -161,7 +167,9 @@ mod ceiling_probe {
         let (bw, bh) = (w / 4, h / 4);
         let mut cur_sse = 0i64;
         let mut ceil_sse = 0i64;
-        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let rows_per = (bh + nthreads - 1) / nthreads;
         let results: Vec<(i64, i64)> = std::thread::scope(|scope| {
             let mut handles = Vec::new();
@@ -236,12 +244,21 @@ mod fuse_oracle {
                     255
                 };
             }
-            let e0 = [(rng() & 0xFF) as u8, (rng() & 0xFF) as u8, (rng() & 0xFF) as u8];
-            let e1 = [(rng() & 0xFF) as u8, (rng() & 0xFF) as u8, (rng() & 0xFF) as u8];
+            let e0 = [
+                (rng() & 0xFF) as u8,
+                (rng() & 0xFF) as u8,
+                (rng() & 0xFF) as u8,
+            ];
+            let e1 = [
+                (rng() & 0xFF) as u8,
+                (rng() & 0xFF) as u8,
+                (rng() & 0xFF) as u8,
+            ];
             let old_block = pack_bc1(px, e0, e1);
             let old_err = bc1_sse(&px, &old_block);
             let (new_block, new_err) =
-                pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), i32::MAX).expect("unbounded");
+                pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), i32::MAX)
+                    .expect("unbounded");
             // The projection index fit (bc1_fit_4color) is a RESTRICTED
             // search: its SSE can only be >= the exhaustive fit, and only
             // negligibly (rounding cross-term on far-off-line pixels; the
@@ -259,7 +276,9 @@ mod fuse_oracle {
             // Early-abort contract: limit == err must return None (>= abort).
             assert!(pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), new_err).is_none());
             if new_err > 0 {
-                assert!(pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), new_err + 1).is_some());
+                assert!(
+                    pack_bc1_scored(&px, e0, e1, super::bc1::psq_rgb(&px), new_err + 1).is_some()
+                );
             }
         }
     }
@@ -375,10 +394,7 @@ mod alpha_select_oracle {
                         }
                     }
                     let fast = sel.select(s);
-                    assert_eq!(
-                        fast, lin,
-                        "a0={a0} a1={a1} s={s} palette={palette:?}"
-                    );
+                    assert_eq!(fast, lin, "a0={a0} a1={a1} s={s} palette={palette:?}");
                 }
             }
         }
@@ -394,9 +410,26 @@ mod alpha_select_oracle {
     fn round_clamp_u8_matches_round_then_clamp() {
         use super::super::round_clamp_u8;
         let mut cases: Vec<f32> = vec![
-            0.0, -0.0, -0.5, 0.5, 1.5, 2.5, -1.5, 254.5, 255.0, 255.5, 256.0,
-            -1.0, 300.0, -300.0, 0.49999997, -0.49999997, 127.5, 128.5,
-            f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
+            0.0,
+            -0.0,
+            -0.5,
+            0.5,
+            1.5,
+            2.5,
+            -1.5,
+            254.5,
+            255.0,
+            255.5,
+            256.0,
+            -1.0,
+            300.0,
+            -300.0,
+            0.49999997,
+            -0.49999997,
+            127.5,
+            128.5,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
         ];
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = move || {
@@ -428,9 +461,29 @@ mod alpha_select_oracle {
     fn round_clamp_snorm_matches_round_then_clamp() {
         use super::super::round_clamp_snorm;
         let mut cases: Vec<f32> = vec![
-            0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 126.5, -126.5, 127.0,
-            -127.0, 127.5, -127.5, 128.0, -300.0, 300.0, 0.49999997, -0.49999997,
-            f32::MIN_POSITIVE, -f32::MIN_POSITIVE, f32::INFINITY, f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            -1.5,
+            2.5,
+            -2.5,
+            126.5,
+            -126.5,
+            127.0,
+            -127.0,
+            127.5,
+            -127.5,
+            128.0,
+            -300.0,
+            300.0,
+            0.49999997,
+            -0.49999997,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
         ];
         // Every representable half-integer tie in range, plus its two bit
         // neighbours (the one just below the tie is what a naive f32
@@ -470,9 +523,27 @@ mod alpha_select_oracle {
     fn ceil_i32_matches_ceil() {
         use super::super::rdo::ceil_i32;
         let mut cases: Vec<f32> = vec![
-            0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 2.5, -2.5, 0.49999997, -0.49999997,
-            2147483000.0, 2147483648.0, -2147483648.0, 3e9, -3e9, 1e38, -1e38,
-            f32::INFINITY, f32::NEG_INFINITY, f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            2.5,
+            -2.5,
+            0.49999997,
+            -0.49999997,
+            2147483000.0,
+            2147483648.0,
+            -2147483648.0,
+            3e9,
+            -3e9,
+            1e38,
+            -1e38,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
         ];
         let mut state = 0xce11_a51d_2026_08_26u64;
         let mut next = move || {
@@ -589,5 +660,4 @@ mod alpha_select_oracle {
             );
         }
     }
-
 }

@@ -25,7 +25,10 @@ fn decode_surface(s: &astc::AstcSurface) {
 pub fn exercise(data: &[u8]) {
     if let Ok(f) = AstcFile::parse(data) {
         let s = f.surface();
-        assert_eq!(s.data.len(), astc::payload_len(s.width, s.height, s.depth, s.footprint).unwrap());
+        assert_eq!(
+            s.data.len(),
+            astc::payload_len(s.width, s.height, s.depth, s.footprint).unwrap()
+        );
         decode_surface(&s);
     }
     if let Ok(k) = KtxView::parse(data) {

@@ -166,7 +166,11 @@ fn hdr_mode7(v: &[i32]) -> ([i32; 3], [i32; 3]) {
     if majcomp == 2 {
         core::mem::swap(&mut red, &mut blue);
     }
-    let e1 = [red.clamp(0, 0xFFF), green.clamp(0, 0xFFF), blue.clamp(0, 0xFFF)];
+    let e1 = [
+        red.clamp(0, 0xFFF),
+        green.clamp(0, 0xFFF),
+        blue.clamp(0, 0xFFF),
+    ];
     let e0 = [
         (red - scale).clamp(0, 0xFFF),
         (green - scale).clamp(0, 0xFFF),
@@ -297,9 +301,15 @@ pub fn decode(cem: u8, v: &[u8]) -> RawEndpoints {
         }
         3 => {
             let (y0, d) = if v[0] & 0x80 != 0 {
-                (((v[1] & 0xE0) << 4) | ((v[0] & 0x7F) << 2), (v[1] & 0x1F) << 2)
+                (
+                    ((v[1] & 0xE0) << 4) | ((v[0] & 0x7F) << 2),
+                    (v[1] & 0x1F) << 2,
+                )
             } else {
-                (((v[1] & 0xF0) << 4) | ((v[0] & 0x7F) << 1), (v[1] & 0x0F) << 1)
+                (
+                    ((v[1] & 0xF0) << 4) | ((v[0] & 0x7F) << 1),
+                    (v[1] & 0x0F) << 1,
+                )
             };
             let y1 = (y0 + d).min(0xFFF);
             hdr_rgb([y0; 3], [y1; 3])
@@ -314,7 +324,12 @@ pub fn decode(cem: u8, v: &[u8]) -> RawEndpoints {
             )
         }
         6 => ldr(
-            [(v[0] * v[3]) >> 8, (v[1] * v[3]) >> 8, (v[2] * v[3]) >> 8, 0xFF],
+            [
+                (v[0] * v[3]) >> 8,
+                (v[1] * v[3]) >> 8,
+                (v[2] * v[3]) >> 8,
+                0xFF,
+            ],
             [v[0], v[1], v[2], 0xFF],
         ),
         7 => {
@@ -350,7 +365,12 @@ pub fn decode(cem: u8, v: &[u8]) -> RawEndpoints {
             }
         }
         10 => ldr(
-            [(v[0] * v[3]) >> 8, (v[1] * v[3]) >> 8, (v[2] * v[3]) >> 8, v[4]],
+            [
+                (v[0] * v[3]) >> 8,
+                (v[1] * v[3]) >> 8,
+                (v[2] * v[3]) >> 8,
+                v[4],
+            ],
             [v[0], v[1], v[2], v[5]],
         ),
         11 => {

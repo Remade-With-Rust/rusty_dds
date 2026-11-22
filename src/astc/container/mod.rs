@@ -123,7 +123,9 @@ impl<'a> AstcSurface<'a> {
 /// Payload length of a subresource, as a container size check.
 pub(crate) fn surface_len(fp: AstcFootprint, w: u32, h: u32, d: u32) -> Result<usize, Error> {
     if w == 0 || h == 0 || d == 0 {
-        return Err(Error::InvalidField("ASTC surface has a zero dimension".into()));
+        return Err(Error::InvalidField(
+            "ASTC surface has a zero dimension".into(),
+        ));
     }
     if d > 1 && !fp.is_3d() {
         // A stack of 2D slices: each slice is its own block grid.

@@ -81,21 +81,51 @@ pub(crate) fn params(p: AstcPreset) -> Params {
     #[cfg(feature = "tuning")]
     {
         let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
-        if let Some(v) = get("RUSTY_DDS_ASTC_PARTS") { prm.max_partitions = v as u8; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part_candidates[0] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PART3") { prm.part_candidates[1] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PART4") { prm.part_candidates[2] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_COVERAGE") { prm.mode_coverage = v as u16; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH2") { prm.part_search[0] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH3") { prm.part_search[1] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH4") { prm.part_search[2] = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_EXACT") { prm.exact_candidates = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE") { prm.refine = v as u8; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE_TOP") { prm.refine_top = v as usize; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL") { prm.dual_plane = v != 0.0; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL_CORR") { prm.dual_corr_limit = v; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_GRID_ITERS") { prm.grid_iters = v as u8; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_SKIP") { prm.part2_skip_err = v; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PARTS") {
+            prm.max_partitions = v as u8;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART2") {
+            prm.part_candidates[0] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART3") {
+            prm.part_candidates[1] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART4") {
+            prm.part_candidates[2] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_COVERAGE") {
+            prm.mode_coverage = v as u16;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH2") {
+            prm.part_search[0] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH3") {
+            prm.part_search[1] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH4") {
+            prm.part_search[2] = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_EXACT") {
+            prm.exact_candidates = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE") {
+            prm.refine = v as u8;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE_TOP") {
+            prm.refine_top = v as usize;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL") {
+            prm.dual_plane = v != 0.0;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL_CORR") {
+            prm.dual_corr_limit = v;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_GRID_ITERS") {
+            prm.grid_iters = v as u8;
+        }
+        if let Some(v) = get("RUSTY_DDS_ASTC_SKIP") {
+            prm.part2_skip_err = v;
+        }
     }
     prm
 }
@@ -184,7 +214,11 @@ fn check(pixels: &[u8], width: u32, height: u32, opts: &AstcEncodeOptions) -> Re
     if pixels.len() != need {
         return Err(Error::OutOfBounds);
     }
-    if opts.channel_weights.iter().any(|w| !(w.is_finite() && *w >= 0.0)) {
+    if opts
+        .channel_weights
+        .iter()
+        .any(|w| !(w.is_finite() && *w >= 0.0))
+    {
         return Err(Error::InvalidField("ASTC encode: channel weight".into()));
     }
     Ok(())
@@ -199,7 +233,12 @@ fn target(opts: &AstcEncodeOptions) -> Target {
 }
 
 /// Encode tightly packed RGBA8 `pixels` to ASTC block data (row-major blocks).
-pub fn encode_rgba8(pixels: &[u8], width: u32, height: u32, opts: &AstcEncodeOptions) -> Result<Vec<u8>, Error> {
+pub fn encode_rgba8(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    opts: &AstcEncodeOptions,
+) -> Result<Vec<u8>, Error> {
     check(pixels, width, height, opts)?;
     let n = payload_len(width, height, 1, opts.footprint).ok_or(Error::OutOfBounds)?;
     let mut out = alloc::vec![0u8; n];
@@ -346,7 +385,12 @@ pub fn encode_volume_rgba8(
 /// negatives and NaN clamp to 0, values above the half range to 65504) with
 /// profile `Hdr` (HDR alpha) or `HdrRgbLdrA` (LDR alpha). One partition;
 /// endpoint modes 11, 14 and 15; constant blocks become HDR void extents.
-pub fn encode_rgba_f32(pixels: &[f32], width: u32, height: u32, opts: &AstcEncodeOptions) -> Result<Vec<u8>, Error> {
+pub fn encode_rgba_f32(
+    pixels: &[f32],
+    width: u32,
+    height: u32,
+    opts: &AstcEncodeOptions,
+) -> Result<Vec<u8>, Error> {
     let fp = opts.footprint;
     if width == 0 || height == 0 {
         return Err(Error::InvalidField("ASTC encode: zero dimension".into()));

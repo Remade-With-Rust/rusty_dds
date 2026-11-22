@@ -210,8 +210,8 @@ fn build_decode_cases(dir: &Path) -> Vec<DecodeCase> {
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let path = dir.join(format!("{id}.dds"));
-            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
-                .with_depth(ctx.depth);
+            let layout =
+                EncodeLayout::flat_2d(content, ctx.width, ctx.height).with_depth(ctx.depth);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
             let dds = Dds::encode_from_rgba8(&pixels, layout).expect("encode fixture");
             write_dds(&path, &dds);
@@ -242,8 +242,8 @@ fn run_encode_baselines(root: &Path, cases_dir: &Path, artifacts: &Path) -> serd
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
-            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
-                .with_depth(ctx.depth);
+            let layout =
+                EncodeLayout::flat_2d(content, ctx.width, ctx.height).with_depth(ctx.depth);
 
             // Case files for DirectXTex harness
             fs::write(cases_dir.join(format!("{id}.rgba")), &pixels).unwrap();

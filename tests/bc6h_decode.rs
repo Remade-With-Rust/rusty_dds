@@ -226,7 +226,8 @@ fn hdr_block_row_split_matches_whole_surface() {
             let mut split = vec![0f32; n * 4];
             let px = (cut * 4).min(h) as usize * w as usize * 4;
             let (top, bottom) = split.split_at_mut(px);
-            dds.decode_block_rows_f32_into(id, 0..cut, top).expect("top");
+            dds.decode_block_rows_f32_into(id, 0..cut, top)
+                .expect("top");
             dds.decode_block_rows_f32_into(id, cut..rows, bottom)
                 .expect("bottom");
             assert_eq!(split, whole.pixels, "{w}x{h}: split at row {cut} diverged");
@@ -243,10 +244,14 @@ fn hdr_block_rows_reject_bad_ranges() {
     let rows = dds.block_rows_f32(id).expect("rows");
     let mut out = vec![0f32; 64 * 64 * 4];
 
-    assert!(dds.decode_block_rows_f32_into(id, 0..rows + 1, &mut out).is_err());
+    assert!(dds
+        .decode_block_rows_f32_into(id, 0..rows + 1, &mut out)
+        .is_err());
     assert!(dds.decode_block_rows_f32_into(id, 2..1, &mut out).is_err());
     // A destination that does not match the requested rows is refused, not
     // silently truncated.
     let mut small = vec![0f32; 8];
-    assert!(dds.decode_block_rows_f32_into(id, 0..rows, &mut small).is_err());
+    assert!(dds
+        .decode_block_rows_f32_into(id, 0..rows, &mut small)
+        .is_err());
 }

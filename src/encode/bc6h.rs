@@ -205,8 +205,14 @@ unsafe fn fit_avx2(halves: &[[i32; 3]; 16], pal: &[[i32; 3]; 16]) -> ([u8; 16], 
 
     let mut e = [0i32; 16];
     let mut ix = [0i32; 16];
-    _mm256_storeu_si256(e.as_mut_ptr() as *mut __m256i, _mm256_xor_si256(best0, bias));
-    _mm256_storeu_si256(e.as_mut_ptr().add(8) as *mut __m256i, _mm256_xor_si256(best1, bias));
+    _mm256_storeu_si256(
+        e.as_mut_ptr() as *mut __m256i,
+        _mm256_xor_si256(best0, bias),
+    );
+    _mm256_storeu_si256(
+        e.as_mut_ptr().add(8) as *mut __m256i,
+        _mm256_xor_si256(best1, bias),
+    );
     _mm256_storeu_si256(ix.as_mut_ptr() as *mut __m256i, idx0);
     _mm256_storeu_si256(ix.as_mut_ptr().add(8) as *mut __m256i, idx1);
 
@@ -495,14 +501,38 @@ mod round_oracle {
                 f64::from_bits(tie.to_bits() + 1),
                 k as f64,
             ] {
-                assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+                assert_eq!(
+                    round_clamp_bc6h(x),
+                    want(x),
+                    "x = {x:?} ({:#x})",
+                    x.to_bits()
+                );
             }
         }
         for x in [
-            0.0, -0.0, -0.25, -0.5, -1.5, -1e300, 65504.0, 65504.4999, 65504.5, 65505.7, 1e300,
-            f64::INFINITY, f64::NEG_INFINITY, f64::NAN, f64::MIN_POSITIVE, -f64::MIN_POSITIVE,
+            0.0,
+            -0.0,
+            -0.25,
+            -0.5,
+            -1.5,
+            -1e300,
+            65504.0,
+            65504.4999,
+            65504.5,
+            65505.7,
+            1e300,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
         ] {
-            assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+            assert_eq!(
+                round_clamp_bc6h(x),
+                want(x),
+                "x = {x:?} ({:#x})",
+                x.to_bits()
+            );
         }
         let mut state = 0x6bc6_5150_c0de_2026u64;
         for _ in 0..400_000 {
@@ -511,7 +541,12 @@ mod round_oracle {
             state ^= state << 17;
             // [-4096, +69600): covers below-zero, in-range, and above-clamp.
             let x = (state >> 11) as f64 / (1u64 << 53) as f64 * 73696.0 - 4096.0;
-            assert_eq!(round_clamp_bc6h(x), want(x), "x = {x:?} ({:#x})", x.to_bits());
+            assert_eq!(
+                round_clamp_bc6h(x),
+                want(x),
+                "x = {x:?} ({:#x})",
+                x.to_bits()
+            );
         }
     }
 }

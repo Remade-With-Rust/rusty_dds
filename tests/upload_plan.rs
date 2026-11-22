@@ -50,7 +50,10 @@ fn bc1_32x32_compressed_pitches() {
     assert_eq!(plan.rows_per_image, 8);
     assert_eq!(plan.data_len, 64 * 8);
     assert_eq!(plan.data_offset, 0);
-    assert_eq!(&dds.data[plan.data_offset..plan.data_offset + plan.data_len], &dds.data[..]);
+    assert_eq!(
+        &dds.data[plan.data_offset..plan.data_offset + plan.data_len],
+        &dds.data[..]
+    );
 }
 
 #[test]

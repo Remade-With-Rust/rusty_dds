@@ -21,7 +21,11 @@ pub fn infill(
     let ds = (1024 + bw / 2) / (bw - 1);
     let dt = (1024 + bh / 2) / (bh - 1);
     // A 2D footprint has depth 1; its r axis never varies.
-    let dr = if bd > 1 { (1024 + bd / 2) / (bd - 1) } else { 0 };
+    let dr = if bd > 1 {
+        (1024 + bd / 2) / (bd - 1)
+    } else {
+        0
+    };
     let mut i = 0;
     for r in 0..bd {
         for t in 0..bh {

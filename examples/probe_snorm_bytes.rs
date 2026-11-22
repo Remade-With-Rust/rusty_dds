@@ -24,7 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 255,
             ]);
         }
-        let dds = Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side).with_mips(9))?;
+        let dds =
+            Dds::encode_from_rgba8(&px, EncodeLayout::flat_2d(content, side, side).with_mips(9))?;
         let mut h: u64 = 0xcbf29ce484222325;
         for b in &dds.data {
             h ^= *b as u64;

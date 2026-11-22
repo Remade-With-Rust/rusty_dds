@@ -136,9 +136,24 @@ fn oracle(fmt: &str, p: &[u8]) -> [f64; 4] {
         "rg16sn" => [sn(rd(p, 0, 2), 16), sn(rd(p, 2, 2), 16), 0.0, 1.0],
         "r16sn" => [sn(rd(p, 0, 2), 16), 0.0, 0.0, 1.0],
         "rgba8sn" => [0, 1, 2, 3].map(|i| sn(p[i] as u32, 8)),
-        "bgrx8" => [un(p[2] as u32, 8), un(p[1] as u32, 8), un(p[0] as u32, 8), 1.0],
-        "rgbx8" => [un(p[0] as u32, 8), un(p[1] as u32, 8), un(p[2] as u32, 8), 1.0],
-        "bgra8" => [un(p[2] as u32, 8), un(p[1] as u32, 8), un(p[0] as u32, 8), un(p[3] as u32, 8)],
+        "bgrx8" => [
+            un(p[2] as u32, 8),
+            un(p[1] as u32, 8),
+            un(p[0] as u32, 8),
+            1.0,
+        ],
+        "rgbx8" => [
+            un(p[0] as u32, 8),
+            un(p[1] as u32, 8),
+            un(p[2] as u32, 8),
+            1.0,
+        ],
+        "bgra8" => [
+            un(p[2] as u32, 8),
+            un(p[1] as u32, 8),
+            un(p[0] as u32, 8),
+            un(p[3] as u32, 8),
+        ],
         "rgba8" => [0, 1, 2, 3].map(|i| un(p[i] as u32, 8)),
         "rg8un" => [un(p[0] as u32, 8), un(p[1] as u32, 8), 0.0, 1.0],
         "rg8sn" => [sn(p[0] as u32, 8), sn(p[1] as u32, 8), 0.0, 1.0],
@@ -159,7 +174,12 @@ fn oracle(fmt: &str, p: &[u8]) -> [f64; 4] {
         }
         "rg11b10f" => {
             let v = rd(p, 0, 4);
-            [ufloat(v & 0x7ff, 6), ufloat((v >> 11) & 0x7ff, 6), ufloat(v >> 22, 5), 1.0]
+            [
+                ufloat(v & 0x7ff, 6),
+                ufloat((v >> 11) & 0x7ff, 6),
+                ufloat(v >> 22, 5),
+                1.0,
+            ]
         }
         "rgb9e5" => {
             let v = rd(p, 0, 4);
@@ -177,13 +197,31 @@ fn oracle(fmt: &str, p: &[u8]) -> [f64; 4] {
         }
         "b5g5r5a1" | "b5g5r5x1" => {
             let v = rd(p, 0, 2);
-            let a = if fmt == "b5g5r5a1" { (v >> 15) as f64 } else { 1.0 };
-            [un((v >> 10) & 0x1f, 5), un((v >> 5) & 0x1f, 5), un(v & 0x1f, 5), a]
+            let a = if fmt == "b5g5r5a1" {
+                (v >> 15) as f64
+            } else {
+                1.0
+            };
+            [
+                un((v >> 10) & 0x1f, 5),
+                un((v >> 5) & 0x1f, 5),
+                un(v & 0x1f, 5),
+                a,
+            ]
         }
         "b4g4r4a4" | "b4g4r4x4" => {
             let v = rd(p, 0, 2);
-            let a = if fmt == "b4g4r4a4" { un(v >> 12, 4) } else { 1.0 };
-            [un((v >> 8) & 0xf, 4), un((v >> 4) & 0xf, 4), un(v & 0xf, 4), a]
+            let a = if fmt == "b4g4r4a4" {
+                un(v >> 12, 4)
+            } else {
+                1.0
+            };
+            [
+                un((v >> 8) & 0xf, 4),
+                un((v >> 4) & 0xf, 4),
+                un(v & 0xf, 4),
+                a,
+            ]
         }
         "l8" => {
             let l = un(p[0] as u32, 8);
@@ -340,8 +378,14 @@ fn single_channel_grey_option() {
             assert_eq!(r[2], 0.0, "{f:?}: default blue");
             assert_eq!(r[3], 1.0, "{f:?}: alpha");
             let rr = r[0];
-            assert!(g[0].to_bits() == rr.to_bits() || rr.is_nan(), "{f:?}: red kept");
-            assert!(g[1].to_bits() == g[0].to_bits() && g[2].to_bits() == g[0].to_bits(), "{f:?}: grey");
+            assert!(
+                g[0].to_bits() == rr.to_bits() || rr.is_nan(),
+                "{f:?}: red kept"
+            );
+            assert!(
+                g[1].to_bits() == g[0].to_bits() && g[2].to_bits() == g[0].to_bits(),
+                "{f:?}: grey"
+            );
             assert_eq!(g[3], 1.0);
         }
     }
@@ -363,7 +407,10 @@ fn single_channel_grey_option() {
     dds.decode_rgba8_into_with(ID, &mut buf, grey).unwrap();
     assert_eq!(buf, g.pixels);
     let dds = dxgi(DxgiFormat::BC5_UNorm, 8, 8, 5);
-    assert_eq!(dds.decode_rgba8(ID).unwrap(), dds.decode_rgba8_with(ID, grey).unwrap());
+    assert_eq!(
+        dds.decode_rgba8(ID).unwrap(),
+        dds.decode_rgba8_with(ID, grey).unwrap()
+    );
 }
 
 /// BC4/BC5 in f32: within float rounding of bcdec's own `bc4_float` /
@@ -397,8 +444,16 @@ fn bc45_f32_matches_bcdec_float_and_the_8bit_path() {
                         (r[k], 0.0)
                     };
                     let p = &img.pixels[(y * w + x) * 4..][..4];
-                    assert!((p[0] - er).abs() <= 2e-7, "{f:?} ({x},{y}) R {} vs {er}", p[0]);
-                    assert!((p[1] - eg).abs() <= 2e-7, "{f:?} ({x},{y}) G {} vs {eg}", p[1]);
+                    assert!(
+                        (p[0] - er).abs() <= 2e-7,
+                        "{f:?} ({x},{y}) R {} vs {er}",
+                        p[0]
+                    );
+                    assert!(
+                        (p[1] - eg).abs() <= 2e-7,
+                        "{f:?} ({x},{y}) G {} vs {eg}",
+                        p[1]
+                    );
                     assert_eq!([p[2], p[3]], [0.0, 1.0], "{f:?} B/A");
                     let scale = if signed { 127.0 } else { 255.0 };
                     if (p[0] * scale - (p[0] * scale).round()).abs() > 1e-3 {
@@ -412,10 +467,25 @@ fn bc45_f32_matches_bcdec_float_and_the_8bit_path() {
 
             let ldr = dds.decode_rgba8(ID).unwrap();
             for (q, p) in ldr.pixels.chunks_exact(4).zip(img.pixels.chunks_exact(4)) {
-                let to8 = |v: f32| if signed { (v * 127.0).round() as i8 as u8 } else { (v * 255.0).round() as u8 };
+                let to8 = |v: f32| {
+                    if signed {
+                        (v * 127.0).round() as i8 as u8
+                    } else {
+                        (v * 255.0).round() as u8
+                    }
+                };
                 let d = (to8(p[0]) as i8 as i32 - q[0] as i8 as i32).abs();
-                let d = if signed { d } else { (to8(p[0]) as i32 - q[0] as i32).abs() };
-                assert!(d <= 1, "{f:?}: f32 {} rounds >1 level from 8-bit {}", p[0], q[0]);
+                let d = if signed {
+                    d
+                } else {
+                    (to8(p[0]) as i32 - q[0] as i32).abs()
+                };
+                assert!(
+                    d <= 1,
+                    "{f:?}: f32 {} rounds >1 level from 8-bit {}",
+                    p[0],
+                    q[0]
+                );
             }
         }
     }
@@ -430,7 +500,10 @@ fn eight_bit_block_formats_widen_exactly() {
         (DxgiFormat::BC2_UNorm, &[(64, 64), (13, 7)][..]),
         (DxgiFormat::BC3_UNorm, &[(64, 64), (13, 7)][..]),
         // 1024^2 and 1030x518 cross the BC7 parallel threshold.
-        (DxgiFormat::BC7_UNorm, &[(64, 64), (13, 7), (1024, 1024), (1030, 518)][..]),
+        (
+            DxgiFormat::BC7_UNorm,
+            &[(64, 64), (13, 7), (1024, 1024), (1030, 518)][..],
+        ),
     ] {
         for &(w, h) in sizes {
             let dds = dxgi(f, w, h, 0xb7 ^ w as u64 ^ h as u64);
@@ -465,29 +538,45 @@ fn block_row_split_matches_whole_surface() {
             let mut buf = vec![0f32; whole.len()];
             let (top, bottom) = buf.split_at_mut(split_px);
             dds.decode_block_rows_f32_into(ID, 0..cut, top).unwrap();
-            dds.decode_block_rows_f32_into(ID, cut..rows, bottom).unwrap();
+            dds.decode_block_rows_f32_into(ID, cut..rows, bottom)
+                .unwrap();
             assert!(
-                buf.iter().zip(&whole).all(|(a, b)| a.to_bits() == b.to_bits()),
+                buf.iter()
+                    .zip(&whole)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
                 "{f:?}: split at {cut} differs"
             );
         }
         let mut into = Vec::new();
         dds.decode_rgba_f32_into(ID, &mut into).unwrap();
-        assert!(into.iter().zip(&whole).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(into
+            .iter()
+            .zip(&whole)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 }
 
 #[test]
 fn truncated_payloads_fail_closed() {
-    for f in [DxgiFormat::R32G32B32A32_Float, DxgiFormat::BC4_UNorm, DxgiFormat::BC7_UNorm] {
+    for f in [
+        DxgiFormat::R32G32B32A32_Float,
+        DxgiFormat::BC4_UNorm,
+        DxgiFormat::BC7_UNorm,
+    ] {
         let mut dds = dxgi(f, 16, 16, 3);
         let n = dds.data.len();
         dds.data.truncate(n - 1);
         assert!(dds.decode_rgba_f32(ID).is_err(), "{f:?}");
     }
     // Still unsupported: typeless and integer layouts have no defined float.
-    for f in [DxgiFormat::R16G16B16A16_Typeless, DxgiFormat::R16G16B16A16_UInt] {
+    for f in [
+        DxgiFormat::R16G16B16A16_Typeless,
+        DxgiFormat::R16G16B16A16_UInt,
+    ] {
         let dds = dxgi(f, 4, 4, 3);
-        assert!(matches!(dds.decode_rgba_f32(ID), Err(Error::UnsupportedFormat)), "{f:?}");
+        assert!(
+            matches!(dds.decode_rgba_f32(ID), Err(Error::UnsupportedFormat)),
+            "{f:?}"
+        );
     }
 }

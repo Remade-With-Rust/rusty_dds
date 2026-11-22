@@ -44,12 +44,20 @@ pub(crate) fn f32_to_f16_clamped(v: f32) -> u16 {
         let half = m >> shift;
         let rem = m & ((1 << shift) - 1);
         let mid = 1 << (shift - 1);
-        let r = if rem > mid || (rem == mid && half & 1 == 1) { half + 1 } else { half };
+        let r = if rem > mid || (rem == mid && half & 1 == 1) {
+            half + 1
+        } else {
+            half
+        };
         return r as u16;
     }
     let half = ((e as u32) << 10) | (m >> 13);
     let rem = m & 0x1FFF;
-    let r = if rem > 0x1000 || (rem == 0x1000 && half & 1 == 1) { half + 1 } else { half };
+    let r = if rem > 0x1000 || (rem == 0x1000 && half & 1 == 1) {
+        half + 1
+    } else {
+        half
+    };
     (r.min(0x7BFF)) as u16
 }
 
@@ -211,7 +219,11 @@ pub(crate) fn encode_block_hdr(
     let mut ts = [0f32; MAX_TEXELS];
     let (mut tmin, mut tmax) = (f32::MAX, f32::MIN);
     for (i, p) in t.iter().enumerate() {
-        let v: f32 = if dd > 0.0 { (0..chans).map(|c| (p[c] - mean[c]) * dir[c]).sum::<f32>() / dd } else { 0.0 };
+        let v: f32 = if dd > 0.0 {
+            (0..chans).map(|c| (p[c] - mean[c]) * dir[c]).sum::<f32>() / dd
+        } else {
+            0.0
+        };
         ts[i] = v;
         tmin = tmin.min(v);
         tmax = tmax.max(v);
@@ -219,7 +231,11 @@ pub(crate) fn encode_block_hdr(
     let span = tmax - tmin;
     let mut ideal = [0f32; MAX_TEXELS];
     for i in 0..n {
-        ideal[i] = if span > 0.0 { (ts[i] - tmin) / span } else { 0.0 };
+        ideal[i] = if span > 0.0 {
+            (ts[i] - tmin) / span
+        } else {
+            0.0
+        };
     }
     // Candidate modes: single plane, ranked by decimation residual plus the
     // weight quantisation noise; colour range from the bit budget.
@@ -236,7 +252,10 @@ pub(crate) fn encode_block_hdr(
             decimate(ctx, g, &ideal, 2, &mut dec[g]);
             let mut e = 0f32;
             for (ti, &(nt, tp)) in ctx.grids[g].taps.iter().enumerate() {
-                let v: f32 = tp[..nt as usize].iter().map(|&(k, c)| dec[g][k as usize] * c as f32).sum();
+                let v: f32 = tp[..nt as usize]
+                    .iter()
+                    .map(|&(k, c)| dec[g][k as usize] * c as f32)
+                    .sum();
                 let d = v / (16.0 * 64.0) - ideal[ti];
                 e += d * d;
             }
@@ -253,7 +272,11 @@ pub(crate) fn encode_block_hdr(
         let cq = n as f32 * step * step / 12.0 * 0.5;
         cands.push((res[g] + wq + cq, mi, r as usize));
     }
-    cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+    cands.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
     cands.truncate(exact.max(1));
     let mut best = Best {
         err: f64::MAX,
@@ -349,7 +372,11 @@ pub(crate) fn encode_block_hdr(
                     num += d * (t[i][c] - ep.e0[c] as f32);
                     den += d * d;
                 }
-                w[i] = if den > 0.0 { (num / den).clamp(0.0, 1.0) } else { 0.0 };
+                w[i] = if den > 0.0 {
+                    (num / den).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
             }
             let mut d1 = [0f32; 64];
             decimate(ctx, g, &w, 2, &mut d1);
@@ -360,7 +387,12 @@ pub(crate) fn encode_block_hdr(
 }
 
 /// Per-texel targets for a block of f32 RGBA texels.
-pub(crate) fn targets(px: &[[f32; 4]], profile: AstcProfile, t: &mut [[f32; 4]], h: &mut [[u16; 4]]) -> bool {
+pub(crate) fn targets(
+    px: &[[f32; 4]],
+    profile: AstcProfile,
+    t: &mut [[f32; 4]],
+    h: &mut [[u16; 4]],
+) -> bool {
     let mut opaque = true;
     for (i, p) in px.iter().enumerate() {
         for c in 0..4 {
@@ -412,7 +444,13 @@ mod tests {
             .iter()
             .map(|s| {
                 let raw = cem::decode(11, s);
-                (0..3).map(|c| { let a = raw.e0[c] as f32 - e0[c]; let b = raw.e1[c] as f32 - e1[c]; (a * a + b * b) as f64 }).sum::<f64>()
+                (0..3)
+                    .map(|c| {
+                        let a = raw.e0[c] as f32 - e0[c];
+                        let b = raw.e1[c] as f32 - e1[c];
+                        (a * a + b * b) as f64
+                    })
+                    .sum::<f64>()
             })
             .fold(f64::MAX, f64::min);
         assert!(best < 6.0 * 16.0 * 16.0, "{best}");

@@ -74,7 +74,10 @@ fn main() {
     fs::write(&out, serde_json::to_string_pretty(&merged).unwrap()).unwrap();
     write_markdown_summary(&artifacts.join("decode-vs-directxtex.md"), &merged);
     println!("\nWrote {}", out.display());
-    println!("Wrote {}", artifacts.join("decode-vs-directxtex.md").display());
+    println!(
+        "Wrote {}",
+        artifacts.join("decode-vs-directxtex.md").display()
+    );
 }
 
 fn run_dxtex(exe: &Path, cases_dir: &Path, artifacts: &Path) {
@@ -295,13 +298,7 @@ fn write_dds(path: &Path, dds: &Dds) {
     f.flush().unwrap();
 }
 
-fn serde_json_row(
-    id: &str,
-    ok: bool,
-    ns: f64,
-    sink: usize,
-    hr: Option<u64>,
-) -> serde_json::Value {
+fn serde_json_row(id: &str, ok: bool, ns: f64, sink: usize, hr: Option<u64>) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert("id".into(), id.into());
     m.insert("ok".into(), ok.into());
@@ -331,7 +328,9 @@ fn merge_report(
         let d = by_id.get(&case.id);
         let rusty_ns = r.get("ns_per_iter").and_then(|v| v.as_f64());
         let dx_ok = d.and_then(|v| v.get("ok")).and_then(|v| v.as_bool());
-        let dx_ns = d.and_then(|v| v.get("ns_per_iter")).and_then(|v| v.as_f64());
+        let dx_ns = d
+            .and_then(|v| v.get("ns_per_iter"))
+            .and_then(|v| v.as_f64());
         let ratio = match (rusty_ns, dx_ns, dx_ok) {
             (Some(a), Some(b), Some(true)) if b > 0.0 => Some(a / b),
             _ => None,
@@ -422,8 +421,12 @@ fn write_markdown_summary(path: &Path, report: &serde_json::Value) {
         "Summary: {} cases — **{} ahead**, {} parity, **{} behind**, {} dxtex-failed\n\n",
         s["cases"], s["ahead"], s["parity"], s["behind"], s["dxtex_failed"]
     ));
-    md.push_str("| Case | Content | Context | rusty_dds (ns) | DirectXTex (ns) | Ratio | Verdict |\n");
-    md.push_str("|------|---------|---------|----------------|-----------------|-------|---------|\n");
+    md.push_str(
+        "| Case | Content | Context | rusty_dds (ns) | DirectXTex (ns) | Ratio | Verdict |\n",
+    );
+    md.push_str(
+        "|------|---------|---------|----------------|-----------------|-------|---------|\n",
+    );
     if let Some(rows) = report["rows"].as_array() {
         for r in rows {
             md.push_str(&format!(

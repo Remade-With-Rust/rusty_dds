@@ -75,8 +75,8 @@ fn main() {
             }
             let id = format!("{}__{}", content.name(), ctx.name);
             let pixels = fill_rgba(content, ctx.width, ctx.height, ctx.depth);
-            let layout = EncodeLayout::flat_2d(content, ctx.width, ctx.height)
-                .with_depth(ctx.depth);
+            let layout =
+                EncodeLayout::flat_2d(content, ctx.width, ctx.height).with_depth(ctx.depth);
             let floor = psnr_floor(content);
             let channels = channels_for(content);
 
@@ -127,13 +127,12 @@ fn main() {
             println!(
                 "{:<22} psnr={:>8}  floor={:>5}  pass={}",
                 id,
-                psnr
-                    .map(|p| if p.is_infinite() {
-                        "inf".into()
-                    } else {
-                        format!("{p:.2}")
-                    })
-                    .unwrap_or_else(|| "fail".into()),
+                psnr.map(|p| if p.is_infinite() {
+                    "inf".into()
+                } else {
+                    format!("{p:.2}")
+                })
+                .unwrap_or_else(|| "fail".into()),
                 if floor.is_infinite() {
                     "exact".into()
                 } else {
@@ -144,7 +143,10 @@ fn main() {
         }
     }
 
-    let passed = rows.iter().filter(|r| r["pass"].as_bool() == Some(true)).count();
+    let passed = rows
+        .iter()
+        .filter(|r| r["pass"].as_bool() == Some(true))
+        .count();
     let report = serde_json::json!({
         "protocol": "encode_from_rgba8 → decode_rgba8 round-trip PSNR on preserved channels",
         "notes": [

@@ -34,10 +34,10 @@ mod block_mode;
 mod cem;
 pub mod container;
 pub(crate) mod decode;
-mod fast;
 #[cfg(feature = "encode")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encode")))]
 pub mod encode;
+mod fast;
 mod footprint;
 mod infill;
 mod ise;
@@ -60,12 +60,12 @@ mod tests;
 
 pub use container::ktx::{self, Ktx2View, KtxView};
 pub use container::{AstcFile, AstcSurface};
-pub use footprint::{block_rows, payload_len, AstcFootprint};
 #[cfg(feature = "encode")]
 pub use encode::{
-    encode_block_rows_into, encode_rgba8, encode_rgba8_into, encode_rgba_f32, encode_volume_rgba8, AstcEncodeOptions,
-    AstcPreset,
+    encode_block_rows_into, encode_rgba8, encode_rgba8_into, encode_rgba_f32, encode_volume_rgba8,
+    AstcEncodeOptions, AstcPreset,
 };
+pub use footprint::{block_rows, payload_len, AstcFootprint};
 pub use parse::IllegalReason;
 pub use reference::{decode_block_f16, decode_block_rgba8, illegal_reason};
 
@@ -123,7 +123,9 @@ decode::surface_api!(decode::Fast);
 #[doc(hidden)]
 pub mod internals {
     pub use super::block_mode::{check, classify, GridIllegal, GridMode, ModeClass};
-    pub use super::cem::{decode as cem_decode, expand as cem_expand, value_count, Endpoints, RawEndpoints};
+    pub use super::cem::{
+        decode as cem_decode, expand as cem_expand, value_count, Endpoints, RawEndpoints,
+    };
     pub use super::infill::{infill, GRID_PAD};
     pub use super::ise::{decode as ise_decode, sequence_bits, LEVELS};
     pub use super::parse::{parse, BlockKind, SymbolicBlock};
@@ -183,10 +185,22 @@ pub fn inspect_block(block: &[u8; 16], fp: AstcFootprint) -> AstcBlockInfo {
         },
         block_mode: s.mode,
         weight_grid: s.grid,
-        weight_levels: if normal { ise::LEVELS[s.weight_range as usize] } else { 0 },
-        color_levels: if normal { ise::LEVELS[s.color_range as usize] } else { 0 },
+        weight_levels: if normal {
+            ise::LEVELS[s.weight_range as usize]
+        } else {
+            0
+        },
+        color_levels: if normal {
+            ise::LEVELS[s.color_range as usize]
+        } else {
+            0
+        },
         partitions: s.partitions,
-        partition_seed: if s.partitions > 1 { s.partition_seed } else { 0 },
+        partition_seed: if s.partitions > 1 {
+            s.partition_seed
+        } else {
+            0
+        },
         endpoint_modes: s.cem,
         dual_plane: s.dual_plane,
         dual_plane_channel: s.plane2_component,

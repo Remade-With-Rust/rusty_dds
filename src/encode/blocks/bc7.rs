@@ -309,31 +309,33 @@ pub(super) fn try_bc7_mode4(
         let vectorised = false;
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         if vectorised {
-            let (q0, q1, e) =
-                simd::alpha_nbhd_avx2::<8>(&alpha, hi >> 2, lo >> 2, 63, a_err);
+            let (q0, q1, e) = simd::alpha_nbhd_avx2::<8>(&alpha, hi >> 2, lo >> 2, 63, a_err);
             if e < a_err {
                 (a_ep0, a_ep1, a_idx, a_err) = score_alpha_mode4(&alpha, q0, q1);
             }
         }
         if !vectorised {
-        for d0 in -2i32..=2 {
-            for d1 in -2i32..=2 {
-                if d0 == 0 && d1 == 0 {
-                    continue;
-                }
-                let q0 = ((hi >> 2) as i32 + d0).clamp(0, 63) as u8;
-                let q1 = ((lo >> 2) as i32 + d1).clamp(0, 63) as u8;
-                let cand = score_alpha_mode4(&alpha, q0, q1);
-                if cand.3 < a_err {
-                    (a_ep0, a_ep1, a_idx, a_err) = cand;
+            for d0 in -2i32..=2 {
+                for d1 in -2i32..=2 {
+                    if d0 == 0 && d1 == 0 {
+                        continue;
+                    }
+                    let q0 = ((hi >> 2) as i32 + d0).clamp(0, 63) as u8;
+                    let q1 = ((lo >> 2) as i32 + d1).clamp(0, 63) as u8;
+                    let cand = score_alpha_mode4(&alpha, q0, q1);
+                    if cand.3 < a_err {
+                        (a_ep0, a_ep1, a_idx, a_err) = cand;
+                    }
                 }
             }
-        }
         }
     }
 
     let err = c_err as i64 + a_err as i64;
-    Some((pack_bc7_mode4(c_ep0, c_ep1, a_ep0, a_ep1, &c_idx, &a_idx), err))
+    Some((
+        pack_bc7_mode4(c_ep0, c_ep1, a_ep0, a_ep1, &c_idx, &a_idx),
+        err,
+    ))
 }
 
 #[inline]
@@ -447,7 +449,9 @@ fn fit_indices_alpha8_scalar(alpha: &[u8; 16], pal: &[u8; 8]) -> ([u8; 16], i32)
 /// buys mode 5's alpha the same vector kernel without a second one.
 #[inline]
 fn fit_indices_alpha4(alpha: &[u8; 16], pal: &[u8; 4]) -> ([u8; 16], i32) {
-    let pal8 = [pal[0], pal[1], pal[2], pal[3], pal[0], pal[0], pal[0], pal[0]];
+    let pal8 = [
+        pal[0], pal[1], pal[2], pal[3], pal[0], pal[0], pal[0], pal[0],
+    ];
     fit_indices_alpha8(alpha, &pal8)
 }
 
@@ -573,7 +577,10 @@ pub(super) fn palette_mode5_color(q0: [u8; 3], q1: [u8; 3]) -> [[u8; 3]; 4] {
 
 /// LS endpoints for the 2-bit color indices (same normal equations as the
 /// mode-6 refine, W2 weights, RGB only).
-pub(super) fn ls_endpoints_mode5(pixels: &[[u8; 4]; 16], indices: &[u8; 16]) -> Option<([u8; 3], [u8; 3])> {
+pub(super) fn ls_endpoints_mode5(
+    pixels: &[[u8; 4]; 16],
+    indices: &[u8; 16],
+) -> Option<([u8; 3], [u8; 3])> {
     #[cfg(test)]
     probe_counters::LS_MODE5.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     const WF: [f32; 4] = [0.0, 21.0 / 64.0, 43.0 / 64.0, 1.0];
@@ -786,8 +793,7 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, 
     if do_ls {
         if let Some(base) = best_fit {
             let (bits, err) = mode6_refine(pixels, base).pack();
-            if err < best_err {
-            }
+            if err < best_err {}
             if err <= best_err {
                 best_bits = bits;
                 best_err = err;
@@ -803,7 +809,6 @@ pub(super) fn encode_bc7_mode6_inner(pixels: &[[u8; 4]; 16]) -> ([u8; 16], i64, 
     }
     (best_bits, best_err, cm.1[3], cm.0[3])
 }
-
 
 pub(super) type Seed = ([u8; 4], [u8; 4]);
 
@@ -1077,7 +1082,10 @@ pub(super) fn fit_indices_mode6(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> 
 
 /// Exhaustive twin (oracle + fallback for near-degenerate palettes).
 #[inline]
-pub(super) fn fit_indices_mode6_exhaustive(pixels: &[[u8; 4]; 16], pal: &[[u8; 4]; 16]) -> ([u8; 16], i64) {
+pub(super) fn fit_indices_mode6_exhaustive(
+    pixels: &[[u8; 4]; 16],
+    pal: &[[u8; 4]; 16],
+) -> ([u8; 16], i64) {
     let mut indices = [0u8; 16];
     let mut err = 0i64;
     for (i, px) in pixels.iter().enumerate() {
@@ -1265,9 +1273,22 @@ pub(super) fn ls_endpoints_mode6_scalar(
     indices: &[u8; 16],
 ) -> Option<([u8; 4], [u8; 4])> {
     const W: [f32; 16] = [
-        0.0, 4.0 / 64.0, 9.0 / 64.0, 13.0 / 64.0, 17.0 / 64.0, 21.0 / 64.0, 26.0 / 64.0,
-        30.0 / 64.0, 34.0 / 64.0, 38.0 / 64.0, 43.0 / 64.0, 47.0 / 64.0, 51.0 / 64.0, 55.0 / 64.0,
-        60.0 / 64.0, 1.0,
+        0.0,
+        4.0 / 64.0,
+        9.0 / 64.0,
+        13.0 / 64.0,
+        17.0 / 64.0,
+        21.0 / 64.0,
+        26.0 / 64.0,
+        30.0 / 64.0,
+        34.0 / 64.0,
+        38.0 / 64.0,
+        43.0 / 64.0,
+        47.0 / 64.0,
+        51.0 / 64.0,
+        55.0 / 64.0,
+        60.0 / 64.0,
+        1.0,
     ];
     // pixel ~= (1-w)*e0 + w*e1
     let mut a00 = 0.0f32;
@@ -1305,7 +1326,13 @@ pub(super) fn ls_endpoints_mode6_scalar(
     Some((e0, e1))
 }
 
-pub(super) fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: [u8; 16]) -> [u8; 16] {
+pub(super) fn pack_bc7_mode6(
+    q0: [u8; 4],
+    p0: u8,
+    q1: [u8; 4],
+    p1: u8,
+    indices: [u8; 16],
+) -> [u8; 16] {
     // `BitWriter` is a little-endian 128-bit accumulator — `low |= v << pos`,
     // `high` above 64, and `into_array` emits low then high as LE bytes. That is
     // exactly `u128::to_le_bytes`, and mode 6's layout is FIXED, so every shift
@@ -1339,12 +1366,18 @@ pub(super) fn pack_bc7_mode6(q0: [u8; 4], p0: u8, q1: [u8; 4], p1: u8, indices: 
         (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF
     }
     let lo = u64::from_le_bytes([
-        indices[0], indices[1], indices[2], indices[3],
-        indices[4], indices[5], indices[6], indices[7],
+        indices[0], indices[1], indices[2], indices[3], indices[4], indices[5], indices[6],
+        indices[7],
     ]);
     let hi = u64::from_le_bytes([
-        indices[8], indices[9], indices[10], indices[11],
-        indices[12], indices[13], indices[14], indices[15],
+        indices[8],
+        indices[9],
+        indices[10],
+        indices[11],
+        indices[12],
+        indices[13],
+        indices[14],
+        indices[15],
     ]);
     let packed = nib8(lo) | (nib8(hi) << 32);
     let _ = pos;
@@ -1482,7 +1515,6 @@ mod qtab_tests {
         }
     }
 
-
     /// The vectorised mode-6 least-squares must reproduce the scalar loop
     /// **bitwise**, including the table-driven normal-equation terms.
     ///
@@ -1583,8 +1615,10 @@ mod qtab_tests {
         for p in 0..2u8 {
             for c in 0..=255u8 {
                 let want = direct_chan(c, p);
-                let got = (super::QTAB.0[p as usize][c as usize],
-                           super::QTAB.1[p as usize][c as usize] as i32);
+                let got = (
+                    super::QTAB.0[p as usize][c as usize],
+                    super::QTAB.1[p as usize][c as usize] as i32,
+                );
                 assert_eq!(got, want, "channel c={c} p={p}");
             }
         }
@@ -1730,7 +1764,7 @@ mod reach {
     #[test]
     #[ignore]
     fn bc7_seed_reach() {
-        use crate::{DecodeContent, Dds, EncodeLayout};
+        use crate::{Dds, DecodeContent, EncodeLayout};
         const W: u32 = 512;
         const H: u32 = 512;
         let mut state = 0x51ee_d105_c0de_1234u64;

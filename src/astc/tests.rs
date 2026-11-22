@@ -17,7 +17,10 @@ const CELLS: [(AstcProfile, Out); 6] = [
 ];
 
 fn all_fps() -> impl Iterator<Item = AstcFootprint> {
-    AstcFootprint::ALL_2D.iter().chain(AstcFootprint::ALL_3D.iter()).copied()
+    AstcFootprint::ALL_2D
+        .iter()
+        .chain(AstcFootprint::ALL_3D.iter())
+        .copied()
 }
 
 /// Output bytes of one block in the oracle's layout: u8 = 4 bytes per texel,
@@ -51,7 +54,11 @@ fn golden_vectors_match_astcenc() {
     let mut checked = 0usize;
     for fp in all_fps() {
         let dims = rd32(&mut pos);
-        assert_eq!(dims, fp.width() << 16 | fp.height() << 8 | fp.depth(), "golden order");
+        assert_eq!(
+            dims,
+            fp.width() << 16 | fp.height() << 8 | fp.depth(),
+            "golden order"
+        );
         let chunks = rd32(&mut pos) as usize;
         let blocks = testgen::golden_blocks(fp);
         assert_eq!(chunks * GOLDEN_CHUNK, blocks.len());
@@ -65,13 +72,19 @@ fn golden_vectors_match_astcenc() {
                 let want = u64::from_le_bytes(g[pos..pos + 8].try_into().unwrap());
                 pos += 8;
                 let got = testgen::fnv1a(FNV_OFFSET, &buf);
-                assert_eq!(got, want, "{fp} chunk {ci} cell {cell}: differs from astcenc");
+                assert_eq!(
+                    got, want,
+                    "{fp} chunk {ci} cell {cell}: differs from astcenc"
+                );
                 checked += ch.len();
             }
         }
     }
     assert_eq!(pos, g.len());
-    assert_eq!(checked, 24 * 6 * (testgen::GOLDEN_MIXED + testgen::GOLDEN_RANDOM));
+    assert_eq!(
+        checked,
+        24 * 6 * (testgen::GOLDEN_MIXED + testgen::GOLDEN_RANDOM)
+    );
 }
 
 /// Robustness (plan D10/DC6): arbitrary blocks never panic and always write
@@ -80,7 +93,11 @@ fn golden_vectors_match_astcenc() {
 /// `cargo test --release` for the full 10^6 blocks per footprint.
 #[test]
 fn arbitrary_blocks_never_panic() {
-    let per_fp: usize = if cfg!(debug_assertions) { 4_000 } else { 1_000_000 };
+    let per_fp: usize = if cfg!(debug_assertions) {
+        4_000
+    } else {
+        1_000_000
+    };
     let per_mode: usize = if cfg!(debug_assertions) { 1 } else { 16 };
     for fp in all_fps() {
         let mut rng = Rng::new(0xD10 ^ fp.texels() as u64);
@@ -115,7 +132,9 @@ fn sample_surface(fp: AstcFootprint, w: u32, h: u32, d: u32, seed: u64) -> Vec<u
     let mut rng = Rng::new(seed);
     let legal = testgen::legal_modes(fp);
     let n = payload_len(w, h, d, fp).unwrap() / 16;
-    (0..n).flat_map(|_| testgen::mixed(&mut rng, fp, &legal)).collect()
+    (0..n)
+        .flat_map(|_| testgen::mixed(&mut rng, fp, &legal))
+        .collect()
 }
 
 #[test]
@@ -140,7 +159,8 @@ fn surface_crops_edges_and_matches_block_decode() {
                     let bi = ((bz * nby + by) * nbx + bx) as usize * 16;
                     let blk: [u8; 16] = data[bi..bi + 16].try_into().unwrap();
                     decode_block_rgba8(&blk, fp, AstcProfile::Ldr, &mut t);
-                    let ti = ((z % fp.depth()) * fp.height() + y % fp.height()) * fp.width() + x % fp.width();
+                    let ti = ((z % fp.depth()) * fp.height() + y % fp.height()) * fp.width()
+                        + x % fp.width();
                     let o = (((z * h + y) * w + x) * 4) as usize;
                     assert_eq!(&out[o..o + 4], &t[ti as usize][..]);
                 }
@@ -186,7 +206,15 @@ fn surface_errors_not_panics() {
     let data = sample_surface(fp, 16, 16, 1, 3);
     let mut out = vec![0u8; 16 * 16 * 4];
     assert!(matches!(
-        decode_rgba8_into(&data[..data.len() - 1], 16, 16, 1, fp, AstcProfile::Ldr, &mut out),
+        decode_rgba8_into(
+            &data[..data.len() - 1],
+            16,
+            16,
+            1,
+            fp,
+            AstcProfile::Ldr,
+            &mut out
+        ),
         Err(Error::TruncatedData)
     ));
     assert!(matches!(
@@ -207,7 +235,9 @@ fn surface_errors_not_panics() {
         Err(Error::OutOfBounds)
     ));
     // Huge dimensions with a tiny payload: an error, never an allocation.
-    assert!(decode_rgba8_into(&data, u32::MAX, u32::MAX, 1, fp, AstcProfile::Ldr, &mut out).is_err());
+    assert!(
+        decode_rgba8_into(&data, u32::MAX, u32::MAX, 1, fp, AstcProfile::Ldr, &mut out).is_err()
+    );
 }
 
 #[test]
@@ -231,13 +261,21 @@ fn error_colours_follow_the_cell() {
 /// uniform blocks, in all six cells, block by block and through surfaces.
 #[test]
 fn fast_kernel_equals_reference() {
-    let extra = if cfg!(debug_assertions) { 2_000 } else { 50_000 };
+    let extra = if cfg!(debug_assertions) {
+        2_000
+    } else {
+        50_000
+    };
     for fp in all_fps() {
         let mut blocks = testgen::golden_blocks(fp);
         let mut rng = Rng::new(0xFA57 ^ fp.texels() as u64);
         let legal = testgen::legal_modes(fp);
         for i in 0..extra {
-            blocks.push(if i % 2 == 0 { testgen::mixed(&mut rng, fp, &legal) } else { rng.block() });
+            blocks.push(if i % 2 == 0 {
+                testgen::mixed(&mut rng, fp, &legal)
+            } else {
+                rng.block()
+            });
         }
         let n = fp.texels() as usize;
         for &(prof, out) in CELLS.iter() {
@@ -278,7 +316,10 @@ fn inspect_block_reports_fields() {
     assert_eq!(i.kind, AstcBlockKind::VoidExtentLdr);
     assert_eq!(i.void_color[0], 0x1234);
     let i = inspect_block(&[0u8; 16], AstcFootprint::B4X4);
-    assert_eq!(i.kind, AstcBlockKind::Illegal(IllegalReason::ReservedBlockMode));
+    assert_eq!(
+        i.kind,
+        AstcBlockKind::Illegal(IllegalReason::ReservedBlockMode)
+    );
     // A legal block from the generator: fields agree with the parser.
     let fp = AstcFootprint::B8X5;
     let legal = testgen::legal_modes(fp);

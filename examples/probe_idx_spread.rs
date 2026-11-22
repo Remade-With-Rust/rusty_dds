@@ -37,7 +37,10 @@ use std::time::Instant;
 #[target_feature(enable = "bmi2,sse2")]
 unsafe fn spread_pdep(w: u64) -> __m128i {
     const SPREAD: u64 = 0x0707_0707_0707_0707;
-    _mm_set_epi64x(_pdep_u64(w >> 24, SPREAD) as i64, _pdep_u64(w, SPREAD) as i64)
+    _mm_set_epi64x(
+        _pdep_u64(w >> 24, SPREAD) as i64,
+        _pdep_u64(w, SPREAD) as i64,
+    )
 }
 
 /// The shipping form: `pshufb` window gather + multiply-shift extract.

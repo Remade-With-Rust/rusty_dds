@@ -15,7 +15,12 @@ fn image(w: u32, h: u32, kind: u32, seed: u64) -> Vec<u8> {
     for y in 0..h {
         for x in 0..w {
             let px: [u8; 4] = match kind {
-                0 => [(x * 255 / w.max(1)) as u8, (y * 255 / h.max(1)) as u8, ((x + y) * 3) as u8, 255],
+                0 => [
+                    (x * 255 / w.max(1)) as u8,
+                    (y * 255 / h.max(1)) as u8,
+                    ((x + y) * 3) as u8,
+                    255,
+                ],
                 1 => {
                     if (x / 3 + y / 5) % 2 == 0 {
                         [200, 30, 40, 255]
@@ -23,7 +28,12 @@ fn image(w: u32, h: u32, kind: u32, seed: u64) -> Vec<u8> {
                         [20, 180, 220, 255]
                     }
                 }
-                2 => [rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8, rng.below(256) as u8],
+                2 => [
+                    rng.below(256) as u8,
+                    rng.below(256) as u8,
+                    rng.below(256) as u8,
+                    rng.below(256) as u8,
+                ],
                 3 => {
                     let a = if (x * x + y * y) % 37 < 18 { 0 } else { 255 };
                     [(x * 9) as u8, 128, (y * 7) as u8, a]
@@ -41,7 +51,11 @@ fn image(w: u32, h: u32, kind: u32, seed: u64) -> Vec<u8> {
 }
 
 fn psnr(a: &[u8], b: &[u8]) -> f64 {
-    let se: f64 = a.iter().zip(b).map(|(x, y)| ((*x as f64) - (*y as f64)).powi(2)).sum();
+    let se: f64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| ((*x as f64) - (*y as f64)).powi(2))
+        .sum();
     if se == 0.0 {
         return 99.0;
     }
@@ -50,7 +64,12 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn every_block_legal_and_decodes_close() {
-    let fps = [AstcFootprint::B4X4, AstcFootprint::B6X5, AstcFootprint::B8X8, AstcFootprint::B12X10];
+    let fps = [
+        AstcFootprint::B4X4,
+        AstcFootprint::B6X5,
+        AstcFootprint::B8X8,
+        AstcFootprint::B12X10,
+    ];
     for &fp in &fps {
         for kind in 0..6 {
             let (w, h) = (23, 17);
@@ -135,7 +154,11 @@ fn encoder_reconstruction_is_the_decode() {
             let best = block::encode_block(&ctx, &prm, tgt, &px[..48]);
             let blk = crate::astc::pack::pack(&best.sym, fp);
             let mut dec = [[0u16; 4]; 216];
-            let out = if unorm8 { crate::astc::reference::Out::U8 } else { crate::astc::reference::Out::U8 };
+            let out = if unorm8 {
+                crate::astc::reference::Out::U8
+            } else {
+                crate::astc::reference::Out::U8
+            };
             // Compare in the 16-bit domain when unorm8 is off: decode the
             // interpolated values through the F16-free path by re-deriving
             // them is not public; the 8-bit check below covers both targets'
@@ -143,7 +166,11 @@ fn encoder_reconstruction_is_the_decode() {
             crate::astc::reference::decode_block(&blk, fp, AstcProfile::Ldr, out, &mut dec);
             if unorm8 {
                 let se: f64 = (0..48)
-                    .map(|i| (0..4).map(|c| ((dec[i][c] as f64) - (px[i][c] as f64)).powi(2)).sum::<f64>())
+                    .map(|i| {
+                        (0..4)
+                            .map(|c| ((dec[i][c] as f64) - (px[i][c] as f64)).powi(2))
+                            .sum::<f64>()
+                    })
                     .sum();
                 assert_eq!(se, best.err, "kind {kind}");
             }
@@ -156,16 +183,26 @@ fn encoder_reconstruction_is_the_decode() {
 fn rejects_unsupported() {
     let img = image(4, 4, 0, 0);
     let o = AstcEncodeOptions::new(AstcFootprint::B4X4, AstcProfile::Hdr);
-    assert!(matches!(encode_rgba8(&img, 4, 4, &o), Err(Error::UnsupportedFormat)));
+    assert!(matches!(
+        encode_rgba8(&img, 4, 4, &o),
+        Err(Error::UnsupportedFormat)
+    ));
     let o = AstcEncodeOptions::new(AstcFootprint::B4X4X4, AstcProfile::Ldr);
-    assert!(matches!(encode_rgba8(&img, 4, 4, &o), Err(Error::UnsupportedFormat)));
+    assert!(matches!(
+        encode_rgba8(&img, 4, 4, &o),
+        Err(Error::UnsupportedFormat)
+    ));
     let o = AstcEncodeOptions::new(AstcFootprint::B4X4, AstcProfile::Ldr);
     assert!(encode_rgba8(&img[..10], 4, 4, &o).is_err());
 }
 
 #[test]
 fn volume_encode_is_legal_and_close() {
-    for &fp in &[AstcFootprint::B3X3X3, AstcFootprint::B4X4X4, AstcFootprint::B6X5X5] {
+    for &fp in &[
+        AstcFootprint::B3X3X3,
+        AstcFootprint::B4X4X4,
+        AstcFootprint::B6X5X5,
+    ] {
         let (w, h, d) = (13u32, 9u32, 7u32);
         let mut px = Vec::new();
         for z in 0..d {
@@ -178,7 +215,10 @@ fn volume_encode_is_legal_and_close() {
         let opts = AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(AstcPreset::Fast);
         let data = encode_volume_rgba8(&px, w, h, d, &opts).unwrap();
         for b in data.chunks_exact(16) {
-            assert!(!matches!(parse(b.try_into().unwrap(), fp).kind, BlockKind::Illegal(_)));
+            assert!(!matches!(
+                parse(b.try_into().unwrap(), fp).kind,
+                BlockKind::Illegal(_)
+            ));
         }
         let mut dec = vec![0u8; px.len()];
         decode_rgba8_into(&data, w, h, d, fp, AstcProfile::Ldr, &mut dec).unwrap();
@@ -196,15 +236,27 @@ fn hdr_encode_is_legal_and_close() {
     for y in 0..h {
         for x in 0..w {
             let v = 0.01 * (1.3f32).powf((x + y) as f32 * 0.4);
-            px.extend_from_slice(&[v, v * 0.7, v * 1.4, if (x / 4) % 2 == 0 { 1.0 } else { 0.5 }]);
+            px.extend_from_slice(&[
+                v,
+                v * 0.7,
+                v * 1.4,
+                if (x / 4) % 2 == 0 { 1.0 } else { 0.5 },
+            ]);
         }
     }
     for &prof in &[AstcProfile::Hdr, AstcProfile::HdrRgbLdrA] {
-        for &fp in &[AstcFootprint::B4X4, AstcFootprint::B6X6, AstcFootprint::B8X8] {
+        for &fp in &[
+            AstcFootprint::B4X4,
+            AstcFootprint::B6X6,
+            AstcFootprint::B8X8,
+        ] {
             let opts = AstcEncodeOptions::new(fp, prof).with_preset(AstcPreset::Fast);
             let data = encode_rgba_f32(&px, w, h, &opts).unwrap();
             for b in data.chunks_exact(16) {
-                assert!(!matches!(parse(b.try_into().unwrap(), fp).kind, BlockKind::Illegal(_)), "{fp} {prof:?}");
+                assert!(
+                    !matches!(parse(b.try_into().unwrap(), fp).kind, BlockKind::Illegal(_)),
+                    "{fp} {prof:?}"
+                );
             }
             let mut dec = vec![0f32; px.len()];
             crate::astc::decode_rgba_f32_into(&data, w, h, 1, fp, prof, &mut dec).unwrap();
