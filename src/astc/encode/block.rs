@@ -375,7 +375,11 @@ pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters:
         let cs = g.feed_cs[j];
         out[j] = if cs > 0.0 { 64.0 * s / cs } else { 32.0 };
     }
-    // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2.
+    // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2. The ranking
+    // call asks for none: return before zero-filling the residual buffer.
+    if iters == 0 {
+        return;
+    }
     let mut resid = [0f32; MAX_TEXELS];
     for _ in 0..iters {
         for (t, (ti, tc)) in g.tap_i.iter().zip(&g.tap_c).enumerate() {
