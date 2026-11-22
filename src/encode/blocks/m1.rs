@@ -373,6 +373,9 @@ fn unquant6p(q: [u8; 3], p: u8) -> [u8; 3] {
     ]
 }
 
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 fn pack(
     part: u8,
     q: &[[[u8; 3]; 2]; 2],

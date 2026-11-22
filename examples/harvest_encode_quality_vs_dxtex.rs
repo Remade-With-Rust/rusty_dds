@@ -495,9 +495,9 @@ fn fill_rgba(content: DecodeContent, w: u32, h: u32, d: u32) -> Vec<u8> {
 fn snorm_bits_rgba_to_unorm(px: &[u8]) -> Vec<u8> {
     let mut out = px.to_vec();
     for p in out.chunks_exact_mut(4) {
-        for c in 0..3 {
-            let s = (p[c] as i8 as i32).clamp(-127, 127);
-            p[c] = ((((s + 127) * 255) + 127) / 254) as u8;
+        for v in &mut p[..3] {
+            let s = (*v as i8 as i32).clamp(-127, 127);
+            *v = ((((s + 127) * 255) + 127) / 254) as u8;
         }
     }
     out

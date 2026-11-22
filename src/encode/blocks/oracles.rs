@@ -92,7 +92,9 @@ mod ceiling_probe {
     #[ignore]
     fn signed_sweep_harvest() {
         let root = env!("CARGO_MANIFEST_DIR");
-        let mut sources: Vec<(String, Vec<(usize, usize, Vec<u8>)>)> = Vec::new();
+        // (width, height, plane) per channel of one source.
+        type Planes = Vec<(usize, usize, Vec<u8>)>;
+        let mut sources: Vec<(String, Planes)> = Vec::new();
         // Normals (R+G channels -> bc5s) and roughness masks (R -> bc4s).
         for asset in ["Bricks097", "Metal063", "Rock064", "Wood095"] {
             let p = format!("{root}/corpus/raw/{asset}/{asset}_1K-PNG_NormalGL.png");
@@ -170,7 +172,7 @@ mod ceiling_probe {
         let nthreads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let rows_per = (bh + nthreads - 1) / nthreads;
+        let rows_per = bh.div_ceil(nthreads);
         let results: Vec<(i64, i64)> = std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for t in 0..nthreads {
@@ -545,7 +547,7 @@ mod alpha_select_oracle {
             f32::MIN_POSITIVE,
             -f32::MIN_POSITIVE,
         ];
-        let mut state = 0xce11_a51d_2026_08_26u64;
+        let mut state = 0xce11_a51d_2026_0826_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

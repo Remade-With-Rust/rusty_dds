@@ -81,7 +81,7 @@ pub enum EncodeQuality {
 }
 
 thread_local! {
-    static QUALITY: Cell<EncodeQuality> = Cell::new(EncodeQuality::Quality);
+    static QUALITY: Cell<EncodeQuality> = const { Cell::new(EncodeQuality::Quality) };
 }
 
 pub(crate) fn with_quality<R>(q: EncodeQuality, f: impl FnOnce() -> R) -> R {
@@ -109,8 +109,8 @@ pub fn encode_image(
     encode_block: impl Fn([[u8; 4]; 16], &mut [u8]) + Sync,
     out: &mut [u8],
 ) -> Result<(), Error> {
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(block_bytes))
@@ -152,6 +152,9 @@ pub fn encode_image(
     Ok(())
 }
 
+// Internal driver: the arguments are the image geometry plus the per-block
+// kernel; bundling them in a struct buys nothing.
+#[allow(clippy::too_many_arguments)]
 fn encode_image_serial(
     rgba: &[u8],
     w: usize,
@@ -181,6 +184,9 @@ fn encode_image_serial(
     }
 }
 
+// Internal driver: the arguments are the image geometry plus the per-block
+// kernel; bundling them in a struct buys nothing.
+#[allow(clippy::too_many_arguments)]
 fn encode_image_parallel(
     rgba: &[u8],
     w: usize,

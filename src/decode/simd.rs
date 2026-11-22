@@ -746,6 +746,9 @@ pub(super) fn bc6h_interp_avx2(
 }
 
 #[target_feature(enable = "avx2")]
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 unsafe fn bc6h_interp_avx2_impl(
     base: &[i32; 3],
     delta: &[i32; 3],
@@ -1174,6 +1177,8 @@ mod tests {
     /// Opaque-alpha packing must produce exactly 255 for every weight, since
     /// alpha in those modes does not interpolate at all.
     #[test]
+    // `0 + 32` keeps the three channels in the same `v * 64 + 32` shape.
+    #[allow(clippy::identity_op)]
     fn opaque_alpha_is_constant_across_weights() {
         let base = pack3_opaque_base([100 * 64 + 32, 0 + 32, 255 * 64 + 32]);
         let delta = pack3_opaque_delta([50, -50, 0]);
@@ -1367,7 +1372,7 @@ mod tests {
         if !has_ssse3() {
             return;
         }
-        let mut state = 0x45_45_c0ffee_1234u64;
+        let mut state = 0x0045_45c0_ffee_1234_u64;
         let mut next = move || {
             state ^= state << 13;
             state ^= state >> 7;

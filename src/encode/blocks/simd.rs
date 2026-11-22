@@ -932,21 +932,21 @@ unsafe fn alpha_nbhd_avx2_impl<const N: usize>(
     best
 }
 
-/// SSE of a BC1 block against source pixels, with the index table FIXED.
-///
-/// The RDO path scores candidate blocks against the source constantly — 17.7
-/// calls per block across `bc1_block_sse` and its limited twin, measured at
-/// **~22% of BC1 RDO encode**. The scalar form walks sixteen pixels, indexing a
-/// four-entry palette per pixel and summing three channels.
-///
-/// A BC1 palette is four RGBA entries, so the decoder's `pshufb` selector table
-/// expands four pixels of it per shuffle — the same trick, reused here to
-/// materialise the reconstructed block in registers and difference it against
-/// the source four pixels at a time.
-///
-/// Alpha is masked on both sides: BC1 SSE is RGB-only, and the palette's alpha
-/// byte is whatever the caller packed.
-#[cfg(target_arch = "x86_64")]
+// SSE of a BC1 block against source pixels, with the index table FIXED. (Design note
+// for `bc1_fixed_sse_565_avx2` below.)
+//
+// The RDO path scores candidate blocks against the source constantly — 17.7
+// calls per block across `bc1_block_sse` and its limited twin, measured at
+// **~22% of BC1 RDO encode**. The scalar form walks sixteen pixels, indexing a
+// four-entry palette per pixel and summing three channels.
+//
+// A BC1 palette is four RGBA entries, so the decoder's `pshufb` selector table
+// expands four pixels of it per shuffle — the same trick, reused here to
+// materialise the reconstructed block in registers and difference it against
+// the source four pixels at a time.
+//
+// Alpha is masked on both sides: BC1 SSE is RGB-only, and the palette's alpha
+// byte is whatever the caller packed.
 
 /// Build a BC1 palette from the two packed 565 words, entirely in registers.
 ///
@@ -1492,6 +1492,10 @@ static UW6: [[f32; 2]; 16] = [
 /// table is therefore bit-identical to recomputing `u*u` from `1.0 - w` each
 /// time, not merely close.
 #[cfg(target_arch = "x86_64")]
+// The literals are the exact dyadic values (multiples of 1/4096), written in
+// full on purpose; clippy's shorter forms round-trip to the same f32 bits but
+// hide that exactness.
+#[allow(clippy::excessive_precision)]
 static AW6: [[f32; 4]; 16] = [
     [1.0, 0.0, 0.0, 0.0],
     [0.87890625, 0.05859375, 0.00390625, 0.0],
@@ -1543,6 +1547,9 @@ pub(super) fn ls_accum_mode6(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+// Hot kernel: the indexed loop is the instruction-count-tuned form; not
+// restructured for a style lint.
+#[allow(clippy::needless_range_loop)]
 unsafe fn ls_accum_mode6_impl(
     pxv: &[[f32; 8]; 16],
     indices: &[u8; 16],
@@ -2677,6 +2684,8 @@ mod oracle {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn alpha_fixed_sse_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2865,6 +2874,8 @@ mod oracle {
     /// `None`), single-channel ramps, and full noise.
     #[cfg(target_arch = "x86_64")]
     #[test]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn pca_extremes_matches_scalar() {
         use super::*;
         if !has_avx2() {
@@ -2936,6 +2947,8 @@ mod oracle {
     #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore]
+    // `c`/`i` is also a shift amount here; the index reads clearer.
+    #[allow(clippy::needless_range_loop)]
     fn probe_pca_ab() {
         use super::*;
         assert!(has_avx2());

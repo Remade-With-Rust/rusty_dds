@@ -28,7 +28,7 @@ fn main() {
     )
     .unwrap();
 
-    let bw = (w as usize + 3) / 4;
+    let bw = (w as usize).div_ceil(4);
     let mut diff = 0;
     let mut shown = 0;
     for bi in 0..base.data.len() / 16 {

@@ -312,8 +312,8 @@ fn validate(data: &[u8], width: u32, height: u32) -> Result<(usize, usize, usize
     if width == 0 || height == 0 {
         return Err(Error::InvalidField("zero image dimension".into()));
     }
-    let blocks_x = (width as usize + 3) / 4;
-    let blocks_y = (height as usize + 3) / 4;
+    let blocks_x = (width as usize).div_ceil(4);
+    let blocks_y = (height as usize).div_ceil(4);
     let expected = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(16))

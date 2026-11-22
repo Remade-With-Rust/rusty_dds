@@ -195,8 +195,8 @@ pub(crate) fn slice_payload_bytes(
     }
     match kind.block_bytes() {
         Some(block_bytes) => {
-            let bx = (width as usize + 3) / 4;
-            let by = (height as usize + 3) / 4;
+            let bx = (width as usize).div_ceil(4);
+            let by = (height as usize).div_ceil(4);
             bx.checked_mul(by)
                 .and_then(|n| n.checked_mul(block_bytes))
                 .ok_or(Error::OutOfBounds)

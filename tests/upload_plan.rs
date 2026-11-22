@@ -24,8 +24,8 @@ fn make_bc1(width: u32, height: u32, mips: Option<u32>) -> Dds {
     })
     .unwrap();
     let block = solid_bc1();
-    let bx = (width + 3) / 4;
-    let by = (height + 3) / 4;
+    let bx = width.div_ceil(4);
+    let by = height.div_ceil(4);
     for i in 0..(bx * by) as usize {
         let o = i * 8;
         if o + 8 <= dds.data.len() {

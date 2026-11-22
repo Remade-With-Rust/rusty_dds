@@ -264,7 +264,7 @@ impl DemoApp {
 impl eframe::App for DemoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drag-drop
-        ctx.input(|i| {
+        let dropped = ctx.input(|i| {
             for f in &i.raw.dropped_files {
                 if let Some(path) = &f.path {
                     let ext = path
@@ -278,8 +278,10 @@ impl eframe::App for DemoApp {
                 }
             }
             None
-        })
-        .map(|p| self.load_tiff(&p));
+        });
+        if let Some(p) = dropped {
+            self.load_tiff(&p);
+        }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {

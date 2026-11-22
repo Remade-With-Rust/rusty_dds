@@ -103,8 +103,8 @@ pub(crate) fn encode_image_bc1_rdo(
     if rgba.len() < w * h * 4 {
         return Err(Error::TruncatedData);
     }
-    let blocks_x = (w + 3) / 4;
-    let blocks_y = (h + 3) / 4;
+    let blocks_x = w.div_ceil(4);
+    let blocks_y = h.div_ceil(4);
     let need = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(8))
@@ -1031,8 +1031,8 @@ pub(crate) fn encode_image_bc7_rdo(
     if rgba.len() < w * h * 4 {
         return Err(Error::TruncatedData);
     }
-    let blocks_x = (w + 3) / 4;
-    let blocks_y = (h + 3) / 4;
+    let blocks_x = w.div_ceil(4);
+    let blocks_y = h.div_ceil(4);
     let need = blocks_x
         .checked_mul(blocks_y)
         .and_then(|n| n.checked_mul(16))
@@ -1552,8 +1552,11 @@ fn quantize_7p_fixed(c: [u8; 4], p: u8) -> ([u8; 4], u8) {
     )
 }
 
+/// Mode-6 block fields: (q0, p0, q1, p1, indices).
+type Mode6Fields = ([u8; 4], u8, [u8; 4], u8, [u8; 16]);
+
 /// Parse a mode-6 block back to (q0, p0, q1, p1, indices).
-fn parse_mode6(block: &[u8; 16]) -> Option<([u8; 4], u8, [u8; 4], u8, [u8; 16])> {
+fn parse_mode6(block: &[u8; 16]) -> Option<Mode6Fields> {
     if block[0] & 0x7F != 0x40 {
         return None;
     }
@@ -1723,7 +1726,7 @@ fn polish_mode6_endpoints(
                 for d in [-1i32, 1] {
                     let cur = if which == 0 { (*q0)[c] } else { (*q1)[c] };
                     let nv = cur as i32 + d;
-                    if nv < 0 || nv > 127 {
+                    if !(0..=127).contains(&nv) {
                         continue;
                     }
                     let cand = match (d, if d < 0 { cand_lo } else { cand_hi }) {

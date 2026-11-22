@@ -106,9 +106,9 @@ fn flat_block_reconstructs_near_exact() {
         let px: Vec<f32> = (0..16).flat_map(|_| [v, v, v, 1.0]).collect();
         let out = roundtrip(&px, 4, 4);
         for c in out.chunks(4) {
-            for ch in 0..3 {
-                let rel = (c[ch] - v).abs() / v;
-                assert!(rel < floor, "flat {v}: got {} (rel {rel})", c[ch]);
+            for &got in &c[..3] {
+                let rel = (got - v).abs() / v;
+                assert!(rel < floor, "flat {v}: got {got} (rel {rel})");
             }
         }
     }
