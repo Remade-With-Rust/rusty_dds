@@ -79,6 +79,40 @@ fn hdr_rgb(e0: [i32; 3], e1: [i32; 3]) -> RawEndpoints {
 
 /// HDR mode 7: RGB base + scale.
 fn hdr_mode7(v: &[i32]) -> ([i32; 3], [i32; 3]) {
+    let (majcomp, mode, [mut red, mut green, mut blue, mut scale]) = mode7_fields(v);
+    const SHAMTS: [i32; 6] = [1, 1, 2, 3, 4, 5];
+    let shamt = SHAMTS[mode as usize];
+    red <<= shamt;
+    green <<= shamt;
+    blue <<= shamt;
+    scale <<= shamt;
+    if mode != 5 {
+        green = red - green;
+        blue = red - blue;
+    }
+    if majcomp == 1 {
+        core::mem::swap(&mut red, &mut green);
+    }
+    if majcomp == 2 {
+        core::mem::swap(&mut red, &mut blue);
+    }
+    let e1 = [
+        red.clamp(0, 0xFFF),
+        green.clamp(0, 0xFFF),
+        blue.clamp(0, 0xFFF),
+    ];
+    let e0 = [
+        (red - scale).clamp(0, 0xFFF),
+        (green - scale).clamp(0, 0xFFF),
+        (blue - scale).clamp(0, 0xFFF),
+    ];
+    (e0, e1)
+}
+
+/// Mode 7's bit fields before the shift: (major component, sub-mode,
+/// [red, green, blue, scale]). A bit permutation of the four values for a
+/// given sub-mode, which is what lets the encoder invert it.
+pub(crate) fn mode7_fields(v: &[i32]) -> (i32, i32, [i32; 4]) {
     let modeval = ((v[0] & 0xC0) >> 6) | ((v[1] & 0x80) >> 5) | ((v[2] & 0x80) >> 4);
     let (majcomp, mode) = if modeval & 0xC != 0xC {
         (modeval >> 2, modeval & 3)
@@ -150,33 +184,7 @@ fn hdr_mode7(v: &[i32]) -> ([i32; 3], [i32; 3]) {
     if ohm & 0x02 != 0 {
         red |= x5 << 10;
     }
-    const SHAMTS: [i32; 6] = [1, 1, 2, 3, 4, 5];
-    let shamt = SHAMTS[mode as usize];
-    red <<= shamt;
-    green <<= shamt;
-    blue <<= shamt;
-    scale <<= shamt;
-    if mode != 5 {
-        green = red - green;
-        blue = red - blue;
-    }
-    if majcomp == 1 {
-        core::mem::swap(&mut red, &mut green);
-    }
-    if majcomp == 2 {
-        core::mem::swap(&mut red, &mut blue);
-    }
-    let e1 = [
-        red.clamp(0, 0xFFF),
-        green.clamp(0, 0xFFF),
-        blue.clamp(0, 0xFFF),
-    ];
-    let e0 = [
-        (red - scale).clamp(0, 0xFFF),
-        (green - scale).clamp(0, 0xFFF),
-        (blue - scale).clamp(0, 0xFFF),
-    ];
-    (e0, e1)
+    (majcomp, mode, [red, green, blue, scale])
 }
 
 fn sign_extend(v: i32, bits: i32) -> i32 {
