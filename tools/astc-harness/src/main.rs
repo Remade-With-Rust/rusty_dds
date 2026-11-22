@@ -12,6 +12,9 @@
 //! flips of corpus blocks), `file:path.astc` (the file's blocks),
 //! `mix:N` (random blocks biased to legal multi-partition layouts).
 
+#[global_allocator]
+static GLOBAL_ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+
 mod census;
 mod gen;
 mod oracle;

@@ -9,13 +9,15 @@ description = "Differential harness for the rusty_dds ASTC module against the as
 [workspace]
 
 [dependencies]
-rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "__astc_internals", "ktx2-zstd", "tuning"] }
+rusty_dds = { path = "../..", default-features = false, features = ["decode", "encode", "astc", "simd", "__astc_internals", "ktx2-zstd", "tuning"] }
 png = "0.17"
 # CPU-time clocks for the speed gates (robust to preemption on a shared host).
 libc = "0.2"
 # Third-party readers for container gates (C3): the dds crate decodes ASTC via astc-decode.
 dds = "=0.2.0"
 astc-decode = "=0.3.1"
+# House rule: binaries that run an encoder use rusty_alloc (the shipping allocator).
+rusty_alloc-api = "=2.5.0"
 
 [profile.release]
 debug = 1
