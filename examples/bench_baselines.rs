@@ -98,15 +98,12 @@ fn main() {
 }
 
 fn content_allowed(content: DecodeContent, ctx: &Ctx) -> bool {
-    if ctx.name == "X-CUBE"
-        && !matches!(
+    // X-CUBE only takes BC1, BC3, BC7 and RGBA8.
+    ctx.name != "X-CUBE"
+        || matches!(
             content,
             DecodeContent::Bc1 | DecodeContent::Bc3 | DecodeContent::Bc7 | DecodeContent::Rgba8
         )
-    {
-        return false;
-    }
-    true
 }
 
 fn dxgi_name(content: DecodeContent) -> &'static str {

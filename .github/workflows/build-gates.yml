@@ -99,8 +99,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: a new stable adds lints and would turn this red with no code
+      # change. Bump deliberately, together with any fixes it asks for.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           components: clippy
       # Every warning outside src/astc/ fails the job. src/astc/ is excluded
       # until the ASTC encoder rewrite lands with its own clippy pass; then this

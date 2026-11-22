@@ -426,6 +426,9 @@ impl AlphaSelect {
     }
 
     #[inline]
+    // Hot kernel: the indexed loop is the instruction-count-tuned form; not
+    // restructured for a style lint (flagged from clippy 1.100).
+    #[allow(clippy::needless_range_loop)]
     pub(super) fn select(&self, s: u8) -> u8 {
         let s = s as i32;
         let mut rank = 0usize;
