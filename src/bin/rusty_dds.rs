@@ -52,7 +52,7 @@ Usage:
                    [--mips N] [--depth D] [--array N] [--cubemap]
   rusty-dds encode --width W --height H --format astc --block 6x6
                    [--preset fastest|fast|medium|thorough] [--profile srgb|ldr]
-                   <pixels.rgba> -o out.astc|out.ktx|out.dds
+                   <pixels.rgba> -o out.astc|out.ktx|out.ktx2|out.dds
   rusty-dds retag  <file.dds> <DxgiFormat>
 
 Formats: bc1 bc2 bc3 bc4u bc4s bc5u bc5s bc7 rgba8 bgra8 astc
@@ -570,6 +570,10 @@ fn astc_encode(pixels: &[u8], w: u32, h: u32, block: &str, preset: &str, profile
     let mut bytes = Vec::new();
     let r = match ext.as_str() {
         "dds" => Dds::encode_astc_from_rgba8(pixels, w, h, &opts).and_then(|d| d.write(&mut bytes)),
+        "ktx2" => astc::encode_rgba8(pixels, w, h, &opts).and_then(|p| {
+            let kind = if prof == astc::AstcProfile::LdrSrgb { astc::ktx::VkAstcKind::Srgb } else { astc::ktx::VkAstcKind::Unorm };
+            astc::Ktx2View::write(&mut bytes, fp, w, h, 1, kind, &[&p])
+        }),
         "ktx" => astc::encode_rgba8(pixels, w, h, &opts)
             .and_then(|p| astc::KtxView::write(&mut bytes, fp, w, h, 1, prof == astc::AstcProfile::LdrSrgb, &[&p])),
         _ => astc::encode_rgba8(pixels, w, h, &opts).and_then(|p| astc::AstcFile::write(&mut bytes, fp, w, h, 1, &p)),

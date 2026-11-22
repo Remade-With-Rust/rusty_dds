@@ -15,7 +15,7 @@ fn cli_round_trip_matches_library() {
     let raw = dir.join("in.rgba");
     std::fs::write(&raw, &px).unwrap();
     let exe = env!("CARGO_BIN_EXE_rusty-dds");
-    for ext in ["astc", "ktx", "dds"] {
+    for ext in ["astc", "ktx", "ktx2", "dds"] {
         let out = dir.join(format!("out.{ext}"));
         let st = Command::new(exe)
             .args(["encode", "--width", "21", "--height", "13", "--format", "astc", "--block", "5x4", "--preset", "fast", "--profile", "ldr"])
