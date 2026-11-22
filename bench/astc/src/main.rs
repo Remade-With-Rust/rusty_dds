@@ -285,6 +285,12 @@ fn ir_encode(args: &[String]) {
         })
         .collect();
     let imgs: Vec<(u32, u32, Vec<u8>)> = args[2..].iter().map(|s| load_png_cropped(s)).collect();
+    // ASTC_SRGB=1: the sRGB profile (the decode_unorm8 error rule).
+    let profile = if std::env::var("ASTC_SRGB").map_or(false, |v| v == "1") {
+        AstcProfile::LdrSrgb
+    } else {
+        AstcProfile::Ldr
+    };
     let (mut blocks, mut bytes) = (0u64, 0u64);
     let mut h = 0xCBF2_9CE4_8422_2325u64;
     let mut out = Vec::new();
@@ -292,7 +298,7 @@ fn ir_encode(args: &[String]) {
         for &fp in &fps {
             let n = astc::payload_len(*w, *ht, 1, fp).unwrap();
             out.resize(n, 0);
-            let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
+            let opts = astc::AstcEncodeOptions::new(fp, profile).with_preset(preset);
             astc::encode_rgba8_into(img, *w, *ht, &opts, &mut out).unwrap();
             fnv_words(&mut h, &out);
             blocks += (n / 16) as u64;

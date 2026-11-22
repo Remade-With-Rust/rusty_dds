@@ -1,7 +1,7 @@
 #!/bin/bash
 # Decode A/B re-run at 20 rounds (the 10-round set was disturbed by load), plus its null arm.
 S=$(dirname "$(readlink -f "$0")")
-W=/root/astcws/cp/wall
+W=${CP:-/root/astcws/cp}/wall
 D=/root/astcws/out/dbench
 DEC=""
 for m in m1 m2 m3 m4; do for fp in 4x4 6x6 8x8 12x12; do DEC="$DEC $D/${m}_$fp.astc"; done; done

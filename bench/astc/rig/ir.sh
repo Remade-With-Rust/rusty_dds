@@ -1,7 +1,7 @@
 #!/bin/bash
 # ir.sh <tag> [inst...]: every instrument x both arms under callgrind, in parallel,
 # identical `env -i` environment. Prints Ir per (instrument, arm) and the anchors.
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 A=/root/astcws
 TAG=$1; shift
 INSTS=${@:-dec-u8 dec-f16 dec-rows enc-fastest enc-fast enc-medium enc-thorough cont}

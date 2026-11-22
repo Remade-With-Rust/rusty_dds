@@ -1,9 +1,9 @@
 #!/bin/bash
 # fndiff2.sh <tagA> <tagB> <inst>: self Ir per function+file line group, work arms of two tags.
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 i=0
 for t in $1 $2; do
-  callgrind_annotate --threshold=100 $CP/cg/$t/$3.work.out 2>/dev/null | awk '/^ *[0-9][0-9,]* / && /:/ {v=$1; gsub(",","",v); $1=""; sub(/^ +\([^)]*\) +/,""); sub(/\[.*\]/,""); gsub("/root/astcws/cp/(base|work)/",""); k[$0]+=v} END {for (x in k) print k[x] "\t" x}' > /tmp/fn.$i; i=$((i+1))
+  callgrind_annotate --threshold=100 $CP/cg/$t/$3.work.out 2>/dev/null | awk '/^ *[0-9][0-9,]* / && /:/ {v=$1; gsub(",","",v); $1=""; sub(/^ +\([^)]*\) +/,""); sub(/\[.*\]/,""); gsub("/root/astcws/[a-z]+/(base|work)/",""); k[$0]+=v} END {for (x in k) print k[x] "\t" x}' > /tmp/fn.$i; i=$((i+1))
 done
 python3 - <<'PY'
 b={};w={}

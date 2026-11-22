@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the Ir bench in an arm: build.sh base|work [features]. Fails loudly.
 set -e
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 ARM=$1
 FEAT=${2:-zstd}
 cd $CP/$ARM/bench/astc

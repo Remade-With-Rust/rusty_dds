@@ -1,6 +1,6 @@
 #!/bin/bash
 # compact: callee primitives and callers >= 0.005% of total
-CP=/root/astcws/cp
+CP=${CP:-/root/astcws/cp}
 for inst in "$@"; do
 F=$CP/cg/$TAG/$inst.work.out
 echo "######## $inst  total $(grep -m1 '^totals:' $F | awk '{print $2}')"
@@ -18,7 +18,7 @@ def flush(b):
         if " < " in l:
             m=re.search(r"\(\s*([\d.]+)%\)",l)
             if m and float(m.group(1))>=0.005:
-                l=re.sub(r"/root/astcws/cp/work/src/astc/|/rustc/\w+/library/|\[/root\S*\]","",l.strip())
+                l=re.sub(r"/root/astcws/[a-z]+/work/src/astc/|/rustc/\w+/library/|\[/root\S*\]","",l.strip())
                 print("     ",l[:190])
 for l in sys.stdin:
     l=l.rstrip("\n")
