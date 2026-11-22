@@ -71,10 +71,10 @@ pub(crate) struct Ctx {
     /// Set when the CPU supports AVX2: the eight-lane twins of the float
     /// kernels run (`encode::simd`; bit-identical to the scalar).
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    pub avx2: Option<super::simd::Avx2>,
+    pub(in crate::astc::encode) avx2: Option<super::simd::Avx2>,
     /// Set when the CPU has POPCNT: the pattern ranking uses it.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
-    pub popcnt: Option<super::simd::Popcnt>,
+    pub(in crate::astc::encode) popcnt: Option<super::simd::Popcnt>,
 }
 
 /// Reusable per-fit buffers of the mode search.
