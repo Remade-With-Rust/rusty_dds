@@ -415,6 +415,7 @@ pub fn encode_rgba_f32(
     let mut out = alloc::vec![0u8; total];
     let ctx = Ctx::new(fp, 1);
     let exact = params(opts.preset).exact_candidates;
+    let m7 = hdr::Mode7::new();
     let (bw, bh) = (fp.width(), fp.height());
     let (nbx, nby, _) = fp.block_counts(width, height, 1);
     let mut px = [[0f32; 4]; 216];
@@ -434,7 +435,8 @@ pub fn encode_rgba_f32(
                 }
             }
             let opaque = hdr::targets(&px[..i], opts.profile, &mut t[..i], &mut h[..i]);
-            let best = hdr::encode_block_hdr(&ctx, opts.profile, exact, &t[..i], &h[..i], opaque);
+            let best =
+                hdr::encode_block_hdr(&ctx, &m7, opts.profile, exact, &t[..i], &h[..i], opaque);
             out[o..o + 16].copy_from_slice(&super::pack::pack(&best.sym, fp));
             o += 16;
         }

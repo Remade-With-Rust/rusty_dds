@@ -1,5 +1,6 @@
-//! HDR encode (plan E7), first version: one partition, HDR endpoint modes 11
-//! (RGB), 14 (RGB + LDR alpha) and 15 (RGB + HDR alpha).
+//! HDR encode (plan E7): one partition, HDR endpoint modes 11 (RGB), 7 (RGB
+//! base + scale, opaque blocks), 14 (RGB + LDR alpha) and 15 (RGB + HDR
+//! alpha).
 //!
 //! ASTC interpolates HDR components linearly in a 16-bit pseudo-logarithmic
 //! (LNS) domain and converts to FP16 afterwards. The encoder therefore works
@@ -160,6 +161,110 @@ fn mode11_candidates(e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 6]>) {
     }
 }
 
+/// Where mode 7 keeps each field bit, per sub-mode: `bit[mode][field][i]` is
+/// the (value, bit) holding bit `i` of field `field` (red, green, blue,
+/// scale, before the shift), and `width[mode][field]` how many bits the
+/// field has. Derived by probing the decoder's own field assembly
+/// (`cem::mode7_fields`), so it cannot disagree with it.
+pub(crate) struct Mode7 {
+    bit: [[[(u8, u8); 12]; 4]; 6],
+    width: [[u8; 4]; 6],
+}
+
+/// `modeval` (the four mode bits) for a major component and sub-mode, if
+/// the pair is encodable.
+fn mode7_modeval(maj: usize, mode: usize) -> Option<u32> {
+    match (maj, mode) {
+        (0..=2, 0..=3) => Some(((maj as u32) << 2) | mode as u32),
+        (0..=2, 4) => Some(0xC | maj as u32),
+        (0, 5) => Some(0xF),
+        _ => None,
+    }
+}
+
+/// The four values with only the mode bits of `modeval` set.
+fn mode7_base(modeval: u32) -> [u8; 4] {
+    [
+        ((modeval & 3) << 6) as u8,
+        (((modeval >> 2) & 1) << 7) as u8,
+        (((modeval >> 3) & 1) << 7) as u8,
+        0,
+    ]
+}
+
+impl Mode7 {
+    pub(crate) fn new() -> Self {
+        let mut t = Mode7 {
+            bit: [[[(0, 0); 12]; 4]; 6],
+            width: [[0; 4]; 6],
+        };
+        for mode in 0..6 {
+            let base = mode7_base(mode7_modeval(0, mode).unwrap());
+            let as_i = |v: [u8; 4]| [v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32];
+            let (_, _, f0) = cem::mode7_fields(&as_i(base));
+            // Free bits: every bit but the four mode bits.
+            for (k, mask) in [(0usize, 0x3Fu8), (1, 0x7F), (2, 0x7F), (3, 0xFF)] {
+                for b in 0..8u8 {
+                    if mask >> b & 1 == 0 {
+                        continue;
+                    }
+                    let mut v = base;
+                    v[k] |= 1 << b;
+                    let (maj, m, f) = cem::mode7_fields(&as_i(v));
+                    debug_assert!(maj == 0 && m == mode as i32);
+                    for fi in 0..4 {
+                        let d = f[fi] ^ f0[fi];
+                        if d != 0 {
+                            let i = d.trailing_zeros() as usize;
+                            t.bit[mode][fi][i] = (k as u8, b);
+                            t.width[mode][fi] = t.width[mode][fi].max(i as u8 + 1);
+                        }
+                    }
+                }
+            }
+        }
+        t
+    }
+}
+
+/// Mode 7 candidate values for HDR RGB endpoints `e0`, `e1` (12-bit units):
+/// every encodable (major component, sub-mode), with e1 as the base and the
+/// mean per-channel drop to e0 as the scale.
+// One index walks parallel per-channel arrays (and fixes the operation order).
+#[allow(clippy::needless_range_loop)]
+fn mode7_candidates(t: &Mode7, e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 4]>) {
+    out.clear();
+    let scale = ((e1[0] - e0[0]) + (e1[1] - e0[1]) + (e1[2] - e0[2])) * (1.0 / 3.0);
+    for maj in 0..3usize {
+        let mut a = e1;
+        a.swap(0, maj);
+        for mode in 0..6usize {
+            let Some(modeval) = mode7_modeval(maj, mode) else {
+                continue;
+            };
+            const SHAMTS: [u32; 6] = [1, 1, 2, 3, 4, 5];
+            let unit = (1u32 << SHAMTS[mode]) as f32;
+            let f = if mode == 5 {
+                [a[0], a[1], a[2], scale]
+            } else {
+                [a[0], a[0] - a[1], a[0] - a[2], scale]
+            };
+            let mut v = mode7_base(modeval);
+            for (fi, &x) in f.iter().enumerate() {
+                let w = t.width[mode][fi] as u32;
+                let q = ((x / unit + 0.5).max(0.0) as u32).min((1 << w) - 1);
+                for i in 0..w as usize {
+                    if q >> i & 1 != 0 {
+                        let (k, b) = t.bit[mode][fi][i];
+                        v[k as usize] |= 1 << b;
+                    }
+                }
+            }
+            out.push(v);
+        }
+    }
+}
+
 /// Squared distance of the endpoints `v` decode to from the fitted
 /// endpoints `target` (interpolation domain), over `chans` channels.
 fn endpoint_err(
@@ -229,6 +334,95 @@ fn repair(
     changed
 }
 
+/// Least-squares endpoints under mode 7's model, value = e1 - (1 - w) s
+/// with one scale s for R, G and B (interpolation domain, weights `eff`):
+/// with u = 1 - w, s = (U X / n - sum u x) / (3 (sum u^2 - U^2 / n)) and
+/// e1 = (X + s U) / n per channel (U = sum u, X = sum x). Returns (e0, e1)
+/// with alpha 0 (mode 7 has none).
+fn mode7_fit(t: &[[f32; 4]], eff: &[u8; MAX_TEXELS]) -> ([f32; 4], [f32; 4]) {
+    let n = t.len() as f32;
+    let (mut su, mut su2, mut sux) = (0f32, 0f32, 0f32);
+    let mut sx = [0f32; 3];
+    for (i, ti) in t.iter().enumerate() {
+        let u = 1.0 - eff[i] as f32 / 64.0;
+        su += u;
+        su2 += u * u;
+        for c in 0..3 {
+            sx[c] += ti[c];
+            sux += u * ti[c];
+        }
+    }
+    let den = 3.0 * (su2 - su * su / n);
+    let s = if den > 1e-6 {
+        ((su * (sx[0] + sx[1] + sx[2]) / n - sux) / den).max(0.0)
+    } else {
+        0.0
+    };
+    let mut e0 = [0f32; 4];
+    let mut e1 = [0f32; 4];
+    for c in 0..3 {
+        e1[c] = ((sx[c] + s * su) / n).clamp(0.0, 65535.0);
+        e0[c] = (e1[c] - s).max(0.0);
+    }
+    (e0, e1)
+}
+
+/// Exact error of the values `v` (endpoint mode `cem_v`) against the
+/// targets `t` with texel weights `eff`: squared differences of the
+/// decoder's interpolated values (interpolation domain), over `chans`.
+// One index walks parallel per-channel arrays (and fixes the operation order).
+#[allow(clippy::needless_range_loop)]
+fn texel_err(
+    cem_v: u8,
+    profile: AstcProfile,
+    v: &[u8; 8],
+    eff: &[u8; MAX_TEXELS],
+    t: &[[f32; 4]],
+    chans: usize,
+) -> f64 {
+    let ep = cem::expand(&cem::decode(cem_v, v), profile);
+    let mut err = 0f64;
+    for (i, ti) in t.iter().enumerate() {
+        for c in 0..chans {
+            let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - ti[c] as f64;
+            err += d * d;
+        }
+    }
+    err
+}
+
+/// Below 256 levels, rounding each packed value on its own can flip the
+/// mode and field bits it carries. Repair the two candidates whose decoded
+/// endpoints land nearest the fitted ones by a coordinate search over
+/// neighbouring levels ([`repair`]), and append the repaired values; the
+/// exact texel error then chooses among the originals and the repaired.
+#[allow(clippy::too_many_arguments)]
+fn repair_best(
+    cem_v: u8,
+    profile: AstcProfile,
+    range: usize,
+    nvals: usize,
+    quantized: &mut Vec<[u8; 8]>,
+    target: ([f32; 4], [f32; 4]),
+    chans: usize,
+) {
+    if range >= COLOR_NEAREST.len() - 1 {
+        return;
+    }
+    let mut ranked: Vec<(f64, usize)> = quantized
+        .iter()
+        .enumerate()
+        .map(|(j, v)| (endpoint_err(cem_v, profile, v, target, chans), j))
+        .collect();
+    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    for &(e, j) in ranked.iter().take(2) {
+        let mut v = quantized[j];
+        if repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
+            quantized.push(v);
+        }
+    }
+}
+
 /// Encode one HDR block. `t` holds the targets in the interpolation domain
 /// (LNS for HDR lanes, UNORM16 for LDR alpha); `h` the half values (for void
 /// extent); `opaque` means alpha is 1.0 everywhere.
@@ -236,6 +430,7 @@ fn repair(
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn encode_block_hdr(
     ctx: &Ctx,
+    m7: &Mode7,
     profile: AstcProfile,
     exact: usize,
     t: &[[f32; 4]],
@@ -357,6 +552,7 @@ pub(crate) fn encode_block_hdr(
     };
     let mut six: Vec<[u8; 6]> = Vec::new();
     let mut quantized: Vec<[u8; 8]> = Vec::new();
+    let mut quads: Vec<[u8; 4]> = Vec::new();
     for &(_, mi, range) in &cands {
         let m = ctx.modes[mi];
         let g = m.grid as usize;
@@ -396,7 +592,8 @@ pub(crate) fn encode_block_hdr(
                 [to12(e1[0]), to12(e1[1]), to12(e1[2])],
                 &mut six,
             );
-            let mut pass_best: Option<(f64, [u8; 8])> = None;
+            // The best encoding of this pass: (error, values, CEM, colour range).
+            let mut pass_best: Option<(f64, [u8; 8], u8, usize)> = None;
             quantized.clear();
             for s6 in &six {
                 let mut v = [0u8; 8];
@@ -413,66 +610,74 @@ pub(crate) fn encode_block_hdr(
                 }
                 quantized.push(v);
             }
-            // Below 256 levels, rounding each packed byte on its own can
-            // flip the mode and field bits it carries. Repair the two
-            // candidates whose decoded endpoints land nearest the fitted
-            // ones by a coordinate search over neighbouring levels, judged
-            // on the decoded endpoints; the exact texel error below then
-            // chooses among the originals and the repaired ones.
-            if (range as usize) < COLOR_NEAREST.len() - 1 {
-                let target = (e0, e1);
-                let mut ranked: Vec<(f64, usize)> = quantized
-                    .iter()
-                    .enumerate()
-                    .map(|(j, v)| (endpoint_err(cem_v, profile, v, target, chans), j))
-                    .collect();
-                ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                for &(e, j) in ranked.iter().take(2) {
-                    let mut v = quantized[j];
-                    if repair(
-                        cem_v,
-                        profile,
-                        range,
-                        nvals as usize,
-                        &mut v,
-                        e,
-                        target,
-                        chans,
-                    ) {
+            let target = (e0, e1);
+            repair_best(
+                cem_v,
+                profile,
+                range,
+                nvals as usize,
+                &mut quantized,
+                target,
+                chans,
+            );
+            for v in &quantized {
+                let err = texel_err(cem_v, profile, v, &eff, t, chans);
+                if pass_best.map_or(true, |b| err < b.0) {
+                    pass_best = Some((err, *v, cem_v, range));
+                }
+            }
+            // Mode 7 (RGB base + scale: four values, so a finer colour range
+            // than mode 11's six at the same block mode) for opaque blocks.
+            let r4 = m.crange[0][1];
+            if cem_v == 11 && r4 != 0xFF {
+                let r4 = r4 as usize;
+                // Two starting points: the per-channel fit above (its mean
+                // drop as the scale) and the least-squares fit of mode 7's
+                // own model. Neither wins on every image (measured), so both
+                // are tried and the exact error chooses.
+                for (f0, f1) in [(e0, e1), mode7_fit(t, &eff)] {
+                    mode7_candidates(
+                        m7,
+                        [to12(f0[0]), to12(f0[1]), to12(f0[2])],
+                        [to12(f1[0]), to12(f1[1]), to12(f1[2])],
+                        &mut quads,
+                    );
+                    quantized.clear();
+                    for q in &quads {
+                        let mut v = [0u8; 8];
+                        for k in 0..4 {
+                            v[k] = COLOR_NEAREST[r4][q[k] as usize];
+                        }
                         quantized.push(v);
                     }
-                }
-            }
-            for v in &quantized {
-                let v = *v;
-                let ep = cem::expand(&cem::decode(cem_v, &v), profile);
-                let mut err = 0f64;
-                for i in 0..n {
-                    for c in 0..chans {
-                        let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - t[i][c] as f64;
-                        err += d * d;
+                    repair_best(7, profile, r4, 4, &mut quantized, (f0, f1), chans);
+                    for v in &quantized {
+                        let err = texel_err(7, profile, v, &eff, t, chans);
+                        if pass_best.map_or(true, |b| err < b.0) {
+                            pass_best = Some((err, *v, 7, r4));
+                        }
                     }
                 }
-                if pass_best.map_or(true, |(b, _)| err < b) {
-                    pass_best = Some((err, v));
-                }
             }
-            let Some((err, v)) = pass_best else { break };
+            let Some((err, v, pc, pr)) = pass_best else {
+                break;
+            };
             if err < best.err {
+                let pn = cem::value_count(pc);
                 let mut s = SymbolicBlock::empty(BlockKind::Normal, m.mode);
                 let gr = &ctx.grids[g];
                 s.grid = [gr.w, gr.h, gr.d];
                 s.weight_range = m.range;
                 s.partitions = 1;
-                s.cem = [cem_v; 4];
-                s.color_range = range as u8;
-                s.color_count = nvals as u8;
-                s.color_values[..nvals as usize].copy_from_slice(&v[..nvals as usize]);
+                s.cem = [pc; 4];
+                s.color_range = pr as u8;
+                s.color_count = pn as u8;
+                s.color_values[..pn].copy_from_slice(&v[..pn]);
                 s.weights[..count].copy_from_slice(&gw[..count]);
                 best = Best { err, sym: s };
             }
             // Re-derive ideal weights from the decoded endpoints.
-            let ep = cem::expand(&cem::decode(cem_v, &v), profile);
+            let ep = cem::expand(&cem::decode(pc, &v), profile);
             let mut w = [0f32; MAX_TEXELS];
             for i in 0..n {
                 let (mut num, mut den) = (0f32, 0f32);
@@ -539,6 +744,58 @@ mod tests {
         for h in 0..0x7C00u16 {
             let l = f16_to_lns(h).round() as u32;
             assert_eq!(lns_to_f16(l.min(0xFFFF) as u16), h, "{h:#x}");
+        }
+    }
+
+    #[test]
+    fn mode7_table_is_a_bit_permutation_and_candidates_decode_near() {
+        let t = Mode7::new();
+        for mode in 0..6 {
+            let mut seen = std::collections::BTreeSet::new();
+            for f in 0..4 {
+                assert!(t.width[mode][f] >= 5, "mode {mode} field {f}");
+                for i in 0..t.width[mode][f] as usize {
+                    assert!(
+                        seen.insert(t.bit[mode][f][i]),
+                        "mode {mode} field {f} bit {i}"
+                    );
+                }
+            }
+        }
+        // A grey-ish ramp and a coloured one: the best candidate decodes
+        // within a few quantisation units of the target endpoints.
+        // (e0, e1, bound): the bound is the base+scale model's own error
+        // (the three drops differ) plus a few quantisation units.
+        for (e0, e1, bound) in [
+            (
+                [800.0f32, 820.0, 790.0],
+                [1600.0f32, 1650.0, 1580.0],
+                3.0 * 64.0 * 64.0,
+            ),
+            (
+                [100.0, 300.0, 200.0],
+                [900.0, 2000.0, 1300.0],
+                420_000.0 + 3.0 * 64.0 * 64.0,
+            ),
+        ] {
+            let mut v = Vec::new();
+            mode7_candidates(&t, e0, e1, &mut v);
+            assert!(!v.is_empty());
+            let best = v
+                .iter()
+                .map(|q| {
+                    let w = [q[0], q[1], q[2], q[3], 0, 0, 0, 0];
+                    let raw = cem::decode(7, &w);
+                    (0..3)
+                        .map(|c| {
+                            let a = raw.e0[c] as f32 - e0[c];
+                            let b = raw.e1[c] as f32 - e1[c];
+                            (a * a + b * b) as f64
+                        })
+                        .sum::<f64>()
+                })
+                .fold(f64::MAX, f64::min);
+            assert!(best < bound, "{best}");
         }
     }
 
