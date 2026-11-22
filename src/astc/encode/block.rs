@@ -40,6 +40,10 @@ pub(crate) struct Params {
     /// Patterns fully searched for 2, 3 and 4 partitions, best clustering
     /// match first.
     pub part_candidates: [usize; 3],
+    /// Of those, how many are fully searched, ranked by their line-fit
+    /// error (cheap); a candidate whose line-fit error alone already
+    /// exceeds the best block is skipped.
+    pub part_search: [usize; 3],
     /// Candidates (mode x endpoint class) encoded exactly per partitioning.
     pub exact_candidates: usize,
     /// Weight/endpoint refinement passes, for the best `refine_top`
@@ -126,6 +130,9 @@ struct Fit {
     ccs: usize,
     /// Fixed error off the fitted lines (not reducible by weights).
     perp: f32,
+    /// Per texel: its partition line's len2 and len2b (residual weights).
+    tw1: [f32; MAX_TEXELS],
+    tw2: [f32; MAX_TEXELS],
     /// Texel indices of each partition, and their counts.
     idx: [[u8; MAX_TEXELS]; 4],
     cnt: [usize; 4],
@@ -311,6 +318,8 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
         w2: [0.0; MAX_TEXELS],
         ccs,
         perp: 0.0,
+        tw1: [0.0; MAX_TEXELS],
+        tw2: [0.0; MAX_TEXELS],
         idx: [[0; MAX_TEXELS]; 4],
         cnt: [0; 4],
     };
@@ -334,6 +343,11 @@ fn make_fit(src: &Src, parts: u8, seed: u16, labels: &[u8], ccs: usize) -> Fit {
         f.lines[p as usize] = line;
         f.perp += perp;
     }
+    for i in 0..src.n {
+        let l = &f.lines[f.labels[i] as usize];
+        f.tw1[i] = l.len2;
+        f.tw2[i] = l.len2b;
+    }
     f
 }
 
@@ -351,31 +365,30 @@ pub(super) fn decimate(ctx: &Ctx, grid: usize, ideal: &[f32; MAX_TEXELS], iters:
     // weight feeds.
     for j in 0..g.count {
         let mut s = 0f32;
-        let mut cs = 0f32;
         for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
             s += ideal[t as usize] * c as f32;
-            cs += c as f32;
         }
+        let cs = g.feed_cs[j];
         out[j] = if cs > 0.0 { 64.0 * s / cs } else { 32.0 };
     }
     // Jacobi steps on sum_t (sum_k c_tk/16 g_k - 64 w_t)^2.
     let mut resid = [0f32; MAX_TEXELS];
     for _ in 0..iters {
-        for (t, &(n, tp)) in g.taps.iter().enumerate() {
+        for (t, tp) in g.taps4.iter().enumerate() {
             let mut v = 0f32;
-            for &(k, c) in &tp[..n as usize] {
-                v += out[k as usize] * c as f32;
+            for &(k, c) in tp {
+                // Grid indices are < 64 (mask: no bounds check).
+                v += out[(k & 63) as usize] * c as f32;
             }
             resid[t] = v * (1.0 / 16.0) - 64.0 * ideal[t];
         }
         for j in 0..g.count {
             let mut num = 0f32;
-            let mut den = 0f32;
             for &(t, c) in &g.feed[g.feed_at[j] as usize..g.feed_at[j + 1] as usize] {
                 let cf = c as f32 * (1.0 / 16.0);
                 num += cf * resid[t as usize];
-                den += cf * cf;
             }
+            let den = g.feed_den[j];
             if den > 0.0 {
                 out[j] = (out[j] - num / den).clamp(0.0, 64.0);
             }
@@ -424,10 +437,11 @@ pub(super) fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
 }
 
 pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_TEXELS]) {
-    for (t, &(n, tp)) in ctx.grids[grid].taps.iter().enumerate() {
+    let gw = &gw[..64];
+    for (t, tp) in ctx.grids[grid].taps4.iter().enumerate() {
         let mut s = 0u32;
-        for &(k, c) in &tp[..n as usize] {
-            s += gw[k as usize] as u32 * c as u32;
+        for &(k, c) in tp {
+            s += gw[(k & 63) as usize] as u32 * c as u32;
         }
         out[t] = ((s + 8) >> 4) as u8;
     }
@@ -560,9 +574,12 @@ fn exact_part_err(
 ) -> f64 {
     let cw = src.tgt.cw;
     let mut acc = [0u64; 4];
+    // Opaque blocks are only ever given alpha-free endpoint classes, whose
+    // decoded alpha is 0xFFFF: the alpha error is exactly 0, so skip it.
+    let chans = if src.opaque { 3 } else { 4 };
     for &i in idx {
         let i = i as usize;
-        for c in 0..4 {
+        for c in 0..chans {
             let w = if c == ccs { w2[i] } else { w1[i] };
             let v = lerp(ep.e0[c], ep.e1[c], w) as i64;
             let s = src.px[i][c] as i64;
@@ -742,14 +759,14 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
 fn residual(ctx: &Ctx, grid: usize, dec: &[f32; 64], ideal: &[f32; MAX_TEXELS], fit: &Fit, plane2: bool) -> f32 {
     let g = &ctx.grids[grid];
     let mut e = 0f32;
-    for (t, &(n, tp)) in g.taps.iter().enumerate() {
+    let tw = if plane2 { &fit.tw2 } else { &fit.tw1 };
+    for (t, tp) in g.taps4.iter().enumerate() {
         let mut v = 0f32;
-        for &(k, c) in &tp[..n as usize] {
-            v += dec[k as usize] * c as f32;
+        for &(k, c) in tp {
+            v += dec[(k & 63) as usize] * c as f32;
         }
         let d = v * (1.0 / (16.0 * 64.0)) - ideal[t];
-        let l = &fit.lines[fit.labels[t] as usize];
-        e += d * d * if plane2 { l.len2b } else { l.len2 };
+        e += d * d * tw[t];
     }
     e
 }
@@ -1154,10 +1171,20 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             top.insert(pos, key);
             top.truncate(m);
         }
-        for &(_, pi) in top.iter() {
-            let p = &pats[pi];
-            let fitk = make_fit(&src, k as u8, p.seed, &p.labels, 4);
-            search_fit(ctx, prm, &src, &fitk, &mut best);
+        let mut fits: Vec<Fit> = top
+            .iter()
+            .map(|&(_, pi)| {
+                let p = &pats[pi];
+                make_fit(&src, k as u8, p.seed, &p.labels, 4)
+            })
+            .collect();
+        // Stable sort: ties keep the clustering-match order.
+        fits.sort_by(|a, b| a.perp.total_cmp(&b.perp));
+        for fitk in fits.iter().take(prm.part_search[k - 2].max(1)) {
+            if fitk.perp as f64 >= best.err {
+                break;
+            }
+            search_fit(ctx, prm, &src, fitk, &mut best);
         }
     }
     best

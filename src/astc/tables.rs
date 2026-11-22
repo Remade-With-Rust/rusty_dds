@@ -17,10 +17,18 @@ pub(crate) struct Grid {
     pub count: usize,
     /// `taps[texel]` = (number of taps, [(index, contribution); 4]).
     pub taps: Vec<(u8, [(u8, u8); 4])>,
+    /// `taps` padded to exactly four entries with (0, 0): fixed-length loops
+    /// for the encoder (a zero contribution adds exactly nothing).
+    pub taps4: Vec<[(u8, u8); 4]>,
     /// Transpose: the texels each stored weight feeds and how much, flattened;
     /// stored weight j owns `feed[feed_at[j]..feed_at[j + 1]]`.
     pub feed: Vec<(u8, u8)>,
     pub feed_at: Vec<u16>,
+    /// Per stored weight: the sum of its contributions, and the sum of the
+    /// squared contributions / 16, each accumulated in `feed` order (the
+    /// encoder's decimation uses them bit for bit as it would recompute them).
+    pub feed_cs: Vec<f32>,
+    pub feed_den: Vec<f32>,
     /// The grid equals the footprint (infill is the identity).
     pub full: bool,
     /// Mean over texels of sum((contribution / 16)^2): how much infill
@@ -96,6 +104,7 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
             }
         }
     }
+    let taps4: Vec<[(u8, u8); 4]> = taps.iter().map(|&(_, tp)| tp).collect();
     let mut feeds = alloc::vec![Vec::new(); count];
     for (t, &(n, tp)) in taps.iter().enumerate() {
         for &(idx, c) in &tp[..n as usize] {
@@ -109,6 +118,18 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         feed.extend_from_slice(f);
     }
     feed_at.push(feed.len() as u16);
+    let mut feed_cs = Vec::with_capacity(count);
+    let mut feed_den = Vec::with_capacity(count);
+    for j in 0..count {
+        let (mut cs, mut den) = (0f32, 0f32);
+        for &(_, c) in &feed[feed_at[j] as usize..feed_at[j + 1] as usize] {
+            cs += c as f32;
+            let cf = c as f32 * (1.0 / 16.0);
+            den += cf * cf;
+        }
+        feed_cs.push(cs);
+        feed_den.push(den);
+    }
     let mut noise = 0f32;
     for &(n, tp) in taps.iter() {
         for &(_, c) in &tp[..n as usize] {
@@ -124,8 +145,11 @@ pub(crate) fn build_grid(fp: AstcFootprint, gw: u32, gh: u32, gd: u32) -> Grid {
         d: gd as u8,
         count,
         taps,
+        taps4,
         feed,
         feed_at,
+        feed_cs,
+        feed_den,
         full: gw == bw && gh == bh && gd == bd,
     }
 }

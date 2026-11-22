@@ -84,6 +84,9 @@ pub(crate) fn params(p: AstcPreset) -> Params {
         if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part_candidates[0] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PART3") { prm.part_candidates[1] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_PART4") { prm.part_candidates[2] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH2") { prm.part_search[0] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH3") { prm.part_search[1] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PSEARCH4") { prm.part_search[2] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_EXACT") { prm.exact_candidates = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_REFINE") { prm.refine = v as u8; }
         if let Some(v) = get("RUSTY_DDS_ASTC_REFINE_TOP") { prm.refine_top = v as usize; }
@@ -101,6 +104,7 @@ fn preset_params(p: AstcPreset) -> Params {
             refine_top: 1,
             max_partitions: 2,
             part_candidates: [1, 0, 0],
+            part_search: [1, 0, 0],
             exact_candidates: 2,
             refine: 1,
             dual_plane: true,
@@ -112,6 +116,7 @@ fn preset_params(p: AstcPreset) -> Params {
             refine_top: 1,
             max_partitions: 2,
             part_candidates: [2, 0, 0],
+            part_search: [2, 0, 0],
             exact_candidates: 3,
             refine: 2,
             dual_plane: true,
@@ -123,17 +128,19 @@ fn preset_params(p: AstcPreset) -> Params {
             refine_top: 2,
             max_partitions: 3,
             part_candidates: [4, 1, 0],
+            part_search: [2, 1, 0],
             exact_candidates: 4,
-            refine: 3,
+            refine: 2,
             dual_plane: true,
             dual_corr_limit: 0.99,
             grid_iters: 3,
-            part2_skip_err: 0.75,
+            part2_skip_err: 1.5,
         },
         AstcPreset::Thorough => Params {
             refine_top: 3,
             max_partitions: 4,
             part_candidates: [8, 4, 2],
+            part_search: [8, 4, 2],
             exact_candidates: 8,
             refine: 4,
             dual_plane: true,
@@ -145,6 +152,7 @@ fn preset_params(p: AstcPreset) -> Params {
             refine_top: 4,
             max_partitions: 4,
             part_candidates: [16, 8, 4],
+            part_search: [16, 8, 4],
             exact_candidates: 12,
             refine: 4,
             dual_plane: true,

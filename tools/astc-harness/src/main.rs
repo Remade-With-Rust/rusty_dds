@@ -1028,6 +1028,32 @@ fn load_rgba(path: &str) -> (u32, u32, Vec<u8>) {
     (info.width, info.height, rgba)
 }
 
+/// A 2048x2048 natural-content test texture: source images tiled row-major
+/// (each cropped to its tile), for the claim-grade decode bench (section 2.4
+/// asks for 2048x2048 inputs; the Kodak set is 768x512).
+///   astch mosaic <out.png> <in.png>...
+fn cmd_mosaic(args: &[String]) -> bool {
+    const N: usize = 2048;
+    let srcs: Vec<(u32, u32, Vec<u8>)> = args[1..].iter().map(|p| load_rgba(p)).collect();
+    let mut out = vec![0u8; N * N * 4];
+    let (tw, th) = (srcs[0].0 as usize, srcs[0].1 as usize);
+    let cols = N.div_ceil(tw);
+    for y in 0..N {
+        for x in 0..N {
+            let (s, sx, sy) = (&srcs[((y / th) * cols + x / tw) % srcs.len()], x % tw, y % th);
+            let (sw, sh) = (s.0 as usize, s.1 as usize);
+            let i = ((sy % sh) * sw + (sx % sw)) * 4;
+            out[(y * N + x) * 4..(y * N + x) * 4 + 4].copy_from_slice(&s.2[i..i + 4]);
+        }
+    }
+    let f = std::fs::File::create(&args[0]).unwrap();
+    let mut e = png::Encoder::new(std::io::BufWriter::new(f), N as u32, N as u32);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&out).unwrap();
+    true
+}
+
 /// PSNR over RGB for opaque sources, over RGBA otherwise.
 fn psnr_img(src: &[u8], dec: &[u8]) -> f64 {
     let opaque = src.chunks_exact(4).all(|p| p[3] == 255);
@@ -1236,6 +1262,8 @@ fn astcenc_at(bin: &str, q: f32, fp: AstcFootprint, imgs: &[(String, u32, u32, V
 /// mean PSNR matches ours within 0.05 dB; then astcenc-none and astcenc-avx2
 /// single-thread rates at that quality.
 ///   astch es1 <preset> <fps> <png>...
+const ES1_ROUNDS: usize = 4;
+
 fn cmd_es1(args: &[String]) -> bool {
     let preset = match args[0].as_str() {
         "fastest" => astc::AstcPreset::Fastest,
@@ -1257,22 +1285,14 @@ fn cmd_es1(args: &[String]) -> bool {
     let none = "/root/astcws/rel571/inst/bin/astcenc-none";
     let avx2 = "/root/astcws/rel571/inst/bin/astcenc-avx2";
     let px: f64 = imgs.iter().map(|i| (i.1 * i.2) as f64).sum();
-    println!("preset {:?}; {} images, {:.2} Mpx; single thread; astcenc rates from its own Coding time", preset, imgs.len(), px / 1e6);
+    println!("preset {:?}; {} images, {:.2} Mpx; single thread; astcenc rates from its own Coding time; {ES1_ROUNDS} ABBA rounds, minimum per arm", preset, imgs.len(), px / 1e6);
     println!("| footprint | ours dB | ours MT/s | astcenc -quality | astcenc dB | none MT/s | avx2 MT/s | ours / none | ours / avx2 |");
     println!("|---|---|---|---|---|---|---|---|---|");
     for &fp in &fps {
         let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::Ldr).with_preset(preset);
         let mut p_ours = 0f64;
-        let mut t_ours = 0f64;
         for (_, w, h, img) in &imgs {
-            let mut best = f64::MAX;
-            let mut data = Vec::new();
-            for _ in 0..2 {
-                let t = std::time::Instant::now();
-                data = astc::encode_rgba8(img, *w, *h, &opts).unwrap();
-                best = best.min(t.elapsed().as_secs_f64());
-            }
-            t_ours += best;
+            let data = astc::encode_rgba8(img, *w, *h, &opts).unwrap();
             let mut dec = vec![0u8; img.len()];
             astc::decode_rgba8_into(&data, *w, *h, 1, fp, AstcProfile::Ldr, &mut dec).unwrap();
             p_ours += psnr_img(img, &dec);
@@ -1294,8 +1314,26 @@ fn cmd_es1(args: &[String]) -> bool {
                 hi = q;
             }
         }
-        let (_, t_none) = astcenc_at(none, q, fp, &imgs, tmp);
-        let (_, t_avx2) = astcenc_at(avx2, q, fp, &imgs, tmp);
+        // Timing: ABBA rounds (order reversed every round), minimum per arm,
+        // so a burst of background load hits one sample, not one arm.
+        let ours_once = || {
+            let t = std::time::Instant::now();
+            for (_, w, h, img) in &imgs {
+                std::hint::black_box(astc::encode_rgba8(img, *w, *h, &opts).unwrap());
+            }
+            t.elapsed().as_secs_f64()
+        };
+        let (mut t_ours, mut t_none, mut t_avx2) = (f64::MAX, f64::MAX, f64::MAX);
+        for r in 0..ES1_ROUNDS {
+            for arm in 0..3 {
+                let a = if r % 2 == 0 { arm } else { 2 - arm };
+                match a {
+                    0 => t_ours = t_ours.min(ours_once()),
+                    1 => t_none = t_none.min(astcenc_at(none, q, fp, &imgs, tmp).1),
+                    _ => t_avx2 = t_avx2.min(astcenc_at(avx2, q, fp, &imgs, tmp).1),
+                }
+            }
+        }
         let (r_ours, r_none, r_avx2) = (px / t_ours / 1e6, px / t_none / 1e6, px / t_avx2 / 1e6);
         println!(
             "| {fp} | {p_ours:.3} | {r_ours:.3} | {q:.2} | {p_ref:.3} | {r_none:.3} | {r_avx2:.3} | {:.2} | {:.2} |",
@@ -1542,6 +1580,7 @@ fn main() {
         Some("quality") => cmd_quality(&args[2..]),
         Some("blockdbg") => cmd_blockdbg(&args[2..]),
         Some("es1") => cmd_es1(&args[2..]),
+        Some("mosaic") => cmd_mosaic(&args[2..]),
         Some("ktx2out") => cmd_ktx2out(&args[2..]),
         Some("ec1x") => cmd_ec1x(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
