@@ -18,3 +18,7 @@ rusty_alloc-api = "=2.5.0"
 
 [profile.release]
 debug = 1
+
+[features]
+# Dev-only: RUSTY_DDS_ASTC_* search-limit overrides (rusty_dds `tuning`).
+tuning = ["rusty_dds/tuning"]

@@ -72,8 +72,30 @@ impl AstcEncodeOptions {
 }
 
 pub(crate) fn params(p: AstcPreset) -> Params {
+    #[allow(unused_mut)]
+    let mut prm = preset_params(p);
+    // DEVELOPMENT ONLY (feature `tuning`): sweep the search limits through
+    // RUSTY_DDS_ASTC_* environment variables. A shipped build never reads them.
+    #[cfg(feature = "tuning")]
+    {
+        let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
+        if let Some(v) = get("RUSTY_DDS_ASTC_PARTS") { prm.max_partitions = v as u8; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part2_candidates = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_EXACT") { prm.exact_candidates = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE") { prm.refine = v as u8; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_REFINE_TOP") { prm.refine_top = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL") { prm.dual_plane = v != 0.0; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_DUAL_CORR") { prm.dual_corr_limit = v; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_GRID_ITERS") { prm.grid_iters = v as u8; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_SKIP") { prm.part2_skip_err = v; }
+    }
+    prm
+}
+
+fn preset_params(p: AstcPreset) -> Params {
     match p {
         AstcPreset::Fastest => Params {
+            refine_top: 1,
             max_partitions: 2,
             part2_candidates: 1,
             exact_candidates: 2,
@@ -84,6 +106,7 @@ pub(crate) fn params(p: AstcPreset) -> Params {
             part2_skip_err: 4.0,
         },
         AstcPreset::Fast => Params {
+            refine_top: 1,
             max_partitions: 2,
             part2_candidates: 2,
             exact_candidates: 3,
@@ -94,6 +117,7 @@ pub(crate) fn params(p: AstcPreset) -> Params {
             part2_skip_err: 2.0,
         },
         AstcPreset::Medium => Params {
+            refine_top: 2,
             max_partitions: 2,
             part2_candidates: 4,
             exact_candidates: 4,
@@ -104,6 +128,7 @@ pub(crate) fn params(p: AstcPreset) -> Params {
             part2_skip_err: 1.0,
         },
         AstcPreset::Thorough | AstcPreset::Exhaustive => Params {
+            refine_top: 3,
             max_partitions: 2,
             part2_candidates: 8,
             exact_candidates: 8,

@@ -41,8 +41,10 @@ pub(crate) struct Params {
     pub part2_candidates: usize,
     /// Candidates (mode x endpoint class) encoded exactly per partitioning.
     pub exact_candidates: usize,
-    /// Weight/endpoint refinement passes per exact candidate.
+    /// Weight/endpoint refinement passes, for the best `refine_top`
+    /// candidates after one unrefined pass over all of them.
     pub refine: u8,
+    pub refine_top: usize,
     /// Try dual-plane modes when one channel is poorly correlated.
     pub dual_plane: bool,
     /// Lowest inter-channel correlation below which dual plane is tried.
@@ -703,6 +705,7 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
         }
     }
     let mut refined = alloc::vec![false; ng];
+    let mut tried: Vec<(f64, usize, [u8; 64], [u8; 64])> = Vec::with_capacity(keep.len());
     for &i in &keep {
         let c = &cands[i];
         let g = ctx.modes[c.mode].grid as usize;
@@ -720,7 +723,16 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
         if dual {
             quantize_weights(ctx.modes[c.mode].range as usize, &dec2[g][..count], &mut gw2[..count]);
         }
-        exact_candidate(ctx, prm, src, fit, c, gw1, gw2, best);
+        // One unrefined pass for every kept candidate ...
+        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best);
+        tried.push((e, i, gw1, gw2));
+    }
+    // ... and the refinement passes only for the best few.
+    if prm.refine > 0 {
+        tried.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        for &(_, i, gw1, gw2) in tried.iter().take(prm.refine_top.max(1)) {
+            exact_candidate(ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best);
+        }
     }
 }
 
@@ -742,6 +754,8 @@ fn residual(ctx: &Ctx, grid: usize, dec: &[f32; 64], ideal: &[f32; MAX_TEXELS], 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Encode one candidate exactly with `refine` weight/endpoint passes; updates
+/// `best` and returns the lowest exact error this candidate reached.
 fn exact_candidate(
     ctx: &Ctx,
     prm: &Params,
@@ -750,8 +764,10 @@ fn exact_candidate(
     cand: &Cand,
     gw1: [u8; 64],
     gw2: [u8; 64],
+    refine: u8,
     best: &mut Best,
-) {
+) -> f64 {
+    let mut mine = f64::MAX;
     let m: Mode = ctx.modes[cand.mode];
     let g = m.grid as usize;
     let count = ctx.grids[g].count;
@@ -762,7 +778,7 @@ fn exact_candidate(
     let mut encs: Vec<(u8, [u8; 8])> = Vec::new();
     let mut eff1 = [0u8; MAX_TEXELS];
     let mut eff2 = [0u8; MAX_TEXELS];
-    for _pass in 0..=prm.refine {
+    for _pass in 0..=refine {
         infill_eff(ctx, g, &gw1, &mut eff1);
         if dual {
             infill_eff(ctx, g, &gw2, &mut eff2);
@@ -825,7 +841,8 @@ fn exact_candidate(
                 }
             }
         }
-        let Some((err, cemv)) = pick else { return };
+        let Some((err, cemv)) = pick else { return mine };
+        mine = mine.min(err);
         if err < best.err {
             let mut s = SymbolicBlock::empty_normal();
             s.mode = m.mode;
@@ -855,7 +872,7 @@ fn exact_candidate(
             best.err = err;
             best.sym = s;
         }
-        if _pass == prm.refine {
+        if _pass == refine {
             break;
         }
         // Re-derive ideal weights from the decoded endpoints of the chosen
@@ -895,6 +912,7 @@ fn exact_candidate(
             quantize_weights(m.range as usize, &d2[..count], &mut gw2[..count]);
         }
     }
+    mine
 }
 
 /// Two-means clustering of the block's colours; returns labels.
