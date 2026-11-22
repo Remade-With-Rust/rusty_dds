@@ -16,6 +16,8 @@
 #[cfg(target_arch = "x86_64")]
 pub(super) use self::avx2::{decimate, residual, Avx2};
 #[cfg(target_arch = "x86_64")]
+pub(super) use self::popcnt::{rank_patterns, Popcnt};
+#[cfg(target_arch = "x86_64")]
 pub(super) use self::sse2::part_err_acc;
 
 #[cfg(target_arch = "x86_64")]
@@ -189,6 +191,63 @@ mod sse2 {
             }
         }
         Some(acc)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod popcnt {
+    use super::super::block::rank_patterns_body;
+    use super::super::context::PartBits;
+    use alloc::vec::Vec;
+
+    /// Proof that the CPU has POPCNT: only [`Popcnt::detect`] makes one.
+    #[derive(Clone, Copy)]
+    pub(in crate::astc::encode) struct Popcnt(());
+
+    impl Popcnt {
+        /// `Some` when the CPU reports POPCNT (with the development-only
+        /// `tuning` feature, `RUSTY_DDS_ASTC_NO_AVX2` also turns this off).
+        pub(in crate::astc::encode) fn detect() -> Option<Self> {
+            #[cfg(feature = "tuning")]
+            if std::env::var_os("RUSTY_DDS_ASTC_NO_AVX2").is_some() {
+                return None;
+            }
+            if std::is_x86_feature_detected!("popcnt") {
+                Some(Popcnt(()))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// `block::rank_patterns` compiled with POPCNT: the same body (integer
+    /// popcounts, so the same ranking), `count_ones` as one instruction
+    /// instead of the baseline bit-twiddling sequence.
+    pub(in crate::astc::encode) fn rank_patterns(
+        _: Popcnt,
+        bits: &[PartBits],
+        labels: &[u8],
+        k: usize,
+        m: usize,
+        top: &mut Vec<(u32, usize)>,
+    ) {
+        // SAFETY: a `Popcnt` exists only if the CPU supports POPCNT; the
+        // body is safe code with no other requirement.
+        unsafe { rank_k(bits, labels, k, m, top) }
+    }
+
+    /// # Safety
+    ///
+    /// The CPU supports POPCNT.
+    #[target_feature(enable = "popcnt")]
+    unsafe fn rank_k(
+        bits: &[PartBits],
+        labels: &[u8],
+        k: usize,
+        m: usize,
+        top: &mut Vec<(u32, usize)>,
+    ) {
+        rank_patterns_body(bits, labels, k, m, top)
     }
 }
 

@@ -1331,8 +1331,8 @@ fn mismatch(pattern: &[u8], labels: &[u8], k: usize) -> u32 {
 /// popcounts; the last row and column follow from the row sums (pattern
 /// partition sizes) and column sums (cluster sizes). Integer counts, so the
 /// matrix, and the result, are exactly the walk's.
-#[inline]
-fn mismatch_bits(pat: &PartBits, lab: &PartBits, k: usize, words: usize) -> u32 {
+#[inline(always)]
+pub(super) fn mismatch_bits(pat: &PartBits, lab: &PartBits, k: usize, words: usize) -> u32 {
     let (pb, pc, lb, lc) = (&pat.bits, &pat.cnt, &lab.bits, &lab.cnt);
     let mut cm = [[0u32; 4]; 4];
     let last = k - 1;
@@ -1362,9 +1362,29 @@ fn mismatch_bits(pat: &PartBits, lab: &PartBits, k: usize, words: usize) -> u32 
 /// The best `m` patterns (three or four partitions) by [`mismatch_bits`]
 /// with the clustering `labels`, ties by pattern index, into `top` (empty on
 /// entry). Kept out of line: inlined, it re-rolled the two-partition ranking
-/// loop beside it (+0.12% Ir at Fast).
+/// loop beside it (+0.12% Ir at Fast). With the POPCNT instruction it runs
+/// as `simd::rank_patterns` (the same body compiled for it).
 #[inline(never)]
 fn rank_patterns(
+    ctx: &Ctx,
+    bits: &[PartBits],
+    labels: &[u8],
+    k: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.popcnt {
+        return super::simd::rank_patterns(t, bits, labels, k, m, top);
+    }
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let _ = ctx;
+    rank_patterns_body(bits, labels, k, m, top);
+}
+
+/// The body of [`rank_patterns`] (inlined into each instruction-set variant).
+#[inline(always)]
+pub(super) fn rank_patterns_body(
     bits: &[PartBits],
     labels: &[u8],
     k: usize,
@@ -1544,7 +1564,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             }
         } else {
             let bits = if k == 3 { &ctx.bits3 } else { &ctx.bits4 };
-            rank_patterns(bits, &labels[..n], k, m, top);
+            rank_patterns(ctx, bits, &labels[..n], k, m, top);
         }
         for (j, &(_, pi)) in top.iter().enumerate() {
             let p = &pats[pi];
