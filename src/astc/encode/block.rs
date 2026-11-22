@@ -177,6 +177,19 @@ pub(crate) struct FitPool {
     fits: Vec<Fit>,
     order: Vec<usize>,
     top: Vec<(u32, usize)>,
+    search: SearchScratch,
+}
+
+/// The mode search's working vectors, reused across calls (cleared, never
+/// shrunk): one allocation each per encode call instead of per fit / per
+/// candidate.
+#[derive(Default)]
+struct SearchScratch {
+    cands: Vec<Cand>,
+    top: Vec<usize>,
+    keep: Vec<usize>,
+    tried: Vec<(f64, usize, [u8; 64], [u8; 64])>,
+    encs: Vec<(u8, [u8; 8])>,
 }
 
 /// The best block found so far.
@@ -680,7 +693,14 @@ struct Cand {
 /// grid) plus the expected quantisation noise of its weight range (scaled by
 /// how much the grid's infill averages it away) plus the expected endpoint
 /// quantisation error at the colour range the remaining bits allow.
-fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
+fn search_fit(
+    ctx: &Ctx,
+    prm: &Params,
+    src: &Src,
+    fit: &Fit,
+    best: &mut Best,
+    ss: &mut SearchScratch,
+) {
     let dual = fit.ccs < 4;
     let n = src.n;
     let cls = classes(src);
@@ -725,7 +745,14 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     sc.dec_err.iter_mut().for_each(|v| *v = -1.0);
     sc.refined.iter_mut().for_each(|v| *v = false);
     let (dec_err, dec1, dec2, refined) = (&mut sc.dec_err, &mut sc.dec1, &mut sc.dec2, &mut sc.refined);
-    let mut cands: Vec<Cand> = Vec::with_capacity(ctx.modes.len() * 2);
+    let SearchScratch {
+        cands,
+        top,
+        keep,
+        tried,
+        encs,
+    } = ss;
+    cands.clear();
     let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
     // The best k by estimate, ties by candidate index (a total order; index
     // order is mode order), kept while the candidates are generated. The grid
@@ -735,7 +762,7 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     // that rest the candidate cannot get in (the k-th estimate only falls).
     // The selected set is exactly the one a full evaluation selects.
     let k = prm.exact_candidates.max(1);
-    let mut top: Vec<usize> = Vec::with_capacity(k + 1);
+    top.clear();
     for (mi, m) in ctx.modes.iter().enumerate() {
         if m.dual != dual {
             continue;
@@ -785,8 +812,9 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
     // Each kept mode also gets its other endpoint classes (adjacent entries:
     // candidates are pushed per mode, class after class), each at the colour
     // range its own value count allows.
-    let mut keep: Vec<usize> = top.clone();
-    for &t in &top {
+    keep.clear();
+    keep.extend_from_slice(top);
+    for &t in top.iter() {
         let m = cands[t].mode;
         let mut j = t;
         while j > 0 && cands[j - 1].mode == m {
@@ -799,8 +827,8 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             j += 1;
         }
     }
-    let mut tried: Vec<(f64, usize, [u8; 64], [u8; 64])> = Vec::with_capacity(keep.len());
-    for &i in &keep {
+    tried.clear();
+    for &i in keep.iter() {
         let c = &cands[i];
         let g = ctx.modes[c.mode].grid as usize;
         if !refined[g] && prm.grid_iters > 0 {
@@ -818,14 +846,14 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             quantize_weights(ctx.modes[c.mode].range as usize, &dec2[g][..count], &mut gw2[..count]);
         }
         // One unrefined pass for every kept candidate ...
-        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best);
+        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best, encs);
         tried.push((e, i, gw1, gw2));
     }
     // ... and the refinement passes only for the best few.
     if prm.refine > 0 {
         tried.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         for &(_, i, gw1, gw2) in tried.iter().take(prm.refine_top.max(1)) {
-            exact_candidate(ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best);
+            exact_candidate(ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best, encs);
         }
     }
 }
@@ -860,6 +888,7 @@ fn exact_candidate(
     gw2: [u8; 64],
     refine: u8,
     best: &mut Best,
+    encs: &mut Vec<(u8, [u8; 8])>,
 ) -> f64 {
     let mut mine = f64::MAX;
     let m: Mode = ctx.modes[cand.mode];
@@ -869,7 +898,6 @@ fn exact_candidate(
     let parts = fit.parts as usize;
     let mut gw1 = gw1;
     let mut gw2 = gw2;
-    let mut encs: Vec<(u8, [u8; 8])> = Vec::new();
     let mut eff1 = [0u8; MAX_TEXELS];
     let mut eff2 = [0u8; MAX_TEXELS];
     for _pass in 0..=refine {
@@ -900,7 +928,7 @@ fn exact_candidate(
         let mut total_by_cem: [(f64, bool); 16] = [(0.0, true); 16];
         let mut chosen: [[(f64, [u8; 8]); 4]; 16] = [[(f64::MAX, [0; 8]); 4]; 16];
         for p in 0..parts {
-            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, &mut encs);
+            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, encs);
             // Same-budget alternatives: a class with no more values fits the
             // candidate's colour range too.
             let mut extra: Vec<(u8, [u8; 8])> = Vec::new();
@@ -1193,14 +1221,19 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
     };
     let zeros = [0u8; MAX_TEXELS];
     let mut pool = ctx.fits.borrow_mut();
-    let FitPool { fits, order, top } = &mut *pool;
+    let FitPool {
+        fits,
+        order,
+        top,
+        search,
+    } = &mut *pool;
     let most = prm.part_candidates.iter().copied().max().unwrap_or(0);
     // Grows once per encode call (the slot count depends only on the preset).
     while fits.len() < 2 + most {
         fits.push(Fit::new());
     }
     make_fit(&mut fits[0], &src, 1, 0, &zeros, 4);
-    search_fit(ctx, prm, &src, &fits[0], &mut best);
+    search_fit(ctx, prm, &src, &fits[0], &mut best, search);
     // Early out: stop after the one-partition search when the block is
     // already good enough. The threshold is a per-channel MSE that grows with
     // the square of the texel count (larger blocks are allowed more error),
@@ -1215,7 +1248,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
         let (c, r2) = weakest_channel(&src);
         if c < 4 && r2 < prm.dual_corr_limit * prm.dual_corr_limit {
             make_fit(&mut fits[1], &src, 1, 0, &zeros, c);
-            search_fit(ctx, prm, &src, &fits[1], &mut best);
+            search_fit(ctx, prm, &src, &fits[1], &mut best, search);
         }
     }
     for k in 2..=prm.max_partitions.min(4) as usize {
@@ -1270,7 +1303,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             if fitk.perp as f64 >= best.err {
                 break;
             }
-            search_fit(ctx, prm, &src, fitk, &mut best);
+            search_fit(ctx, prm, &src, fitk, &mut best, search);
         }
     }
     best
