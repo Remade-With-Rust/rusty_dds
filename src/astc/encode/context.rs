@@ -40,6 +40,17 @@ pub(crate) struct Ctx {
     /// them), every partition non-empty, exact duplicates removed.
     pub part3: Vec<Partitioning>,
     pub part4: Vec<Partitioning>,
+    /// Per-fit working buffers, reused across blocks (the context is owned
+    /// by one encode call; nothing here outlives it).
+    pub scratch: core::cell::RefCell<Scratch>,
+}
+
+/// Reusable per-fit buffers of the mode search.
+pub(crate) struct Scratch {
+    pub dec_err: Vec<f32>,
+    pub dec1: Vec<[f32; 64]>,
+    pub dec2: Vec<[f32; 64]>,
+    pub refined: Vec<bool>,
 }
 
 fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
@@ -155,6 +166,7 @@ impl Ctx {
         }
         let part3 = if max_partitions >= 3 { build_parts(fp, 3) } else { Vec::new() };
         let part4 = if max_partitions >= 4 { build_parts(fp, 4) } else { Vec::new() };
+        let ng = grids.len();
         Ctx {
             texels,
             grids,
@@ -162,6 +174,12 @@ impl Ctx {
             part2,
             part3,
             part4,
+            scratch: core::cell::RefCell::new(Scratch {
+                dec_err: alloc::vec![-1.0; ng],
+                dec1: alloc::vec![[0.0; 64]; ng],
+                dec2: alloc::vec![[0.0; 64]; ng],
+                refined: alloc::vec![false; ng],
+            }),
         }
     }
 }

@@ -638,11 +638,12 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
         }
     }
     // Per grid: decimated weights and the residual of their (unquantised) infill.
-    let ng = ctx.grids.len();
-    let mut dec_err: Vec<f32> = alloc::vec![-1.0; ng];
-    let mut dec1: Vec<[f32; 64]> = alloc::vec![[0.0; 64]; ng];
-    let mut dec2: Vec<[f32; 64]> = alloc::vec![[0.0; 64]; ng];
-    let mut cands: Vec<Cand> = Vec::new();
+    let mut sc = ctx.scratch.borrow_mut();
+    let sc = &mut *sc;
+    sc.dec_err.iter_mut().for_each(|v| *v = -1.0);
+    sc.refined.iter_mut().for_each(|v| *v = false);
+    let (dec_err, dec1, dec2, refined) = (&mut sc.dec_err, &mut sc.dec1, &mut sc.dec2, &mut sc.refined);
+    let mut cands: Vec<Cand> = Vec::with_capacity(ctx.modes.len() * 2);
     let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
     for (mi, m) in ctx.modes.iter().enumerate() {
         if m.dual != dual {
@@ -705,7 +706,6 @@ fn search_fit(ctx: &Ctx, prm: &Params, src: &Src, fit: &Fit, best: &mut Best) {
             j += 1;
         }
     }
-    let mut refined = alloc::vec![false; ng];
     let mut tried: Vec<(f64, usize, [u8; 64], [u8; 64])> = Vec::with_capacity(keep.len());
     for &i in &keep {
         let c = &cands[i];
