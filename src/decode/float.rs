@@ -62,6 +62,9 @@ pub enum SingleChannel {
 pub struct DecodeOptions {
     /// How BC4 and the other one-channel formats fill green and blue.
     pub single_channel: SingleChannel,
+    /// Profile override for ASTC surfaces (see `DecodeOptions::astc_profile`).
+    #[cfg(feature = "astc")]
+    pub(crate) astc_profile: Option<crate::astc::AstcProfile>,
 }
 
 impl DecodeOptions {
@@ -69,6 +72,8 @@ impl DecodeOptions {
     pub const fn new() -> Self {
         DecodeOptions {
             single_channel: SingleChannel::Red,
+            #[cfg(feature = "astc")]
+            astc_profile: None,
         }
     }
 

@@ -104,7 +104,13 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// (stored sRGB bytes are not linearized — same policy as decode).
     pub fn upload_plan_decoded_rgba8(&self, id: SubresourceId) -> Result<UploadPlan, Error> {
         // Ensure we can decode this content (even if gpu_format fails for exotic forms).
-        let _ = self.rgba8_content()?;
+        #[cfg(all(feature = "astc", feature = "decode"))]
+        let decodable = self.astc_content().is_ok() || self.rgba8_content().is_ok();
+        #[cfg(not(all(feature = "astc", feature = "decode")))]
+        let decodable = self.rgba8_content().is_ok();
+        if !decodable {
+            self.rgba8_content()?;
+        }
         let surf = self.surface(id)?;
         let pixels = (surf.width as usize)
             .checked_mul(surf.height as usize)
@@ -266,7 +272,59 @@ fn gpu_format_from_dxgi(format: DxgiFormat) -> Result<GpuFormat, Error> {
             block_height: 1,
             compressed: false,
         },
-        _ => return Err(Error::UnsupportedFormat),
+        f => match f.astc_info() {
+            Some((w, h, srgb)) => astc_gpu_format(w, h, srgb)?,
+            None => return Err(Error::UnsupportedFormat),
+        },
+    })
+}
+
+/// `(block w, block h, sRGB, DXGI name, wgpu name, Vulkan name)` for the 2D
+/// ASTC formats a DDS can carry.
+const ASTC_GPU: [(u32, u32, bool, &str, &str, &str); 28] = [
+    (4, 4, false, "ASTC_4X4_UNorm", "Astc { block: B4x4, channel: Unorm }", "VK_FORMAT_ASTC_4x4_UNORM_BLOCK"),
+    (4, 4, true, "ASTC_4X4_UNorm_sRGB", "Astc { block: B4x4, channel: UnormSrgb }", "VK_FORMAT_ASTC_4x4_SRGB_BLOCK"),
+    (5, 4, false, "ASTC_5X4_UNorm", "Astc { block: B5x4, channel: Unorm }", "VK_FORMAT_ASTC_5x4_UNORM_BLOCK"),
+    (5, 4, true, "ASTC_5X4_UNorm_sRGB", "Astc { block: B5x4, channel: UnormSrgb }", "VK_FORMAT_ASTC_5x4_SRGB_BLOCK"),
+    (5, 5, false, "ASTC_5X5_UNorm", "Astc { block: B5x5, channel: Unorm }", "VK_FORMAT_ASTC_5x5_UNORM_BLOCK"),
+    (5, 5, true, "ASTC_5X5_UNorm_sRGB", "Astc { block: B5x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_5x5_SRGB_BLOCK"),
+    (6, 5, false, "ASTC_6X5_UNorm", "Astc { block: B6x5, channel: Unorm }", "VK_FORMAT_ASTC_6x5_UNORM_BLOCK"),
+    (6, 5, true, "ASTC_6X5_UNorm_sRGB", "Astc { block: B6x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_6x5_SRGB_BLOCK"),
+    (6, 6, false, "ASTC_6X6_UNorm", "Astc { block: B6x6, channel: Unorm }", "VK_FORMAT_ASTC_6x6_UNORM_BLOCK"),
+    (6, 6, true, "ASTC_6X6_UNorm_sRGB", "Astc { block: B6x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_6x6_SRGB_BLOCK"),
+    (8, 5, false, "ASTC_8X5_UNorm", "Astc { block: B8x5, channel: Unorm }", "VK_FORMAT_ASTC_8x5_UNORM_BLOCK"),
+    (8, 5, true, "ASTC_8X5_UNorm_sRGB", "Astc { block: B8x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x5_SRGB_BLOCK"),
+    (8, 6, false, "ASTC_8X6_UNorm", "Astc { block: B8x6, channel: Unorm }", "VK_FORMAT_ASTC_8x6_UNORM_BLOCK"),
+    (8, 6, true, "ASTC_8X6_UNorm_sRGB", "Astc { block: B8x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x6_SRGB_BLOCK"),
+    (8, 8, false, "ASTC_8X8_UNorm", "Astc { block: B8x8, channel: Unorm }", "VK_FORMAT_ASTC_8x8_UNORM_BLOCK"),
+    (8, 8, true, "ASTC_8X8_UNorm_sRGB", "Astc { block: B8x8, channel: UnormSrgb }", "VK_FORMAT_ASTC_8x8_SRGB_BLOCK"),
+    (10, 5, false, "ASTC_10X5_UNorm", "Astc { block: B10x5, channel: Unorm }", "VK_FORMAT_ASTC_10x5_UNORM_BLOCK"),
+    (10, 5, true, "ASTC_10X5_UNorm_sRGB", "Astc { block: B10x5, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x5_SRGB_BLOCK"),
+    (10, 6, false, "ASTC_10X6_UNorm", "Astc { block: B10x6, channel: Unorm }", "VK_FORMAT_ASTC_10x6_UNORM_BLOCK"),
+    (10, 6, true, "ASTC_10X6_UNorm_sRGB", "Astc { block: B10x6, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x6_SRGB_BLOCK"),
+    (10, 8, false, "ASTC_10X8_UNorm", "Astc { block: B10x8, channel: Unorm }", "VK_FORMAT_ASTC_10x8_UNORM_BLOCK"),
+    (10, 8, true, "ASTC_10X8_UNorm_sRGB", "Astc { block: B10x8, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x8_SRGB_BLOCK"),
+    (10, 10, false, "ASTC_10X10_UNorm", "Astc { block: B10x10, channel: Unorm }", "VK_FORMAT_ASTC_10x10_UNORM_BLOCK"),
+    (10, 10, true, "ASTC_10X10_UNorm_sRGB", "Astc { block: B10x10, channel: UnormSrgb }", "VK_FORMAT_ASTC_10x10_SRGB_BLOCK"),
+    (12, 10, false, "ASTC_12X10_UNorm", "Astc { block: B12x10, channel: Unorm }", "VK_FORMAT_ASTC_12x10_UNORM_BLOCK"),
+    (12, 10, true, "ASTC_12X10_UNorm_sRGB", "Astc { block: B12x10, channel: UnormSrgb }", "VK_FORMAT_ASTC_12x10_SRGB_BLOCK"),
+    (12, 12, false, "ASTC_12X12_UNorm", "Astc { block: B12x12, channel: Unorm }", "VK_FORMAT_ASTC_12x12_UNORM_BLOCK"),
+    (12, 12, true, "ASTC_12X12_UNorm_sRGB", "Astc { block: B12x12, channel: UnormSrgb }", "VK_FORMAT_ASTC_12x12_SRGB_BLOCK"),
+];
+
+fn astc_gpu_format(w: u32, h: u32, srgb: bool) -> Result<GpuFormat, Error> {
+    let r = ASTC_GPU
+        .iter()
+        .find(|r| r.0 == w && r.1 == h && r.2 == srgb)
+        .ok_or(Error::UnsupportedFormat)?;
+    Ok(GpuFormat {
+        dxgi_name: r.3,
+        wgpu_name: r.4,
+        vulkan_name: r.5,
+        block_bytes: 16,
+        block_width: w,
+        block_height: h,
+        compressed: true,
     })
 }
 

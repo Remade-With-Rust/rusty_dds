@@ -2650,9 +2650,16 @@ dependencies = [
  "num-traits",
  "png 0.17.16",
  "rfd",
+ "rusty_zstd",
  "serde_json",
  "tiff",
 ]
+
+[[package]]
+name = "rusty_zstd"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "864f2400b06de8b2491e0991790c5f01681c254a428636529c97ec26159efe42"
 
 [[package]]
 name = "same-file"

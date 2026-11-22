@@ -55,6 +55,17 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// post-pass, call [`DdsBase::decode_rgba8_with`] with
     /// [`SingleChannel::Grey`].
     pub fn decode_rgba8(&self, id: SubresourceId) -> Result<ImageRgba8, Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            let mut pixels = Vec::new();
+            let (width, height, depth) = self.astc_decode_rgba8_into(id, c, DecodeOptions::new(), &mut pixels)?;
+            return Ok(ImageRgba8 {
+                width,
+                height,
+                depth,
+                pixels,
+            });
+        }
         let surf = self.surface(id)?;
         let (kind, opaque) = self.rgba8_content()?;
         let mut pixels =
@@ -95,6 +106,17 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         id: SubresourceId,
         opts: DecodeOptions,
     ) -> Result<ImageRgba8, Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            let mut pixels = Vec::new();
+            let (width, height, depth) = self.astc_decode_rgba8_into(id, c, opts, &mut pixels)?;
+            return Ok(ImageRgba8 {
+                width,
+                height,
+                depth,
+                pixels,
+            });
+        }
         let mut img = self.decode_rgba8(id)?;
         apply_grey_u8(self.rgba8_content()?.0, opts, &mut img.pixels);
         Ok(img)
@@ -107,6 +129,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<u8>,
         opts: DecodeOptions,
     ) -> Result<(u32, u32, u32), Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_decode_rgba8_into(id, c, opts, dst);
+        }
         let dims = self.decode_rgba8_into(id, dst)?;
         apply_grey_u8(self.rgba8_content()?.0, opts, dst);
         Ok(dims)
@@ -199,6 +225,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<f32>,
         opts: DecodeOptions,
     ) -> Result<(u32, u32, u32), Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_decode_rgba_f32_into(id, c, opts, dst);
+        }
         let kind = self.f32_kind()?;
         let surf = self.surface(id)?;
         let (w, h, d) = (surf.width, surf.height, surf.depth.max(1));
@@ -288,6 +318,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         rows: core::ops::Range<u32>,
         dst: &mut [f32],
     ) -> Result<(), Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_decode_block_rows_f32_into(id, c, rows, dst);
+        }
         let kind = self.f32_kind()?;
         let surf = self.surface(id)?;
         if surf.depth.max(1) != 1 {
@@ -327,6 +361,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// [`DdsBase::decode_block_rows_f32_into`] splits on. Four pixel rows for
     /// block-compressed formats, one for uncompressed.
     pub fn block_rows_f32(&self, id: SubresourceId) -> Result<u32, Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_block_rows(id, c);
+        }
         let kind = self.f32_kind()?;
         Ok(self.surface(id)?.height.div_ceil(kind.block_height()))
     }
@@ -542,6 +580,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         dst: &mut Vec<u8>,
     ) -> Result<(u32, u32, u32), Error> {
         let surf = self.surface(id)?;
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_decode_rgba8_into(id, c, DecodeOptions::new(), dst);
+        }
         let (kind, opaque) = self.rgba8_content()?;
         let (w, h, d) = (surf.width, surf.height, surf.depth.max(1));
 
@@ -633,6 +675,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         rows: core::ops::Range<u32>,
         dst: &mut [u8],
     ) -> Result<(), Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_decode_block_rows_into(id, c, rows, dst);
+        }
         let surf = self.surface(id)?;
         let (kind, opaque) = self.rgba8_content()?;
         if surf.depth.max(1) != 1 {
@@ -668,6 +714,10 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// Block rows in one subresource — the unit [`DdsBase::decode_block_rows_into`]
     /// splits on. Four pixel rows each for BCn, one for uncompressed formats.
     pub fn block_rows(&self, id: SubresourceId) -> Result<u32, Error> {
+        #[cfg(feature = "astc")]
+        if let Ok(c) = self.astc_content() {
+            return self.astc_block_rows(id, c);
+        }
         let surf = self.surface(id)?;
         let bh = block_height(self.rgba8_content()?.0);
         Ok(surf.height.div_ceil(bh))

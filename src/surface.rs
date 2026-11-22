@@ -230,8 +230,12 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         let min_size = self.get_min_mipmap_size_in_bytes();
         let mut offset = base;
         let data_len = self.data.as_ref().len();
+        let exact = self.has_exact_mip_chain();
+        if exact {
+            current = self.exact_mip_size(0).ok_or(Error::UnsupportedFormat)?;
+        }
         let mut out = Vec::with_capacity(levels as usize);
-        for _ in 0..levels {
+        for level in 0..levels {
             let start = offset as usize;
             let end = start
                 .checked_add(current as usize)
@@ -241,6 +245,12 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             }
             out.push(start..end);
             offset = offset.checked_add(current).ok_or(Error::OutOfBounds)?;
+            if exact {
+                current = self
+                    .exact_mip_size(level.saturating_add(1))
+                    .ok_or(Error::UnsupportedFormat)?;
+                continue;
+            }
             current /= 4;
             if current < min_size {
                 current = min_size;
@@ -302,12 +312,22 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             .get_main_texture_size()
             .ok_or(Error::UnsupportedFormat)?;
         let min_size = self.get_min_mipmap_size_in_bytes();
+        let exact = self.has_exact_mip_chain();
+        if exact {
+            current = self.exact_mip_size(0).ok_or(Error::UnsupportedFormat)?;
+        }
         let mut offset = 0_u32;
         for level in 0..levels {
             if level == mip {
                 return Ok((offset, current));
             }
             offset = offset.checked_add(current).ok_or(Error::OutOfBounds)?;
+            if exact {
+                current = self
+                    .exact_mip_size(level + 1)
+                    .ok_or(Error::UnsupportedFormat)?;
+                continue;
+            }
             current /= 4;
             if current < min_size {
                 current = min_size;

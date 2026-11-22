@@ -28,7 +28,7 @@ arbitrary = { version = "1", features = ["derive"] }
 
 [dependencies.rusty_dds]
 path = ".."
-features = ["decode", "encode", "astc"]
+features = ["decode", "encode", "astc", "ktx2-zstd"]
 
 [profile.release]
 debug = 1
@@ -54,5 +54,11 @@ doc = false
 [[bin]]
 name = "astc_decode"
 path = "fuzz_targets/astc_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "astc_container"
+path = "fuzz_targets/astc_container.rs"
 test = false
 doc = false
