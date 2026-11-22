@@ -80,8 +80,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
+      # Pinned release tarball: the install script resolves "latest" through
+      # the GitHub API and breaks when that call is rate-limited.
       - name: Install wasmtime
-        run: curl -sSf https://wasmtime.dev/install.sh | bash
+        run: |
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v27.0.0/wasmtime-v27.0.0-x86_64-linux.tar.xz | tar -xJ -C "$HOME"
+          mkdir -p "$HOME/.wasmtime/bin"
+          mv "$HOME/wasmtime-v27.0.0-x86_64-linux/wasmtime" "$HOME/.wasmtime/bin/"
       - run: |
           export PATH="$HOME/.wasmtime/bin:$PATH"
+          wasmtime --version
           CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test --release --target wasm32-wasip1 --no-default-features --features decode,encode,astc --test astc_determinism
