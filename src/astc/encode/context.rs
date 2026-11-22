@@ -30,6 +30,26 @@ pub(crate) struct Partitioning {
     pub bits: [u64; 4],
 }
 
+/// A three- or four-partition pattern's partitions as bitsets (texel i is
+/// bit i % 64 of word i / 64) and their sizes: the ranking's confusion
+/// matrix comes from popcounts of these instead of a per-texel walk.
+pub(crate) struct PartBits {
+    pub bits: [[u64; 4]; 4],
+    pub cnt: [u32; 4],
+}
+
+/// Per-label bitsets and counts of a labelling (labels < 4, at most 256 texels).
+pub(crate) fn label_bits(labels: &[u8]) -> PartBits {
+    let mut bits = [[0u64; 4]; 4];
+    let mut cnt = [0u32; 4];
+    for (i, &l) in labels.iter().enumerate() {
+        let l = (l & 3) as usize;
+        bits[l][(i >> 6) & 3] |= 1 << (i & 63);
+        cnt[l] += 1;
+    }
+    PartBits { bits, cnt }
+}
+
 pub(crate) struct Ctx {
     pub texels: usize,
     pub grids: Vec<Grid>,
@@ -40,6 +60,9 @@ pub(crate) struct Ctx {
     /// them), every partition non-empty, exact duplicates removed.
     pub part3: Vec<Partitioning>,
     pub part4: Vec<Partitioning>,
+    /// `label_bits` of each `part3` / `part4` pattern, same order.
+    pub bits3: Vec<PartBits>,
+    pub bits4: Vec<PartBits>,
     /// Per-fit working buffers, reused across blocks (the context is owned
     /// by one encode call; nothing here outlives it).
     pub scratch: core::cell::RefCell<Scratch>,
@@ -209,6 +232,8 @@ impl Ctx {
         } else {
             Vec::new()
         };
+        let bits3 = part3.iter().map(|p| label_bits(&p.labels)).collect();
+        let bits4 = part4.iter().map(|p| label_bits(&p.labels)).collect();
         let ng = grids.len();
         Ctx {
             texels,
@@ -217,6 +242,8 @@ impl Ctx {
             part2,
             part3,
             part4,
+            bits3,
+            bits4,
             scratch: core::cell::RefCell::new(Scratch {
                 dec_err: alloc::vec![-1.0; ng],
                 dec1: alloc::vec![[0.0; 64]; ng],

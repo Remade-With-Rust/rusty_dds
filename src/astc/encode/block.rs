@@ -24,7 +24,7 @@
 
 use alloc::vec::Vec;
 
-use super::context::{Ctx, Mode};
+use super::context::{label_bits, Ctx, Mode, PartBits};
 use crate::astc::cem;
 use crate::astc::ise::LEVELS;
 use crate::astc::parse::{BlockKind, SymbolicBlock};
@@ -1250,13 +1250,79 @@ const PERM4: [[u8; 4]; 24] = [
 ];
 
 /// Texels a pattern disagrees with a clustering on, under the best label
-/// matching (confusion matrix, all permutations).
+/// matching (confusion matrix, all permutations). The per-texel walk: the
+/// oracle of [`mismatch_bits`].
+#[cfg(test)]
 fn mismatch(pattern: &[u8], labels: &[u8], k: usize) -> u32 {
     let mut cm = [[0u32; 4]; 4];
     for (&a, &b) in pattern.iter().zip(labels) {
         cm[a as usize][b as usize] += 1;
     }
-    let n = pattern.len() as u32;
+    best_matching(&cm, pattern.len() as u32, k)
+}
+
+/// [`mismatch`] from per-label bitsets and counts (pattern, clustering;
+/// `words` 64-bit words of texels, every label < `k`).
+/// Only the leading `(k - 1) x (k - 1)` cells of the confusion matrix are
+/// popcounts; the last row and column follow from the row sums (pattern
+/// partition sizes) and column sums (cluster sizes). Integer counts, so the
+/// matrix, and the result, are exactly the walk's.
+#[inline]
+fn mismatch_bits(pat: &PartBits, lab: &PartBits, k: usize, words: usize) -> u32 {
+    let (pb, pc, lb, lc) = (&pat.bits, &pat.cnt, &lab.bits, &lab.cnt);
+    let mut cm = [[0u32; 4]; 4];
+    let last = k - 1;
+    for a in 0..last {
+        let mut row = 0;
+        for b in 0..last {
+            let mut s = 0;
+            for w in 0..words {
+                s += (pb[a][w] & lb[b][w]).count_ones();
+            }
+            cm[a][b] = s;
+            row += s;
+        }
+        cm[a][last] = pc[a] - row;
+    }
+    let mut row = 0;
+    for b in 0..last {
+        let col: u32 = (0..last).map(|a| cm[a][b]).sum();
+        cm[last][b] = lc[b] - col;
+        row += cm[last][b];
+    }
+    cm[last][last] = pc[last] - row;
+    let n = (0..k).map(|a| pc[a]).sum();
+    best_matching(&cm, n, k)
+}
+
+/// The best `m` patterns (three or four partitions) by [`mismatch_bits`]
+/// with the clustering `labels`, ties by pattern index, into `top` (empty on
+/// entry). Kept out of line: inlined, it re-rolled the two-partition ranking
+/// loop beside it (+0.12% Ir at Fast).
+#[inline(never)]
+fn rank_patterns(
+    bits: &[PartBits],
+    labels: &[u8],
+    k: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    let lab = label_bits(labels);
+    let words = labels.len().div_ceil(64);
+    for (pi, pb) in bits.iter().enumerate() {
+        let key = (mismatch_bits(pb, &lab, k, words), pi);
+        if top.len() == m && key >= top[m - 1] {
+            continue;
+        }
+        let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+        top.insert(pos, key);
+        top.truncate(m);
+    }
+}
+
+/// `n` minus the largest diagonal sum of the confusion matrix over all
+/// label permutations (k = 3 or 4).
+fn best_matching(cm: &[[u32; 4]; 4], n: u32, k: usize) -> u32 {
     let mut best = 0u32;
     if k == 3 {
         for p in PERM3.iter() {
@@ -1390,31 +1456,31 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             3 => &ctx.part3,
             _ => &ctx.part4,
         };
-        let mut lb = [0u64; 4];
         if k == 2 {
+            let mut lb = [0u64; 4];
             for i in 0..n {
                 if labels[i] == 1 {
                     lb[i / 64] |= 1 << (i % 64);
                 }
             }
-        }
-        for (pi, p) in pats.iter().enumerate() {
-            let mis = if k == 2 {
+            // Words past the footprint's texels are zero in both bitsets.
+            let words = n.div_ceil(64);
+            for (pi, p) in pats.iter().enumerate() {
                 // popcount of the XOR of bitsets, either labelling.
-                let x = (0..4)
+                let x = (0..words)
                     .map(|w| (p.bits[w] ^ lb[w]).count_ones())
                     .sum::<u32>();
-                x.min(n as u32 - x)
-            } else {
-                mismatch(&p.labels, &labels[..n], k)
-            };
-            let key = (mis, pi);
-            if top.len() == m && key >= top[m - 1] {
-                continue;
+                let key = (x.min(n as u32 - x), pi);
+                if top.len() == m && key >= top[m - 1] {
+                    continue;
+                }
+                let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+                top.insert(pos, key);
+                top.truncate(m);
             }
-            let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
-            top.insert(pos, key);
-            top.truncate(m);
+        } else {
+            let bits = if k == 3 { &ctx.bits3 } else { &ctx.bits4 };
+            rank_patterns(bits, &labels[..n], k, m, top);
         }
         for (j, &(_, pi)) in top.iter().enumerate() {
             let p = &pats[pi];
@@ -1442,5 +1508,38 @@ impl SymbolicBlock {
     }
     pub(crate) fn empty_void_ldr() -> Self {
         Self::empty(BlockKind::VoidLdr, 0)
+    }
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    use super::*;
+    use crate::astc::testgen::Rng;
+
+    /// The bitset mismatch equals the per-texel walk, for every texel count
+    /// (1..=216, so every word count and partial word) and k = 3, 4,
+    /// including labellings that leave some labels empty.
+    #[test]
+    fn mismatch_bits_equals_walk() {
+        let mut rng = Rng::new(0x5EED_3A11);
+        for n in 1..=MAX_TEXELS {
+            for k in [3usize, 4] {
+                for trial in 0..24 {
+                    // Some trials use fewer distinct labels than k.
+                    let used = if trial % 4 == 0 {
+                        1 + rng.below(k as u64)
+                    } else {
+                        k as u64
+                    };
+                    let pat: Vec<u8> = (0..n).map(|_| rng.below(used) as u8).collect();
+                    let lab: Vec<u8> = (0..n).map(|_| rng.below(k as u64) as u8).collect();
+                    assert_eq!(
+                        mismatch_bits(&label_bits(&pat), &label_bits(&lab), k, n.div_ceil(64)),
+                        mismatch(&pat, &lab, k),
+                        "n {n} k {k} trial {trial}"
+                    );
+                }
+            }
+        }
     }
 }
