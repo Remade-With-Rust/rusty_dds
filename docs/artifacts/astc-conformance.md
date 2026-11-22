@@ -22,6 +22,7 @@ patterns. 8-bit output follows `decode_unorm8` (astcenc selects it from a `U8` o
 | DC5 | Census: every reachable class cell has >= 32 bit-exact blocks | **2,888 / 2,888** cells (per-footprint structural cells enumerated exactly from the mode table and bit budget, plus 59 endpoint sub-mode cells) | see `astc-census.md` |
 | 0.4 | astcenc-avx2 vs astcenc-none (5.7.1), and 5.7.1 vs astcenc `main` @22ba8a0 | 0 differing bytes in all six cells (main reports `ASTCENC_ERR_BAD_BLOCK` for strips with error blocks; bytes identical) | `ASTC_ORACLE=... astc_harness dc2 16384 ...` |
 | Third-party | google/astc-codec testdata (30 files, 14 footprints) | 0 differing bytes | `astc_harness dc2 0 <testdata>` |
+| DC6 | No panic: `tests/astc` robustness (10^6 arbitrary blocks per footprint in release, every block mode x partition count); libFuzzer `astc_decode` | robustness test passes; libFuzzer 3,380,934 executions in 3,601 s (1 CPU-hour), 0 crashes, 5,039 new units, peak RSS 458 MB | `cargo test --release --lib astc`; `cargo +nightly fuzz run astc_decode -- -max_total_time=3600` |
 | Golden (CI) | `tests/fixtures/astc/golden_v1.bin`: astcenc's output hashed per 16 blocks, 6,144 blocks x 24 footprints x 6 cells | passes in `cargo test` | `cargo test --lib astc::tests::golden` |
 
 ## Behaviour notes (all matched to astcenc)
