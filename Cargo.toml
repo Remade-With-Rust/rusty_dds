@@ -95,6 +95,9 @@ rusty_zstd = { version = "0.5", optional = true, default-features = false, featu
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 # Off-the-shelf container baseline for parse A/B (not used by the library itself).
 ddsfile = "0.5.2"
+# Independent layout + decode oracle for the NPOT mip-chain regression test
+# (#12): image-rs's DDS crate (MIT OR Apache-2.0). Dev-only, never shipped.
+dds = { version = "=0.2.0", default-features = false }
 serde_json = "1"
 tiff = { version = "0.9", default-features = true }
 # BC6H decode-oracle for tests (same crate/version the decode feature uses).
@@ -184,6 +187,10 @@ required-features = ["decode", "encode"]
 
 [[test]]
 name = "encode_matrix"
+required-features = ["encode", "decode"]
+
+[[test]]
+name = "npot_mips"
 required-features = ["encode", "decode"]
 
 [[test]]
