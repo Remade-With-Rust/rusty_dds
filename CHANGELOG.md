@@ -3,6 +3,21 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.1](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.0...v0.11.1) - 2026-11-22
+
+### Other
+
+- astc decode: keep the per-texel weight buffers across blocks
+- astc encode: reuse the mode search's working vectors across calls
+- astc decode: classify block modes on first use, not all 2048 per surface
+- astc decode: build only the taps for each weight grid, not the encoder tables
+- astc parse: unquantise colour values and weights as they are decoded
+- astc ktx2_inflate: inflate each level straight onto the output
+- astc encode: refill reused Fit slots instead of building and moving Fits
+- astc encode: decimate skips the residual zero-fill when it runs no steps
+- astc decode: SSE2 8-bit kernel builds its operands in registers
+- astc decode: single-plane infill reads the stored weights in place
+
 ## [0.11.0](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.10.1...v0.11.0) - 2026-11-22
 
 ### Added
