@@ -18,19 +18,99 @@ pub(super) use self::avx2::{decimate, residual, Avx2};
 #[cfg(target_arch = "x86_64")]
 pub(super) use self::popcnt::{rank_patterns, Popcnt};
 #[cfg(target_arch = "x86_64")]
-pub(super) use self::sse2::part_err_acc;
+pub(super) use self::sse2::{part_err_acc, refit_sums};
 
 #[cfg(target_arch = "x86_64")]
 mod sse2 {
-    use super::super::block::MAX_TEXELS;
+    use super::super::block::{RefitSums, MAX_TEXELS};
     use crate::astc::cem::Endpoints;
     use core::arch::x86_64::{
-        __m128i, _mm_add_epi16, _mm_add_epi32, _mm_add_epi64, _mm_and_si128, _mm_cvtsi64_si128,
-        _mm_mulhi_epu16, _mm_mullo_epi16, _mm_or_si128, _mm_set1_epi16, _mm_set_epi64x,
-        _mm_setzero_si128, _mm_slli_epi16, _mm_srli_epi16, _mm_storeu_si128, _mm_sub_epi16,
-        _mm_subs_epu16, _mm_unpackhi_epi16, _mm_unpackhi_epi32, _mm_unpacklo_epi16,
-        _mm_unpacklo_epi32, _mm_unpacklo_epi8,
+        __m128i, _mm_add_epi16, _mm_add_epi32, _mm_add_epi64, _mm_add_ps, _mm_and_ps,
+        _mm_and_si128, _mm_andnot_ps, _mm_castsi128_ps, _mm_cvtepi32_ps, _mm_cvtsi32_si128,
+        _mm_cvtsi64_si128, _mm_mul_ps, _mm_mulhi_epu16, _mm_mullo_epi16, _mm_or_ps, _mm_or_si128,
+        _mm_set1_epi16, _mm_set1_ps, _mm_set_epi32, _mm_set_epi64x, _mm_setzero_ps,
+        _mm_setzero_si128, _mm_shuffle_ps, _mm_slli_epi16, _mm_srli_epi16, _mm_storeu_ps,
+        _mm_storeu_si128, _mm_sub_epi16, _mm_sub_ps, _mm_subs_epu16, _mm_unpackhi_epi16,
+        _mm_unpackhi_epi32, _mm_unpacklo_epi16, _mm_unpacklo_epi32, _mm_unpacklo_epi8,
+        _mm_unpacklo_ps,
     };
+
+    /// Twin of `block::refit_sums_scalar`, bit for bit, for every channel
+    /// (the scalar's `chans` only limits which channels it bothers with).
+    ///
+    /// Lanes are channels, so each lane's sums run over the texels in the
+    /// scalar's order: `x0 += u x`, `x1 += t x` with the plane's `t`/`u` in
+    /// each lane (plane 2 in lane `ccs`). The weight sums are one register per
+    /// plane, lanes `(a, b, d)` += `(u, u, t) * (u, t, t)`, the scalar's three
+    /// products. `t = w * (1/64)` and `u = 1 - t` are the scalar's
+    /// operations; no FMA.
+    pub(in crate::astc::encode) fn refit_sums(
+        px: &[[u8; 4]],
+        idx: &[u8],
+        w1: &[u8; MAX_TEXELS],
+        w2: &[u8; MAX_TEXELS],
+        ccs: usize,
+    ) -> RefitSums {
+        let dual = ccs < 4;
+        let mut m = [0u32; 4];
+        if dual {
+            m[ccs] = u32::MAX;
+        }
+        let mut o = [[0f32; 4]; 4];
+        // SAFETY: SSE2 is unconditionally present on x86_64. Operands are
+        // built from scalars; the only memory accesses are the stores into
+        // the local `o` (four 16-byte rows, unaligned form).
+        unsafe {
+            let sel = _mm_castsi128_ps(_mm_set_epi32(
+                m[3] as i32,
+                m[2] as i32,
+                m[1] as i32,
+                m[0] as i32,
+            ));
+            let one = _mm_set1_ps(1.0);
+            let k = _mm_set1_ps(1.0 / 64.0);
+            let z = _mm_setzero_si128();
+            let (mut p1, mut p2) = (_mm_setzero_ps(), _mm_setzero_ps());
+            let (mut x0, mut x1) = (_mm_setzero_ps(), _mm_setzero_ps());
+            for &i in idx {
+                let i = i as usize;
+                let t1 = _mm_mul_ps(_mm_set1_ps(w1[i] as f32), k);
+                let u1 = _mm_sub_ps(one, t1);
+                // (u, u, t, t) * (u, t, t, t): lanes a, b, d.
+                let l1 = _mm_shuffle_ps::<0b00_00_00_00>(u1, t1);
+                let r1 = _mm_shuffle_ps::<0b00_00_01_00>(_mm_unpacklo_ps(u1, t1), t1);
+                p1 = _mm_add_ps(p1, _mm_mul_ps(l1, r1));
+                let (t, u) = if dual {
+                    let t2 = _mm_mul_ps(_mm_set1_ps(w2[i] as f32), k);
+                    let u2 = _mm_sub_ps(one, t2);
+                    let l2 = _mm_shuffle_ps::<0b00_00_00_00>(u2, t2);
+                    let r2 = _mm_shuffle_ps::<0b00_00_01_00>(_mm_unpacklo_ps(u2, t2), t2);
+                    p2 = _mm_add_ps(p2, _mm_mul_ps(l2, r2));
+                    (
+                        _mm_or_ps(_mm_and_ps(sel, t2), _mm_andnot_ps(sel, t1)),
+                        _mm_or_ps(_mm_and_ps(sel, u2), _mm_andnot_ps(sel, u1)),
+                    )
+                } else {
+                    (t1, u1)
+                };
+                let pxi = _mm_cvtsi32_si128(i32::from_le_bytes(px[i]));
+                let x = _mm_cvtepi32_ps(_mm_unpacklo_epi16(_mm_unpacklo_epi8(pxi, z), z));
+                x0 = _mm_add_ps(x0, _mm_mul_ps(u, x));
+                x1 = _mm_add_ps(x1, _mm_mul_ps(t, x));
+            }
+            _mm_storeu_ps(o[0].as_mut_ptr(), p1);
+            _mm_storeu_ps(o[1].as_mut_ptr(), p2);
+            _mm_storeu_ps(o[2].as_mut_ptr(), x0);
+            _mm_storeu_ps(o[3].as_mut_ptr(), x1);
+        }
+        RefitSums {
+            a: [o[0][0], o[1][0]],
+            b: [o[0][1], o[1][1]],
+            d: [o[0][2], o[1][2]],
+            x0: o[2],
+            x1: o[3],
+        }
+    }
 
     /// Four 16-bit lanes in one word, lane `c` = `x[c]`.
     #[inline(always)]
@@ -651,5 +731,39 @@ mod tests {
             }
         }
         assert!(grids > 500, "{grids}");
+    }
+
+    /// The SSE2 refit sums equal the scalar's bit for bit (`to_bits`) on
+    /// every channel the scalar computes, for random partitions, weights
+    /// (incl. 0 and 64), every dual-plane channel and both channel counts.
+    #[test]
+    fn refit_sums_match_scalar() {
+        use super::super::block::refit_sums_scalar;
+        let mut rng = Rng::new(0x4EF1_7500);
+        for trial in 0..20_000 {
+            let n = 1 + rng.below(MAX_TEXELS as u64) as usize;
+            let px: Vec<[u8; 4]> = (0..n)
+                .map(|_| rng.next_u64().to_le_bytes()[..4].try_into().unwrap())
+                .collect();
+            let m = 1 + rng.below(n as u64) as usize;
+            let idx: Vec<u8> = (0..m).map(|_| rng.below(n as u64) as u8).collect();
+            let mut w1 = [0u8; MAX_TEXELS];
+            let mut w2 = [0u8; MAX_TEXELS];
+            for i in 0..MAX_TEXELS {
+                w1[i] = [0, 64, rng.below(65) as u8][rng.below(3) as usize];
+                w2[i] = rng.below(65) as u8;
+            }
+            let chans = if trial % 3 == 0 { 3 } else { 4 };
+            let ccs = rng.below(5) as usize;
+            let ccs = if chans == 3 && ccs == 3 { 4 } else { ccs };
+            let a = super::refit_sums(&px, &idx, &w1, &w2, ccs);
+            let b = refit_sums_scalar(&px, &idx, &w1, &w2, ccs, chans);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&a.a), bits(&b.a), "trial {trial}");
+            assert_eq!(bits(&a.b), bits(&b.b), "trial {trial}");
+            assert_eq!(bits(&a.d), bits(&b.d), "trial {trial}");
+            assert_eq!(bits(&a.x0[..chans]), bits(&b.x0[..chans]), "trial {trial}");
+            assert_eq!(bits(&a.x1[..chans]), bits(&b.x1[..chans]), "trial {trial}");
+        }
     }
 }

@@ -533,20 +533,33 @@ pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_T
     }
 }
 
-/// Least-squares endpoints for each channel of one partition given integer
-/// texel weights (0..=64) per plane.
-fn refit_part(
-    src: &Src,
+/// The least-squares sums of [`refit_part`]: per plane, `a = sum u^2`,
+/// `b = sum u t`, `d = sum t^2` (t = weight / 64, u = 1 - t), and per
+/// channel `x0 = sum u x`, `x1 = sum t x`. Plane 2 sums stay 0 without a
+/// second plane; channels at or past `chans` are not meaningful.
+#[derive(Debug, PartialEq)]
+pub(super) struct RefitSums {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    pub d: [f32; 2],
+    pub x0: [f32; 4],
+    pub x1: [f32; 4],
+}
+
+/// [`RefitSums`] one texel at a time: the oracle of `simd::refit_sums`, and
+/// the kernel without it. The weight sums (a, b, d) depend only on the
+/// plane, not the channel: accumulated once per plane, in the same texel
+/// order as a per-channel fit would, so every result is bit-identical to
+/// fitting each channel on its own.
+#[cfg_attr(all(feature = "simd", target_arch = "x86_64"), allow(dead_code))]
+pub(super) fn refit_sums_scalar(
+    px: &[[u8; 4]],
     idx: &[u8],
     w1: &[u8; MAX_TEXELS],
     w2: &[u8; MAX_TEXELS],
     ccs: usize,
     chans: usize,
-) -> [Option<(f32, f32)>; 4] {
-    // The weight sums (a, b, d) depend only on the plane, not the channel:
-    // accumulated once per plane, in the same texel order as a per-channel
-    // fit would, so every result is bit-identical to fitting each channel
-    // on its own.
+) -> RefitSums {
     let (mut a, mut b, mut d) = ([0f32; 2], [0f32; 2], [0f32; 2]);
     let (mut x0, mut x1) = ([0f32; 4], [0f32; 4]);
     let dual = ccs < 4;
@@ -569,11 +582,28 @@ fn refit_part(
         };
         for c in 0..chans {
             let (t, u) = if c == ccs { (t2, u2) } else { (t1, u1) };
-            let x = src.px[i][c] as f32;
+            let x = px[i][c] as f32;
             x0[c] += u * x;
             x1[c] += t * x;
         }
     }
+    RefitSums { a, b, d, x0, x1 }
+}
+
+/// Least-squares endpoints for each channel of one partition given integer
+/// texel weights (0..=64) per plane.
+fn refit_part(
+    src: &Src,
+    idx: &[u8],
+    w1: &[u8; MAX_TEXELS],
+    w2: &[u8; MAX_TEXELS],
+    ccs: usize,
+    chans: usize,
+) -> [Option<(f32, f32)>; 4] {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    let RefitSums { a, b, d, x0, x1 } = super::simd::refit_sums(src.px, idx, w1, w2, ccs);
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let RefitSums { a, b, d, x0, x1 } = refit_sums_scalar(src.px, idx, w1, w2, ccs, chans);
     let mut out = [None; 4];
     for c in 0..chans {
         let pl = usize::from(c == ccs);
