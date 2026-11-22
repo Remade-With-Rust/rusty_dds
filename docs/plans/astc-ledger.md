@@ -22,6 +22,10 @@ One line per brick: state, gate result, commit. Refuted ideas go in the second t
 | D9 3D | done | DC1-DC4 on the 10 3D footprints | 42d15fb |
 | D10 robustness | done | `arbitrary_blocks_never_panic` (10^6/footprint in release); fuzz target `astc_decode` | 92689cb, fd15e76 |
 | D11 goldens + census | done | golden_v1.bin (432 KiB, oracle output hashes); census 2,888/2,888 cells >= 32 | 92689cb |
+| C1 .astc | done | astcenc negatives rejected; read/write round trip; astcenc reads ours | 099d88e |
+| C2 KTX 1.0 | done | astcenc .ktx read; ours read by astcenc; KTX-Software array_7 | 099d88e |
+| C3 DDS | done | layout snapshot (4,063 lines) unchanged across the refactor; image-dds 14/14; dds 0.2 reads ours | 433b27a, c0c372d, c54dba9 |
+| C4a KTX 2.0 read | done | KTX-Software files; zstd via `ktx2-zstd` (rusty_zstd 0.5) | 099d88e |
 
 ## Refuted or deferred ideas
 
