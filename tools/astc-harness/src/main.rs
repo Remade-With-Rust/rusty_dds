@@ -1306,6 +1306,83 @@ fn cmd_es1(args: &[String]) -> bool {
     true
 }
 
+/// C4b: write KTX 2.0 variants with our writer for `ktx validate`.
+///   astch ktx2out <png> <outdir>
+fn cmd_ktx2out(args: &[String]) -> bool {
+    use rusty_dds::astc::ktx::VkAstcKind;
+    let (w, h, img) = load_rgba(&args[0]);
+    let dir = &args[1];
+    std::fs::create_dir_all(dir).unwrap();
+    // Box-filtered mips of the source for a real chain.
+    let mut mips = vec![(w, h, img.clone())];
+    while mips.last().unwrap().0 > 1 || mips.last().unwrap().1 > 1 {
+        let (pw, ph, ref p) = *mips.last().unwrap();
+        let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+        let mut n = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let mut s = 0u32;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let sx = (2 * x + dx).min(pw - 1);
+                        let sy = (2 * y + dy).min(ph - 1);
+                        s += p[((sy * pw + sx) * 4 + c) as usize] as u32;
+                    }
+                    n[((y * nw + x) * 4 + c) as usize] = ((s + 2) / 4) as u8;
+                }
+            }
+        }
+        mips.push((nw, nh, n));
+    }
+    let mut ok = true;
+    for (fp, kind, name, nlev) in [
+        (AstcFootprint::B6X6, VkAstcKind::Unorm, "unorm_6x6_mips", mips.len()),
+        (AstcFootprint::B8X5, VkAstcKind::Srgb, "srgb_8x5", 1),
+        (AstcFootprint::B4X4, VkAstcKind::Sfloat, "sfloat_4x4", 1),
+        (AstcFootprint::B12X12, VkAstcKind::Srgb, "srgb_12x12_mips", mips.len()),
+    ] {
+        let prof = if kind == VkAstcKind::Srgb { AstcProfile::LdrSrgb } else { AstcProfile::Ldr };
+        let opts = astc::AstcEncodeOptions::new(fp, prof).with_preset(astc::AstcPreset::Fastest);
+        let levels: Vec<Vec<u8>> = mips[..nlev].iter().map(|(mw, mh, p)| astc::encode_rgba8(p, *mw, *mh, &opts).unwrap()).collect();
+        let refs: Vec<&[u8]> = levels.iter().map(|v| &v[..]).collect();
+        let mut out = Vec::new();
+        astc::Ktx2View::write(&mut out, fp, w, h, 1, kind, &refs).unwrap();
+        let path = format!("{dir}/{name}.ktx2");
+        std::fs::write(&path, &out).unwrap();
+        ok &= astc::Ktx2View::parse(&out).is_ok();
+        println!("wrote {path}");
+    }
+    // A 3D texture: 6 slices of the same image region, 4x4x4 footprint.
+    let fp = AstcFootprint::B4X4X4;
+    let (sw, sh, sd) = (32u32, 32u32, 6u32);
+    let mut payload = Vec::new();
+    for bz in 0..2u32 {
+        for by in 0..8u32 {
+            for bx in 0..8u32 {
+                // Void-extent blocks carrying a colour from the image: legal 3D content.
+                let p = &img[(((by * 4 * w) + bx * 4) * 4) as usize..][..4];
+                let mut b = [0u8; 16];
+                b[0] = 0xFC;
+                b[1] = 0xFD;
+                for v in &mut b[2..8] {
+                    *v = 0xFF;
+                }
+                for c in 0..4 {
+                    let u = p[c] as u16 * 257 ^ (bz as u16 * 0x101);
+                    b[8 + 2 * c] = u as u8;
+                    b[9 + 2 * c] = (u >> 8) as u8;
+                }
+                payload.extend_from_slice(&b);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    astc::Ktx2View::write(&mut out, fp, sw, sh, sd, VkAstcKind::Unorm, &[&payload]).unwrap();
+    std::fs::write(format!("{dir}/unorm_4x4x4_3d.ktx2"), &out).unwrap();
+    println!("wrote {dir}/unorm_4x4x4_3d.ktx2");
+    ok
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let ok = match args.get(1).map(|s| s.as_str()) {
@@ -1334,6 +1411,7 @@ fn main() {
         Some("quality") => cmd_quality(&args[2..]),
         Some("blockdbg") => cmd_blockdbg(&args[2..]),
         Some("es1") => cmd_es1(&args[2..]),
+        Some("ktx2out") => cmd_ktx2out(&args[2..]),
         Some("golden") => cmd_golden(&args[2]),
         Some("dc2") => {
             let n: usize = args[2].parse().unwrap();

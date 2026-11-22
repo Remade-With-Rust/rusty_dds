@@ -26,6 +26,7 @@ One line per brick: state, gate result, commit. Refuted ideas go in the second t
 | C2 KTX 1.0 | done | astcenc .ktx read; ours read by astcenc; KTX-Software array_7 | 099d88e |
 | C3 DDS | done | layout snapshot (4,063 lines) unchanged across the refactor; image-dds 14/14; dds 0.2 reads ours | 433b27a, c0c372d, c54dba9 |
 | C4a KTX 2.0 read | done | KTX-Software files; zstd via `ktx2-zstd` (rusty_zstd 0.5) | 099d88e |
+| C4b KTX 2.0 write | done | KTX-Software 4.4.2 `ktx validate` accepts all five written files (6x6 UNORM 9 mips, 8x5 sRGB, 4x4 SFLOAT, 12x12 sRGB 9 mips, 4x4x4 3D) | 958d069 |
 | E1 pack | done | parse(pack(parse(b))) == parse(b) on > 50,000 legal blocks; ISE encode round trip all ranges/lengths | ef446cf |
 | E2/E3 encoder | first cut | EC1 0 bad blocks; EC2 standing test; harvest below | ef446cf |
 
