@@ -381,14 +381,29 @@ fn mode7_fit(t: &[[f32; 4]], eff: &[u8; MAX_TEXELS]) -> ([f32; 4], [f32; 4]) {
 /// Exact error of the decoded endpoints `ep` against the targets `t` with
 /// texel weights `eff`: squared differences of the decoder's interpolated
 /// values (interpolation domain), over `chans`.
+///
+/// Callers keep a candidate only if its error is strictly below `bound`
+/// (their best so far). The terms are non-negative and a rounded f64 sum of
+/// non-negative terms never decreases, so once a partial sum reaches
+/// `bound` the full sum would too: the walk stops there and returns that
+/// partial sum, which loses the comparison exactly as the full sum would.
 // One index walks parallel per-channel arrays (and fixes the operation order).
 #[allow(clippy::needless_range_loop)]
-fn texel_err(ep: &cem::Endpoints, eff: &[u8; MAX_TEXELS], t: &[[f32; 4]], chans: usize) -> f64 {
+fn texel_err(
+    ep: &cem::Endpoints,
+    eff: &[u8; MAX_TEXELS],
+    t: &[[f32; 4]],
+    chans: usize,
+    bound: f64,
+) -> f64 {
     let mut err = 0f64;
     for (i, ti) in t.iter().enumerate() {
         for c in 0..chans {
             let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - ti[c] as f64;
             err += d * d;
+        }
+        if err >= bound {
+            break;
         }
     }
     err
@@ -564,7 +579,8 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
     bits
 }
 
-/// Exact error over the texels `idx` (see [`texel_err`]).
+/// Exact error over the texels `idx`, with the same early stop at `bound`
+/// (see [`texel_err`]).
 // One index walks parallel per-channel / per-partition arrays.
 #[allow(clippy::needless_range_loop)]
 fn texel_err_idx(
@@ -573,6 +589,7 @@ fn texel_err_idx(
     t: &[[f32; 4]],
     idx: &[u8],
     chans: usize,
+    bound: f64,
 ) -> f64 {
     let mut err = 0f64;
     for &i in idx {
@@ -580,6 +597,9 @@ fn texel_err_idx(
         for c in 0..chans {
             let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - t[i][c] as f64;
             err += d * d;
+        }
+        if err >= bound {
+            break;
         }
     }
     err
@@ -748,7 +768,8 @@ fn search_two_partitions(
                     );
                     let mut pb: Option<(f64, [u8; 8])> = None;
                     for (v, ep) in quantized.iter().zip(&eps) {
-                        let err = texel_err_idx(ep, &eff, t, id, chans);
+                        let bound = pb.map_or(f64::INFINITY, |b| b.0);
+                        let err = texel_err_idx(ep, &eff, t, id, chans, bound);
                         if pb.map_or(true, |b| err < b.0) {
                             pb = Some((err, *v));
                         }
@@ -1004,7 +1025,8 @@ pub(crate) fn encode_block_hdr(
                 chans,
             );
             for (v, ep) in quantized.iter().zip(&eps) {
-                let err = texel_err(ep, &eff, t, chans);
+                let bound = pass_best.map_or(f64::INFINITY, |b| b.0);
+                let err = texel_err(ep, &eff, t, chans, bound);
                 if pass_best.map_or(true, |b| err < b.0) {
                     pass_best = Some((err, *v, cem_v, range));
                 }
@@ -1037,7 +1059,8 @@ pub(crate) fn encode_block_hdr(
                     eps.extend(quantized.iter().map(|v| ep_of(7, profile, v)));
                     repair_best(7, profile, r4, 4, &mut quantized, &mut eps, (f0, f1), chans);
                     for (v, ep) in quantized.iter().zip(&eps) {
-                        let err = texel_err(ep, &eff, t, chans);
+                        let bound = pass_best.map_or(f64::INFINITY, |b| b.0);
+                        let err = texel_err(ep, &eff, t, chans, bound);
                         if pass_best.map_or(true, |b| err < b.0) {
                             pass_best = Some((err, *v, 7, r4));
                         }
