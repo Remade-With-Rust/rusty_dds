@@ -80,7 +80,9 @@ pub(crate) fn params(p: AstcPreset) -> Params {
     {
         let get = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f32>().ok());
         if let Some(v) = get("RUSTY_DDS_ASTC_PARTS") { prm.max_partitions = v as u8; }
-        if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part2_candidates = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART2") { prm.part_candidates[0] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART3") { prm.part_candidates[1] = v as usize; }
+        if let Some(v) = get("RUSTY_DDS_ASTC_PART4") { prm.part_candidates[2] = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_EXACT") { prm.exact_candidates = v as usize; }
         if let Some(v) = get("RUSTY_DDS_ASTC_REFINE") { prm.refine = v as u8; }
         if let Some(v) = get("RUSTY_DDS_ASTC_REFINE_TOP") { prm.refine_top = v as usize; }
@@ -97,7 +99,7 @@ fn preset_params(p: AstcPreset) -> Params {
         AstcPreset::Fastest => Params {
             refine_top: 1,
             max_partitions: 2,
-            part2_candidates: 1,
+            part_candidates: [1, 0, 0],
             exact_candidates: 2,
             refine: 1,
             dual_plane: false,
@@ -108,7 +110,7 @@ fn preset_params(p: AstcPreset) -> Params {
         AstcPreset::Fast => Params {
             refine_top: 1,
             max_partitions: 2,
-            part2_candidates: 2,
+            part_candidates: [2, 0, 0],
             exact_candidates: 3,
             refine: 2,
             dual_plane: true,
@@ -119,7 +121,7 @@ fn preset_params(p: AstcPreset) -> Params {
         AstcPreset::Medium => Params {
             refine_top: 2,
             max_partitions: 2,
-            part2_candidates: 4,
+            part_candidates: [4, 0, 0],
             exact_candidates: 4,
             refine: 3,
             dual_plane: true,
@@ -127,16 +129,27 @@ fn preset_params(p: AstcPreset) -> Params {
             grid_iters: 3,
             part2_skip_err: 0.75,
         },
-        AstcPreset::Thorough | AstcPreset::Exhaustive => Params {
+        AstcPreset::Thorough => Params {
             refine_top: 3,
-            max_partitions: 2,
-            part2_candidates: 8,
+            max_partitions: 4,
+            part_candidates: [8, 4, 2],
             exact_candidates: 8,
             refine: 4,
             dual_plane: true,
             dual_corr_limit: 0.98,
             grid_iters: 4,
             part2_skip_err: 0.2,
+        },
+        AstcPreset::Exhaustive => Params {
+            refine_top: 4,
+            max_partitions: 4,
+            part_candidates: [16, 8, 4],
+            exact_candidates: 12,
+            refine: 4,
+            dual_plane: true,
+            dual_corr_limit: 1.0,
+            grid_iters: 4,
+            part2_skip_err: 0.0,
         },
     }
 }
@@ -215,8 +228,8 @@ pub fn encode_block_rows_into(
     if out.len() != need {
         return Err(Error::OutOfBounds);
     }
-    let ctx = Ctx::new(fp);
     let prm = params(opts.preset);
+    let ctx = Ctx::new(fp, prm.max_partitions);
     let tgt = target(opts);
     let (bw, bh) = (fp.width(), fp.height());
     let mut px = [[0u8; 4]; 216];

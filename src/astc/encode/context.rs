@@ -19,7 +19,7 @@ pub(crate) struct Mode {
     pub dual: bool,
     /// Colour range per (partitions - 1, class value count / 2 - 1), 0xFF if
     /// the configuration does not fit (more than 18 values or too few bits).
-    pub crange: [[u8; 4]; 2],
+    pub crange: [[u8; 4]; 4],
 }
 
 /// A distinct, non-degenerate partitioning.
@@ -36,10 +36,46 @@ pub(crate) struct Ctx {
     pub modes: Vec<Mode>,
     /// Two-partition patterns, deduplicated, both partitions non-empty.
     pub part2: Vec<Partitioning>,
+    /// Three- and four-partition patterns (built only when a preset uses
+    /// them), every partition non-empty, exact duplicates removed.
+    pub part3: Vec<Partitioning>,
+    pub part4: Vec<Partitioning>,
+}
+
+fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
+    let texels = fp.texels() as usize;
+    let small = texels < 31;
+    let mut out: Vec<Partitioning> = Vec::new();
+    for seed in 0..1024u32 {
+        let mut labels = Vec::with_capacity(texels);
+        for z in 0..fp.depth() {
+            for y in 0..fp.height() {
+                for x in 0..fp.width() {
+                    labels.push(select_partition(seed, x, y, z, count, small));
+                }
+            }
+        }
+        let mut seen = [false; 4];
+        for &l in &labels {
+            seen[l as usize] = true;
+        }
+        if seen.iter().take(count as usize).any(|s| !s) {
+            continue;
+        }
+        if out.iter().any(|p| p.labels == labels) {
+            continue;
+        }
+        out.push(Partitioning {
+            seed: seed as u16,
+            labels,
+            bits: [0; 4],
+        });
+    }
+    out
 }
 
 impl Ctx {
-    pub(crate) fn new(fp: AstcFootprint) -> Self {
+    pub(crate) fn new(fp: AstcFootprint, max_partitions: u8) -> Self {
         let texels = fp.texels() as usize;
         let mut grids: Vec<Grid> = Vec::new();
         let mut modes = Vec::new();
@@ -62,7 +98,7 @@ impl Ctx {
             {
                 continue;
             }
-            let mut crange = [[0xFFu8; 4]; 2];
+            let mut crange = [[0xFFu8; 4]; 4];
             for (pi, row) in crange.iter_mut().enumerate() {
                 let parts = pi as u32 + 1;
                 let config = if parts == 1 { 17 } else { 29 } + if g.dual_plane { 2 } else { 0 };
@@ -117,11 +153,15 @@ impl Ctx {
                 });
             }
         }
+        let part3 = if max_partitions >= 3 { build_parts(fp, 3) } else { Vec::new() };
+        let part4 = if max_partitions >= 4 { build_parts(fp, 4) } else { Vec::new() };
         Ctx {
             texels,
             grids,
             modes,
             part2,
+            part3,
+            part4,
         }
     }
 }
@@ -138,7 +178,7 @@ mod tests {
     fn taps_equal_reference_infill() {
         let mut rng = Rng::new(42);
         for &fp in AstcFootprint::ALL_2D.iter().chain(AstcFootprint::ALL_3D) {
-            let ctx = Ctx::new(fp);
+            let ctx = Ctx::new(fp, 2);
             assert!(!ctx.modes.is_empty() && !ctx.part2.is_empty());
             for g in &ctx.grids {
                 for _ in 0..4 {

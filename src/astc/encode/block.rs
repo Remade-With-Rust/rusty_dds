@@ -37,8 +37,9 @@ use crate::astc::AstcProfile;
 pub(crate) struct Params {
     /// Highest partition count tried (1 or 2 today).
     pub max_partitions: u8,
-    /// Two-partition patterns fully searched, best clustering match first.
-    pub part2_candidates: usize,
+    /// Patterns fully searched for 2, 3 and 4 partitions, best clustering
+    /// match first.
+    pub part_candidates: [usize; 3],
     /// Candidates (mode x endpoint class) encoded exactly per partitioning.
     pub exact_candidates: usize,
     /// Weight/endpoint refinement passes, for the best `refine_top`
@@ -915,8 +916,9 @@ fn exact_candidate(
     mine
 }
 
-/// Two-means clustering of the block's colours; returns labels.
-fn two_means(src: &Src, labels: &mut [u8; MAX_TEXELS]) {
+/// k-means clustering (k = 2..=4) of the block's colours; deterministic
+/// farthest-point seeding and a fixed iteration count. Returns labels.
+fn k_means(src: &Src, k: usize, labels: &mut [u8; MAX_TEXELS]) {
     let n = src.n;
     let col = |i: usize| -> [f32; 4] {
         let p = src.px[i];
@@ -930,56 +932,99 @@ fn two_means(src: &Src, labels: &mut [u8; MAX_TEXELS]) {
     let mut mean = [0f32; 4];
     for i in 0..n {
         let c = col(i);
-        for k in 0..4 {
-            mean[k] += c[k];
+        for j in 0..4 {
+            mean[j] += c[j];
         }
     }
-    for k in mean.iter_mut() {
-        *k /= n as f32;
+    for v in mean.iter_mut() {
+        *v /= n as f32;
     }
-    // Seeds: farthest texel from the mean, then farthest from that.
-    let far = |from: [f32; 4]| -> usize {
+    // Seeds: the texel farthest from the mean, then repeatedly the texel
+    // farthest from its nearest seed.
+    let mut cent = [[0f32; 4]; 4];
+    let mut bi = 0;
+    let mut bd = -1.0;
+    for i in 0..n {
+        let d = d2(col(i), mean);
+        if d > bd {
+            bd = d;
+            bi = i;
+        }
+    }
+    cent[0] = col(bi);
+    for s in 1..k {
         let mut bi = 0;
         let mut bd = -1.0;
         for i in 0..n {
-            let d = d2(col(i), from);
+            let c = col(i);
+            let d = (0..s).map(|j| d2(c, cent[j])).fold(f32::MAX, f32::min);
             if d > bd {
                 bd = d;
                 bi = i;
             }
         }
-        bi
-    };
-    let a = far(mean);
-    let b = far(col(a));
-    let mut c0 = col(a);
-    let mut c1 = col(b);
+        cent[s] = col(bi);
+    }
     for _ in 0..4 {
-        let (mut s0, mut s1) = ([0f32; 4], [0f32; 4]);
-        let (mut n0, mut n1) = (0f32, 0f32);
+        let mut sum = [[0f32; 4]; 4];
+        let mut cnt = [0f32; 4];
         for i in 0..n {
             let c = col(i);
-            if d2(c, c0) <= d2(c, c1) {
-                labels[i] = 0;
-                n0 += 1.0;
-                for k in 0..4 {
-                    s0[k] += c[k];
+            let mut best = 0;
+            let mut bd = f32::MAX;
+            for (j, ce) in cent.iter().enumerate().take(k) {
+                let d = d2(c, *ce);
+                if d < bd {
+                    bd = d;
+                    best = j;
                 }
-            } else {
-                labels[i] = 1;
-                n1 += 1.0;
-                for k in 0..4 {
-                    s1[k] += c[k];
+            }
+            labels[i] = best as u8;
+            cnt[best] += 1.0;
+            for q in 0..4 {
+                sum[best][q] += c[q];
+            }
+        }
+        for j in 0..k {
+            if cnt[j] > 0.0 {
+                for q in 0..4 {
+                    cent[j][q] = sum[j][q] / cnt[j];
                 }
             }
         }
-        if n0 > 0.0 {
-            c0 = [s0[0] / n0, s0[1] / n0, s0[2] / n0, s0[3] / n0];
+    }
+}
+
+/// Permutations of 3 and 4 labels, for matching a clustering to a pattern.
+const PERM3: [[u8; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+const PERM4: [[u8; 4]; 24] = [
+    [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2], [0, 3, 2, 1],
+    [1, 0, 2, 3], [1, 0, 3, 2], [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
+    [2, 0, 1, 3], [2, 0, 3, 1], [2, 1, 0, 3], [2, 1, 3, 0], [2, 3, 0, 1], [2, 3, 1, 0],
+    [3, 0, 1, 2], [3, 0, 2, 1], [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0],
+];
+
+/// Texels a pattern disagrees with a clustering on, under the best label
+/// matching (confusion matrix, all permutations).
+fn mismatch(pattern: &[u8], labels: &[u8], k: usize) -> u32 {
+    let mut cm = [[0u32; 4]; 4];
+    for (&a, &b) in pattern.iter().zip(labels) {
+        cm[a as usize][b as usize] += 1;
+    }
+    let n = pattern.len() as u32;
+    let mut best = 0u32;
+    if k == 3 {
+        for p in PERM3.iter() {
+            best = best.max(cm[0][p[0] as usize] + cm[1][p[1] as usize] + cm[2][p[2] as usize]);
         }
-        if n1 > 0.0 {
-            c1 = [s1[0] / n1, s1[1] / n1, s1[2] / n1, s1[3] / n1];
+    } else {
+        for p in PERM4.iter() {
+            best = best.max(
+                cm[0][p[0] as usize] + cm[1][p[1] as usize] + cm[2][p[2] as usize] + cm[3][p[3] as usize],
+            );
         }
     }
+    n - best
 }
 
 /// Lowest absolute correlation between a channel and the others, and that
@@ -1071,22 +1116,37 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             search_fit(ctx, prm, &src, &fitd, &mut best);
         }
     }
-    if prm.max_partitions >= 2 && prm.part2_candidates > 0 && best.err / (n as f64 * chans) > good_enough {
+    for k in 2..=prm.max_partitions.min(4) as usize {
+        let m = prm.part_candidates[k - 2];
+        if m == 0 || best.err / (n as f64 * chans) <= good_enough {
+            break;
+        }
         let mut labels = [0u8; MAX_TEXELS];
-        two_means(&src, &mut labels);
-        // Rank patterns by mismatch with the clustering (either labelling):
-        // popcount of the XOR of bitsets, best M kept by insertion.
+        k_means(&src, k, &mut labels);
+        // Rank patterns by mismatch with the clustering; best M by insertion.
+        let mut top: Vec<(u32, usize)> = Vec::with_capacity(m + 1);
+        let pats = match k {
+            2 => &ctx.part2,
+            3 => &ctx.part3,
+            _ => &ctx.part4,
+        };
         let mut lb = [0u64; 4];
-        for i in 0..n {
-            if labels[i] == 1 {
-                lb[i / 64] |= 1 << (i % 64);
+        if k == 2 {
+            for i in 0..n {
+                if labels[i] == 1 {
+                    lb[i / 64] |= 1 << (i % 64);
+                }
             }
         }
-        let m = prm.part2_candidates;
-        let mut top: Vec<(u32, usize)> = Vec::with_capacity(m + 1);
-        for (pi, p) in ctx.part2.iter().enumerate() {
-            let mis = (0..4).map(|w| (p.bits[w] ^ lb[w]).count_ones()).sum::<u32>();
-            let key = (mis.min(n as u32 - mis), pi);
+        for (pi, p) in pats.iter().enumerate() {
+            let mis = if k == 2 {
+                // popcount of the XOR of bitsets, either labelling.
+                let x = (0..4).map(|w| (p.bits[w] ^ lb[w]).count_ones()).sum::<u32>();
+                x.min(n as u32 - x)
+            } else {
+                mismatch(&p.labels, &labels[..n], k)
+            };
+            let key = (mis, pi);
             if top.len() == m && key >= top[m - 1] {
                 continue;
             }
@@ -1095,9 +1155,9 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
             top.truncate(m);
         }
         for &(_, pi) in top.iter() {
-            let p = &ctx.part2[pi];
-            let fit2 = make_fit(&src, 2, p.seed, &p.labels, 4);
-            search_fit(ctx, prm, &src, &fit2, &mut best);
+            let p = &pats[pi];
+            let fitk = make_fit(&src, k as u8, p.seed, &p.labels, 4);
+            search_fit(ctx, prm, &src, &fitk, &mut best);
         }
     }
     best

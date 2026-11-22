@@ -117,7 +117,7 @@ fn deterministic_and_split_invariant() {
 #[test]
 fn encoder_reconstruction_is_the_decode() {
     let fp = AstcFootprint::B8X6;
-    let ctx = context::Ctx::new(fp);
+    let ctx = context::Ctx::new(fp, 2);
     let prm = params(AstcPreset::Medium);
     let img = image(8, 6, 0, 1);
     let mut px = [[0u8; 4]; 216];
