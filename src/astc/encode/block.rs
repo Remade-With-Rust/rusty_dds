@@ -447,28 +447,52 @@ pub(super) fn infill_eff(ctx: &Ctx, grid: usize, gw: &[u8], out: &mut [u8; MAX_T
     }
 }
 
-
-/// Least-squares endpoints for one channel given integer weights (0..=64).
-fn refit_channel(src: &Src, idx: &[u8], c: usize, w: &[u8; MAX_TEXELS]) -> Option<(f32, f32)> {
-    let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
+/// Least-squares endpoints for each channel of one partition given integer
+/// texel weights (0..=64) per plane.
+fn refit_part(src: &Src, idx: &[u8], w1: &[u8; MAX_TEXELS], w2: &[u8; MAX_TEXELS], ccs: usize, chans: usize) -> [Option<(f32, f32)>; 4] {
+    // The weight sums (a, b, d) depend only on the plane, not the channel:
+    // accumulated once per plane, in the same texel order as a per-channel
+    // fit would, so every result is bit-identical to fitting each channel
+    // on its own.
+    let (mut a, mut b, mut d) = ([0f32; 2], [0f32; 2], [0f32; 2]);
+    let (mut x0, mut x1) = ([0f32; 4], [0f32; 4]);
+    let dual = ccs < 4;
     for &i in idx {
         let i = i as usize;
-        let t = w[i] as f32 * (1.0 / 64.0);
-        let u = 1.0 - t;
-        let x = src.px[i][c] as f32;
-        a += u * u;
-        b += u * t;
-        d += t * t;
-        x0 += u * x;
-        x1 += t * x;
+        let t1 = w1[i] as f32 * (1.0 / 64.0);
+        let u1 = 1.0 - t1;
+        a[0] += u1 * u1;
+        b[0] += u1 * t1;
+        d[0] += t1 * t1;
+        let (t2, u2) = if dual {
+            let t2 = w2[i] as f32 * (1.0 / 64.0);
+            let u2 = 1.0 - t2;
+            a[1] += u2 * u2;
+            b[1] += u2 * t2;
+            d[1] += t2 * t2;
+            (t2, u2)
+        } else {
+            (t1, u1)
+        };
+        for c in 0..chans {
+            let (t, u) = if c == ccs { (t2, u2) } else { (t1, u1) };
+            let x = src.px[i][c] as f32;
+            x0[c] += u * x;
+            x1[c] += t * x;
+        }
     }
-    let det = a * d - b * b;
-    if det.abs() < 1e-6 {
-        return None;
+    let mut out = [None; 4];
+    for c in 0..chans {
+        let pl = usize::from(c == ccs);
+        let det = a[pl] * d[pl] - b[pl] * b[pl];
+        if det.abs() < 1e-6 {
+            continue;
+        }
+        let e0 = (x0[c] * d[pl] - x1[c] * b[pl]) / det;
+        let e1 = (x1[c] * a[pl] - x0[c] * b[pl]) / det;
+        out[c] = Some((e0.clamp(0.0, 255.0), e1.clamp(0.0, 255.0)));
     }
-    let e0 = (x0 * d - x1 * b) / det;
-    let e1 = (x1 * a - x0 * b) / det;
-    Some((e0.clamp(0.0, 255.0), e1.clamp(0.0, 255.0)))
+    out
 }
 
 fn near(range: usize, x: f32) -> u8 {
@@ -815,10 +839,12 @@ fn exact_candidate(
         // Refit endpoints to the quantised weights, then pick the best
         // encoding per partition (same CEM for all partitions: matched).
         let mut lines = fit.lines;
+        // Opaque: alpha is overwritten with 255 below, so it is not refitted.
+        let chans = if src.opaque { 3 } else { 4 };
         for p in 0..parts {
-            for c in 0..4 {
-                let w = if c == fit.ccs { &eff2 } else { &eff1 };
-                if let Some((a, b)) = refit_channel(src, fit.part(p), c, w) {
+            let fits = refit_part(src, fit.part(p), &eff1, &eff2, fit.ccs, chans);
+            for c in 0..chans {
+                if let Some((a, b)) = fits[c] {
                     lines[p].e0[c] = a;
                     lines[p].e1[c] = b;
                 }
