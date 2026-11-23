@@ -1295,6 +1295,7 @@ fn exact_candidate(
                 }
             }
         }
+        let (old1, old2) = (gw1, gw2);
         let mut d1 = [0f32; 64];
         decimate(ctx, g, &w1, prm.grid_iters, &mut d1);
         quantize_weights(m.range as usize, &d1[..count], &mut gw1[..count]);
@@ -1302,6 +1303,14 @@ fn exact_candidate(
             let mut d2 = [0f32; 64];
             decimate(ctx, g, &w2, prm.grid_iters, &mut d2);
             quantize_weights(m.range as usize, &d2[..count], &mut gw2[..count]);
+        }
+        // A pass is a function of the grid weights alone (everything else it
+        // reads is fixed for the candidate). Weights unchanged: the next pass
+        // would repeat this one exactly (same error, not strictly below
+        // `best` any more, same `mine`) and re-derive the same weights again,
+        // and so would every pass after it.
+        if gw1[..count] == old1[..count] && (!dual || gw2[..count] == old2[..count]) {
+            break;
         }
     }
     mine
