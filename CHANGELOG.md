@@ -3,6 +3,12 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.4](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.3...v0.11.4) - 2026-11-23
+
+### Other
+
+- bump rusty_alloc-api to 2.6.0 ([#27](https://github.com/Remade-With-Rust/rusty_dds/pull/27))
+
 ## [0.11.3](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.2...v0.11.3) - 2026-11-23
 
 ### Other
