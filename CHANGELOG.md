@@ -3,6 +3,37 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.3](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.2...v0.11.3) - 2026-11-23
+
+### Other
+
+- *(astc)* vein-round encode speed (Ir, wall vs 0.11.2, ES1 vs astcenc)
+- *(astc)* HDR passes stop once the weights reach a fixed point
+- *(astc)* HDR two-means stops at the first iteration that reassigns nothing
+- *(astc)* line fit sums its off-line error in the projection walk
+- *(astc)* k-means stops at the first iteration that reassigns nothing
+- *(astc)* two-partition pattern ranking runs with POPCNT
+- *(astc)* name the search_fit tried tuple (clippy type_complexity)
+- *(astc)* a refined candidate resumes from its unrefined pass instead of re-running it
+- *(astc)* exact_candidate stops refining once the weights reach a fixed point
+- *(astc)* endpoint quantisation indexes its table through an i32 cast
+- *(astc)* weight quantisation indexes its table through an i32 cast
+- *(astc)* HDR endpoint repair stops a sweep that can only repeat rejections
+- *(astc)* 4x4 exact error uses the AVX2 four-texel kernel
+- *(astc)* four-partition pattern ranking skips matchings it can bound out
+- *(astc)* exact_candidate keeps its per-CEM table across passes, valid by bitmask
+- *(astc)* encoder partition tables deduplicate by bitset, not label vector
+- *(astc)* encoder partition tables hash each seed once, not per texel
+- *(astc)* HDR grid residual runs through the block encoder's residual kernel
+- *(astc)* HDR endpoint least squares sums the weight terms once per fit
+- *(astc)* HDR last two-partition pass skips partition 1 when partition 0 already loses
+- *(astc)* HDR stops re-deriving weights after its last pass
+- *(astc)* rustfmt the HDR push_top call sites
+- *(astc)* HDR keeps its best mode candidates by insertion, not a full sort
+- *(astc)* HDR exact error stops once a candidate cannot win
+- *(astc)* HDR decodes each endpoint candidate once
+- *(astc)* HDR repair_best takes its two best candidates in one pass
+
 ## [0.11.2](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.1...v0.11.2) - 2026-11-22
 
 ### Added
