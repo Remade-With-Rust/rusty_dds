@@ -731,22 +731,28 @@ fn search_two_partitions(
                         break;
                     }
                     let id = &idx[p][..cnt[p]];
+                    // Weight sums once per partition, channel sums per
+                    // channel, each in texel order (the values the
+                    // per-channel loop computed).
                     let mut e0 = [0f32; 4];
                     let mut e1 = [0f32; 4];
-                    for c in 0..chans {
-                        let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
-                        let mut mean_c = 0f32;
-                        for &i in id {
-                            let i = i as usize;
-                            let w = eff[i] as f32 / 64.0;
-                            let u = 1.0 - w;
-                            a += u * u;
-                            b += u * w;
-                            d += w * w;
-                            x0 += u * t[i][c];
-                            x1 += w * t[i][c];
-                            mean_c += t[i][c];
+                    let (mut a, mut b, mut d) = (0f32, 0f32, 0f32);
+                    let (mut x0, mut x1, mut mean) = ([0f32; 4], [0f32; 4], [0f32; 4]);
+                    for &i in id {
+                        let i = i as usize;
+                        let w = eff[i] as f32 / 64.0;
+                        let u = 1.0 - w;
+                        a += u * u;
+                        b += u * w;
+                        d += w * w;
+                        for c in 0..chans {
+                            x0[c] += u * t[i][c];
+                            x1[c] += w * t[i][c];
+                            mean[c] += t[i][c];
                         }
+                    }
+                    for c in 0..chans {
+                        let (x0, x1, mut mean_c) = (x0[c], x1[c], mean[c]);
                         let det = a * d - b * b;
                         if det.abs() > 1e-6 {
                             e0[c] = ((x0 * d - x1 * b) / det).clamp(0.0, 65535.0);
@@ -998,20 +1004,27 @@ pub(crate) fn encode_block_hdr(
         let mut eff = [0u8; MAX_TEXELS];
         for pass in 0..2 {
             infill_eff(ctx, g, &gw, &mut eff);
-            // Least-squares endpoints per channel in the domain.
+            // Least-squares endpoints per channel in the domain. The weight
+            // sums (a, b, d) do not depend on the channel: summed once, in
+            // the texel order each channel's fit summed them, so every value
+            // is the one the per-channel loop computed.
             let mut e0 = [0f32; 4];
             let mut e1 = [0f32; 4];
-            for c in 0..chans {
-                let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
-                for i in 0..n {
-                    let w = eff[i] as f32 / 64.0;
-                    let u = 1.0 - w;
-                    a += u * u;
-                    b += u * w;
-                    d += w * w;
-                    x0 += u * t[i][c];
-                    x1 += w * t[i][c];
+            let (mut a, mut b, mut d) = (0f32, 0f32, 0f32);
+            let (mut x0, mut x1) = ([0f32; 4], [0f32; 4]);
+            for i in 0..n {
+                let w = eff[i] as f32 / 64.0;
+                let u = 1.0 - w;
+                a += u * u;
+                b += u * w;
+                d += w * w;
+                for c in 0..chans {
+                    x0[c] += u * t[i][c];
+                    x1[c] += w * t[i][c];
                 }
+            }
+            for c in 0..chans {
+                let (x0, x1) = (x0[c], x1[c]);
                 let det = a * d - b * b;
                 if det.abs() > 1e-6 {
                     e0[c] = ((x0 * d - x1 * b) / det).clamp(0.0, 65535.0);
