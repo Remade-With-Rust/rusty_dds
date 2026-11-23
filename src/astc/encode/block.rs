@@ -1058,6 +1058,25 @@ fn residual(
     residual_scalar(g, dec, ideal, tw)
 }
 
+/// [`residual`] with explicit per-texel residual weights `tw` (the HDR
+/// encoder's): the same kernels, AVX2 twin when available.
+pub(super) fn residual_tw(
+    ctx: &Ctx,
+    grid: usize,
+    dec: &[f32; 64],
+    ideal: &[f32; MAX_TEXELS],
+    tw: &[f32; MAX_TEXELS],
+) -> f32 {
+    let g = &ctx.grids[grid];
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.avx2 {
+        if let Some(e) = super::simd::residual(t, g, dec, ideal, tw) {
+            return e;
+        }
+    }
+    residual_scalar(g, dec, ideal, tw)
+}
+
 /// The scalar body of [`residual`]: the oracle of `simd::residual`, and the
 /// kernel without AVX2.
 pub(super) fn residual_scalar(

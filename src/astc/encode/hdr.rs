@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use super::block::{decimate, infill_eff, quantize_weights, Best, MAX_TEXELS};
+use super::block::{decimate, infill_eff, quantize_weights, residual_tw, Best, MAX_TEXELS};
 use super::context::Ctx;
 use crate::astc::cem;
 use crate::astc::ise::LEVELS;
@@ -22,6 +22,9 @@ use crate::astc::parse::{BlockKind, SymbolicBlock};
 use crate::astc::quant::COLOR_NEAREST;
 use crate::astc::texel::lerp;
 use crate::astc::AstcProfile;
+
+/// Unit residual weights: `d * d * 1.0` is exactly `d * d`.
+static ONES: [f32; MAX_TEXELS] = [1.0; MAX_TEXELS];
 
 /// f32 to binary16 bits, round to nearest even; NaN and negatives become 0,
 /// values above the half range clamp to 65504 (ASTC HDR has no negatives).
@@ -687,16 +690,12 @@ fn search_two_partitions(
             let g = m.grid as usize;
             if res[g] < 0.0 {
                 decimate(ctx, g, &ideal, 2, &mut dec[g]);
-                let mut e = 0f32;
-                for (ti, &(nt, tp)) in ctx.grids[g].taps.iter().enumerate() {
-                    let v: f32 = tp[..nt as usize]
-                        .iter()
-                        .map(|&(k, c)| dec[g][k as usize] * c as f32)
-                        .sum();
-                    let d = v / (16.0 * 64.0) - ideal[ti];
-                    e += d * d * tw[ti];
-                }
-                res[g] = e;
+                // The block encoder's residual kernel (and its AVX2 twin):
+                // the same per-texel terms summed in texel order. Its taps
+                // are padded to four with zero contributions, which add +0
+                // to the tap sum (decimated weights are in 0..=64), and
+                // `* (1 / 1024)` equals `/ 1024` exactly (a power of two).
+                res[g] = residual_tw(ctx, g, &dec[g], &ideal, &tw);
             }
             let lw = LEVELS[m.range as usize] as f32;
             let wq = sum_l2 * ctx.grids[g].noise / (12.0 * (lw - 1.0) * (lw - 1.0));
@@ -953,16 +952,8 @@ pub(crate) fn encode_block_hdr(
         let g = m.grid as usize;
         if res[g] < 0.0 {
             decimate(ctx, g, &ideal, 2, &mut dec[g]);
-            let mut e = 0f32;
-            for (ti, &(nt, tp)) in ctx.grids[g].taps.iter().enumerate() {
-                let v: f32 = tp[..nt as usize]
-                    .iter()
-                    .map(|&(k, c)| dec[g][k as usize] * c as f32)
-                    .sum();
-                let d = v / (16.0 * 64.0) - ideal[ti];
-                e += d * d;
-            }
-            res[g] = e * len2;
+            // As in `search_two_partitions`, with unit texel weights.
+            res[g] = residual_tw(ctx, g, &dec[g], &ideal, &ONES) * len2;
         }
         let r = m.crange[0][(nvals / 2 - 1) as usize];
         if r == 0xFF {

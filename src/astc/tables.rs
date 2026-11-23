@@ -15,7 +15,10 @@ pub(crate) struct Grid {
     pub d: u8,
     /// Stored weights per plane.
     pub count: usize,
-    /// `taps[texel]` = (number of taps, [(index, contribution); 4]).
+    /// `taps[texel]` = (number of taps, [(index, contribution); 4]). The
+    /// encoder reads the padded forms below; this one is the oracle of the
+    /// infill test (`taps_equal_reference_infill`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub taps: Vec<(u8, [(u8, u8); 4])>,
     /// `taps` padded to exactly four entries with (0, 0): fixed-length loops
     /// for the encoder (a zero contribution adds exactly nothing).
