@@ -871,8 +871,15 @@ fn search_two_partitions(
                     }
                 }
                 let mut d1 = [0f32; 64];
+                let old = gw;
                 decimate(ctx, g, &w, 2, &mut d1);
                 quantize_weights(m.range as usize, &d1[..count], &mut gw[..count]);
+                // The pass is a function of the weights: unchanged weights
+                // would repeat it exactly, and its total no longer beats
+                // `best`.
+                if gw[..count] == old[..count] {
+                    break;
+                }
             }
         }
     }
@@ -1165,8 +1172,14 @@ pub(crate) fn encode_block_hdr(
                 };
             }
             let mut d1 = [0f32; 64];
+            let old = gw;
             decimate(ctx, g, &w, 2, &mut d1);
             quantize_weights(m.range as usize, &d1[..count], &mut gw[..count]);
+            // As in `search_two_partitions`: unchanged weights would repeat
+            // the pass exactly, and its error no longer beats `best`.
+            if gw[..count] == old[..count] {
+                break;
+            }
         }
     }
     // Two partitions: about half as many patterns as exact candidates.
