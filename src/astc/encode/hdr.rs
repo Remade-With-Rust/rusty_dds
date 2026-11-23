@@ -717,7 +717,7 @@ fn search_two_partitions(
             let mut gw = [0u8; 64];
             quantize_weights(m.range as usize, &dec[g][..count], &mut gw[..count]);
             let mut eff = [0u8; MAX_TEXELS];
-            for _pass in 0..2 {
+            for pass in 0..2 {
                 infill_eff(ctx, g, &gw, &mut eff);
                 let mut total = 0f64;
                 let mut chosen = [[0u8; 8]; 2];
@@ -812,6 +812,10 @@ fn search_two_partitions(
                     }
                     s.weights[..count].copy_from_slice(&gw[..count]);
                     *best = Best { err: total, sym: s };
+                }
+                // The weights re-derived below feed only the next pass.
+                if pass == 1 {
+                    break;
                 }
                 // Re-derive ideal weights per partition from its decoded endpoints.
                 let mut w = [0f32; MAX_TEXELS];
@@ -984,7 +988,7 @@ pub(crate) fn encode_block_hdr(
         let mut gw = [0u8; 64];
         quantize_weights(m.range as usize, &dec[g][..count], &mut gw[..count]);
         let mut eff = [0u8; MAX_TEXELS];
-        for _pass in 0..2 {
+        for pass in 0..2 {
             infill_eff(ctx, g, &gw, &mut eff);
             // Least-squares endpoints per channel in the domain.
             let mut e0 = [0f32; 4];
@@ -1106,6 +1110,10 @@ pub(crate) fn encode_block_hdr(
                 s.color_values[..pn].copy_from_slice(&v[..pn]);
                 s.weights[..count].copy_from_slice(&gw[..count]);
                 best = Best { err, sym: s };
+            }
+            // The weights re-derived below feed only the next pass.
+            if pass == 1 {
+                break;
             }
             // Re-derive ideal weights from the decoded endpoints.
             let ep = cem::expand(&cem::decode(pc, &v), profile);
