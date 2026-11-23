@@ -89,7 +89,7 @@ num-traits = "0.2"
 bcdec_rs = { version = "0.2", optional = true }
 # KTX 2.0 Zstandard supercompression (feature `ktx2-zstd`, off by default).
 # Pure Rust; its MSRV is 1.85, so the feature raises the MSRV to 1.85.
-rusty_zstd = { version = "0.5", optional = true, default-features = false, features = ["alloc"] }
+rusty_zstd = { version = "0.5.1", optional = true, default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
