@@ -1497,6 +1497,9 @@ pub(super) fn rank_patterns_body(
 ) {
     let lab = label_bits(labels);
     let words = labels.len().div_ceil(64);
+    if k == 4 {
+        return rank4_bounded(bits, &lab, words, m, top);
+    }
     for (pi, pb) in bits.iter().enumerate() {
         let key = (mismatch_bits(pb, &lab, k, words), pi);
         if top.len() == m && key >= top[m - 1] {
@@ -1506,6 +1509,71 @@ pub(super) fn rank_patterns_body(
         top.insert(pos, key);
         top.truncate(m);
     }
+}
+
+/// [`rank_patterns_body`] for four partitions, where the exact matching
+/// search tries 24 permutations: a pattern whose mismatch is provably at
+/// least the last kept entry's skips the search. Any matching keeps at most
+/// one cell per row of the confusion matrix, so the matched count is at most
+/// the sum of the row maxima and the mismatch at least `n` minus it; once
+/// the list is full a pattern is kept only below its last mismatch (a tie
+/// loses on the later index), so a bound that reaches it decides the same.
+/// (For three partitions, 6 permutations, the bound and the shared shape
+/// cost more than they saved: Medium +2.0..+4.4% Ir, three shapes measured.)
+#[inline(always)]
+fn rank4_bounded(
+    bits: &[PartBits],
+    lab: &PartBits,
+    words: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    for (pi, pb) in bits.iter().enumerate() {
+        let (cm, n) = confusion4(pb, lab, words);
+        if top.len() == m {
+            let mut rows = 0u32;
+            for r in &cm {
+                rows += r[0].max(r[1]).max(r[2].max(r[3]));
+            }
+            if n - rows >= top[m - 1].0 {
+                continue;
+            }
+        }
+        let key = (best_matching(&cm, n, 4), pi);
+        if top.len() == m && key >= top[m - 1] {
+            continue;
+        }
+        let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+        top.insert(pos, key);
+        top.truncate(m);
+    }
+}
+
+/// The confusion matrix of [`mismatch_bits`] for k = 4, and the texel count.
+#[inline(always)]
+fn confusion4(pat: &PartBits, lab: &PartBits, words: usize) -> ([[u32; 4]; 4], u32) {
+    let (pb, pc, lb, lc) = (&pat.bits, &pat.cnt, &lab.bits, &lab.cnt);
+    let mut cm = [[0u32; 4]; 4];
+    for a in 0..3 {
+        let mut row = 0;
+        for b in 0..3 {
+            let mut s = 0;
+            for w in 0..words {
+                s += (pb[a][w] & lb[b][w]).count_ones();
+            }
+            cm[a][b] = s;
+            row += s;
+        }
+        cm[a][3] = pc[a] - row;
+    }
+    let mut row = 0;
+    for b in 0..3 {
+        let col: u32 = (0..3).map(|a| cm[a][b]).sum();
+        cm[3][b] = lc[b] - col;
+        row += cm[3][b];
+    }
+    cm[3][3] = pc[3] - row;
+    (cm, pc[0] + pc[1] + pc[2] + pc[3])
 }
 
 /// `n` minus the largest diagonal sum of the confusion matrix over all
@@ -1708,6 +1776,32 @@ mod oracle_tests {
     use super::*;
 
     /// QSTEP2 holds (255 / (levels - 1))^2 computed in f64 and rounded to f32.
+    /// The bounded four-partition ranking keeps the same patterns, in the
+    /// same order, as ranking every pattern by its exact mismatch.
+    #[test]
+    fn rank4_bounded_equals_exhaustive() {
+        let mut rng = Rng::new(0x4A11_0004);
+        for n in [16usize, 36, 64, 100, 144, 216] {
+            let pats: Vec<PartBits> = (0..300)
+                .map(|_| label_bits(&(0..n).map(|_| rng.below(4) as u8).collect::<Vec<_>>()))
+                .collect();
+            for m in [1usize, 2, 4, 8] {
+                let labels: Vec<u8> = (0..n).map(|_| rng.below(4) as u8).collect();
+                let lab = label_bits(&labels);
+                let mut want: Vec<(u32, usize)> = pats
+                    .iter()
+                    .enumerate()
+                    .map(|(pi, pb)| (mismatch_bits(pb, &lab, 4, n.div_ceil(64)), pi))
+                    .collect();
+                want.sort();
+                want.truncate(m);
+                let mut got = Vec::new();
+                rank_patterns_body(&pats, &labels, 4, m, &mut got);
+                assert_eq!(got, want, "n {n} m {m}");
+            }
+        }
+    }
+
     #[test]
     fn qstep2_table() {
         for (r, &q) in QSTEP2.iter().enumerate() {
