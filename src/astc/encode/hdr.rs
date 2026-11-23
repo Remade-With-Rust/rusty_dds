@@ -722,6 +722,14 @@ fn search_two_partitions(
                 let mut total = 0f64;
                 let mut chosen = [[0u8; 8]; 2];
                 for p in 0..2 {
+                    // The last pass only competes with `best` (nothing is
+                    // re-derived after it), and partition errors are
+                    // non-negative: once partition 0 alone reaches the best
+                    // error the total cannot get below it, so partition 1
+                    // need not be searched.
+                    if p == 1 && pass == 1 && total >= best.err {
+                        break;
+                    }
                     let id = &idx[p][..cnt[p]];
                     let mut e0 = [0f32; 4];
                     let mut e1 = [0f32; 4];
