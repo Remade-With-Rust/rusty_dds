@@ -189,7 +189,7 @@ struct SearchScratch {
     cands: Vec<Cand>,
     top: Vec<usize>,
     keep: Vec<usize>,
-    tried: Vec<(f64, usize, [u8; 64], [u8; 64], Option<Pick>)>,
+    tried: Vec<Tried>,
     encs: Vec<(u8, [u8; 8])>,
     /// `exact_candidate`'s best encoding per (CEM, partition). Not cleared
     /// between passes: a cell is valid only while its CEM's bit is set in
@@ -200,6 +200,10 @@ struct SearchScratch {
 /// The encoding a pass of `exact_candidate` chose: its CEM and each
 /// partition's values.
 type Pick = (usize, [[u8; 8]; 4]);
+
+/// One unrefined candidate of `search_fit`: its exact error, candidate
+/// index, grid weights (planes 1 and 2) and chosen encoding.
+type Tried = (f64, usize, [u8; 64], [u8; 64], Option<Pick>);
 
 /// The best block found so far.
 pub(crate) struct Best {
