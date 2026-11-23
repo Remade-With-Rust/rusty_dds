@@ -17,7 +17,7 @@ libc = "0.2"
 dds = "=0.2.0"
 astc-decode = "=0.3.1"
 # House rule: binaries that run an encoder use rusty_alloc (the shipping allocator).
-rusty_alloc-api = "=2.5.0"
+rusty_alloc-api = "2.6.0"
 
 [profile.release]
 debug = 1

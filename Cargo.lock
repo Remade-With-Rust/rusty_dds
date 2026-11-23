@@ -2698,9 +2698,9 @@ dependencies = [
 
 [[package]]
 name = "rusty_zstd"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "864f2400b06de8b2491e0991790c5f01681c254a428636529c97ec26159efe42"
+checksum = "9e8078cd572dcaf7e1f346a184f36bfcca77d755270ef7212c1d756ea399bc5a"
 
 [[package]]
 name = "same-file"
