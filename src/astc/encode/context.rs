@@ -72,6 +72,12 @@ pub(crate) struct Ctx {
     /// kernels run (`encode::simd`; bit-identical to the scalar).
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     pub(in crate::astc::encode) avx2: Option<super::simd::Avx2>,
+    /// Set when the CPU supports AVX2, for every footprint (4x4 included):
+    /// the four-texel exact-error kernel (`part_err_quads`) uses it. Unlike
+    /// the gathers behind `avx2`, it needs no per-grid tables, so the 4x4
+    /// gate does not apply to it.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    pub(in crate::astc::encode) quads: Option<super::simd::Avx2>,
     /// Set when the CPU has POPCNT: the pattern ranking uses it.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     pub(in crate::astc::encode) popcnt: Option<super::simd::Popcnt>,
@@ -281,6 +287,8 @@ impl Ctx {
             } else {
                 None
             },
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            quads: super::simd::Avx2::detect(),
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             popcnt: super::simd::Popcnt::detect(),
         }

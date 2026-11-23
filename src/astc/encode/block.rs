@@ -771,7 +771,7 @@ fn exact_part_err(
     let (px, unorm8) = (src.px, src.tgt.unorm8);
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     let acc = super::simd::part_err_acc(
-        ctx.avx2,
+        ctx.quads,
         px,
         idx,
         ep,
