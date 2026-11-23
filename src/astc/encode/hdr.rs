@@ -582,7 +582,11 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
     let mut c0 = far(&mean);
     let mut c1 = far(&c0);
     let mut bits = [0u64; 4];
-    for _ in 0..4 {
+    // An iteration that assigns every texel as the one before it would
+    // recompute the same centroids (same sums, same order; an empty side
+    // keeps its centroid either way) and repeat itself: stop there.
+    for it in 0..4 {
+        let prev = bits;
         bits = [0; 4];
         let (mut s0, mut s1) = ([0f32; 4], [0f32; 4]);
         let (mut n0, mut n1) = (0f32, 0f32);
@@ -599,6 +603,9 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
                     s0[c] += p[c];
                 }
             }
+        }
+        if it > 0 && bits == prev {
+            break;
         }
         if n0 > 0.0 {
             c0 = s0.map(|v| v / n0);
