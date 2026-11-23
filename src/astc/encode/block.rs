@@ -191,6 +191,10 @@ struct SearchScratch {
     keep: Vec<usize>,
     tried: Vec<(f64, usize, [u8; 64], [u8; 64])>,
     encs: Vec<(u8, [u8; 8])>,
+    /// `exact_candidate`'s best encoding per (CEM, partition). Not cleared
+    /// between passes: a cell is valid only while its CEM's bit is set in
+    /// that pass's per-partition mask.
+    chosen: [[(f64, [u8; 8]); 4]; 16],
 }
 
 /// The best block found so far.
@@ -904,6 +908,7 @@ fn search_fit(
         keep,
         tried,
         encs,
+        chosen,
     } = ss;
     cands.clear();
     let cw_mean = (src.tgt.cw[0] + src.tgt.cw[1] + src.tgt.cw[2] + src.tgt.cw[3]) * 0.25;
@@ -1019,7 +1024,7 @@ fn search_fit(
             );
         }
         // One unrefined pass for every kept candidate ...
-        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best, encs);
+        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best, encs, chosen);
         tried.push((e, i, gw1, gw2));
     }
     // ... and the refinement passes only for the best few.
@@ -1031,7 +1036,7 @@ fn search_fit(
         });
         for &(_, i, gw1, gw2) in tried.iter().take(prm.refine_top.max(1)) {
             exact_candidate(
-                ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best, encs,
+                ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best, encs, chosen,
             );
         }
     }
@@ -1113,6 +1118,7 @@ fn exact_candidate(
     refine: u8,
     best: &mut Best,
     encs: &mut Vec<(u8, [u8; 8])>,
+    chosen: &mut [[(f64, [u8; 8]); 4]; 16],
 ) -> f64 {
     let mut mine = f64::MAX;
     let m: Mode = ctx.modes[cand.mode];
@@ -1148,9 +1154,13 @@ fn exact_candidate(
             }
         }
         // Collect encodings per partition; choose the CEM with the lowest
-        // total error over partitions.
-        let mut total_by_cem: [(f64, bool); 16] = [(0.0, true); 16];
-        let mut chosen: [[(f64, [u8; 8]); 4]; 16] = [[(f64::MAX, [0; 8]); 4]; 16];
+        // total error over partitions. `chosen[cem][p]` is valid when bit
+        // `cem` of that partition's `seen` mask is set (its first encoding
+        // fills it, as a strict `<` against an f64::MAX start did: every
+        // exact error is finite); `all` keeps the CEMs seen in every
+        // partition, and `total` sums a CEM's partitions in partition order.
+        let mut total = [0f64; 16];
+        let mut all = u16::MAX;
         for p in 0..parts {
             encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, encs);
             // Same-budget alternatives: a class with no more values fits the
@@ -1162,31 +1172,35 @@ fn exact_candidate(
                     encs.extend_from_slice(&extra);
                 }
             }
-            let mut seen = [false; 16];
+            let mut seen = 0u16;
             for &(cemv, v) in encs.iter() {
                 let raw = cem::decode(cemv, &v);
                 let ep = cem::expand(&raw, src.tgt.profile);
                 let e = exact_part_err(ctx, src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
-                seen[cemv as usize] = true;
-                if e < chosen[cemv as usize][p].0 {
-                    chosen[cemv as usize][p] = (e, v);
+                let bit = 1u16 << (cemv & 15);
+                let cell = &mut chosen[(cemv & 15) as usize][p];
+                if seen & bit == 0 || e < cell.0 {
+                    *cell = (e, v);
                 }
+                seen |= bit;
             }
-            for cemv in 0..16 {
-                if !seen[cemv] {
-                    total_by_cem[cemv].1 = false;
-                } else {
-                    total_by_cem[cemv].0 += chosen[cemv][p].0;
-                }
+            all &= seen;
+            let mut mk = seen;
+            while mk != 0 {
+                let cemv = mk.trailing_zeros() as usize;
+                total[cemv] += chosen[cemv][p].0;
+                mk &= mk - 1;
             }
         }
+        // Lowest CEM first, strict `<`: ties keep the lowest CEM.
         let mut pick = None;
-        for cemv in 0..16 {
-            if total_by_cem[cemv].1 && chosen[cemv][0].0 < f64::MAX {
-                let e = total_by_cem[cemv].0;
-                if pick.map_or(true, |(be, _)| e < be) {
-                    pick = Some((e, cemv));
-                }
+        let mut mk = all;
+        while mk != 0 {
+            let cemv = mk.trailing_zeros() as usize;
+            mk &= mk - 1;
+            let e = total[cemv];
+            if pick.map_or(true, |(be, _)| e < be) {
+                pick = Some((e, cemv));
             }
         }
         let Some((err, cemv)) = pick else { return mine };
