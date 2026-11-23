@@ -323,10 +323,22 @@ fn repair(
     chans: usize,
 ) -> Option<cem::Endpoints> {
     let mut changed = None;
+    // Position (2 k + up) of the last accepted move of the previous sweep.
+    // A later position tested before anything is accepted in this sweep
+    // sees exactly the vector it saw in the previous sweep (nothing was
+    // accepted after it there, or since), and was rejected then against an
+    // error at least as large as now: rejected again. So is every position
+    // after it, so the sweep ends with no move, as the full sweep would.
+    let mut last: Option<usize> = None;
     for _ in 0..3 {
         let mut moved = false;
-        for k in 0..nvals {
-            for up in [false, true] {
+        let mut this_last = None;
+        'sweep: for k in 0..nvals {
+            for (ui, up) in [false, true].into_iter().enumerate() {
+                let pos = 2 * k + ui;
+                if !moved && last.is_some_and(|l| pos > l) {
+                    break 'sweep;
+                }
                 let Some(q) = step_level(range, v[k], up) else {
                     continue;
                 };
@@ -337,6 +349,7 @@ fn repair(
                     *v = w;
                     e = ew;
                     moved = true;
+                    this_last = Some(pos);
                     changed = Some(ep);
                 }
             }
@@ -344,6 +357,7 @@ fn repair(
         if !moved {
             break;
         }
+        last = this_last;
     }
     changed
 }
