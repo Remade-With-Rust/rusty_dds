@@ -1407,9 +1407,14 @@ fn k_means(src: &Src, k: usize, labels: &mut [u8; MAX_TEXELS]) {
         }
         cent[s] = col(bi);
     }
-    for _ in 0..4 {
+    // Lloyd iterations. An iteration that assigns every texel as the one
+    // before it recomputes bit-identical centroids (the same sums in the
+    // same order; an empty cluster keeps its centroid either way), so every
+    // remaining iteration would repeat it: stop there.
+    for it in 0..4 {
         let mut sum = [[0f32; 4]; 4];
         let mut cnt = [0f32; 4];
+        let mut moved = it == 0;
         for i in 0..n {
             let c = col(i);
             let mut best = 0;
@@ -1421,11 +1426,15 @@ fn k_means(src: &Src, k: usize, labels: &mut [u8; MAX_TEXELS]) {
                     best = j;
                 }
             }
+            moved |= labels[i] != best as u8;
             labels[i] = best as u8;
             cnt[best] += 1.0;
             for q in 0..4 {
                 sum[best][q] += c[q];
             }
+        }
+        if !moved {
+            break;
         }
         for j in 0..k {
             if cnt[j] > 0.0 {
