@@ -303,6 +303,10 @@ fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -
     let mut tmin = f32::MAX;
     let mut tmax = f32::MIN;
     let mut ts = [0f32; MAX_TEXELS];
+    // The residual off the line depends only on t, not on its range: summed
+    // here, in the same texel order with the same operations as a second
+    // walk would.
+    let mut perp = 0f32;
     for &i in idx {
         let i = i as usize;
         let mut d = [0f32; 4];
@@ -315,13 +319,19 @@ fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -
         ts[i] = t;
         tmin = tmin.min(t);
         tmax = tmax.max(t);
+        for c in 0..4 {
+            if mask[c] {
+                let p = mean[c] + dir[c] * t;
+                let e = (src.px[i][c] as f32 - p) * cw[c];
+                perp += e * e;
+            }
+        }
     }
     if idx.is_empty() {
         tmin = 0.0;
         tmax = 0.0;
     }
     let span = tmax - tmin;
-    let mut perp = 0f32;
     for &i in idx {
         let i = i as usize;
         w[i] = if span > 0.0 {
@@ -329,13 +339,6 @@ fn fit_line(src: &Src, idx: &[u8], mask: [bool; 4], w: &mut [f32; MAX_TEXELS]) -
         } else {
             0.0
         };
-        for c in 0..4 {
-            if mask[c] {
-                let p = mean[c] + dir[c] * ts[i];
-                let e = (src.px[i][c] as f32 - p) * cw[c];
-                perp += e * e;
-            }
-        }
     }
     let mut line = Line::default();
     for c in 0..4 {
