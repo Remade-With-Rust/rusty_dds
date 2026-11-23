@@ -16,7 +16,7 @@
 #[cfg(target_arch = "x86_64")]
 pub(super) use self::avx2::{decimate, infill_eff, residual, Avx2};
 #[cfg(target_arch = "x86_64")]
-pub(super) use self::popcnt::{rank_patterns, Popcnt};
+pub(super) use self::popcnt::{rank_patterns, rank_two, Popcnt};
 #[cfg(target_arch = "x86_64")]
 pub(super) use self::sse2::{part_err_acc, refit_sums};
 
@@ -299,8 +299,8 @@ mod sse2 {
 
 #[cfg(target_arch = "x86_64")]
 mod popcnt {
-    use super::super::block::rank_patterns_body;
-    use super::super::context::PartBits;
+    use super::super::block::{rank_patterns_body, rank_two_body};
+    use super::super::context::{PartBits, Partitioning};
     use alloc::vec::Vec;
 
     /// Proof that the CPU has POPCNT: only [`Popcnt::detect`] makes one.
@@ -337,6 +337,35 @@ mod popcnt {
         // SAFETY: a `Popcnt` exists only if the CPU supports POPCNT; the
         // body is safe code with no other requirement.
         unsafe { rank_k(bits, labels, k, m, top) }
+    }
+
+    /// `block::rank_two` compiled with POPCNT: the same body (integer
+    /// popcounts, so the same ranking).
+    pub(in crate::astc::encode) fn rank_two(
+        _: Popcnt,
+        pats: &[Partitioning],
+        lb: &[u64; 4],
+        n: usize,
+        m: usize,
+        top: &mut Vec<(u32, usize)>,
+    ) {
+        // SAFETY: a `Popcnt` exists only if the CPU supports POPCNT; the
+        // body is safe code with no other requirement.
+        unsafe { rank_2(pats, lb, n, m, top) }
+    }
+
+    /// # Safety
+    ///
+    /// The CPU supports POPCNT.
+    #[target_feature(enable = "popcnt")]
+    unsafe fn rank_2(
+        pats: &[Partitioning],
+        lb: &[u64; 4],
+        n: usize,
+        m: usize,
+        top: &mut Vec<(u32, usize)>,
+    ) {
+        rank_two_body(pats, lb, n, m, top)
     }
 
     /// # Safety

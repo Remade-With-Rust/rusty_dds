@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use crate::astc::block_mode::{self, ModeClass};
 use crate::astc::footprint::AstcFootprint;
-use crate::astc::partition::select_partition;
+use crate::astc::partition::PartitionGen;
 pub(crate) use crate::astc::tables::{build_grid, Grid};
 
 /// A legal block mode for the footprint.
@@ -72,6 +72,12 @@ pub(crate) struct Ctx {
     /// kernels run (`encode::simd`; bit-identical to the scalar).
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     pub(in crate::astc::encode) avx2: Option<super::simd::Avx2>,
+    /// Set when the CPU supports AVX2, for every footprint (4x4 included):
+    /// the four-texel exact-error kernel (`part_err_quads`) uses it. Unlike
+    /// the gathers behind `avx2`, it needs no per-grid tables, so the 4x4
+    /// gate does not apply to it.
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    pub(in crate::astc::encode) quads: Option<super::simd::Avx2>,
     /// Set when the CPU has POPCNT: the pattern ranking uses it.
     #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     pub(in crate::astc::encode) popcnt: Option<super::simd::Popcnt>,
@@ -85,27 +91,31 @@ pub(crate) struct Scratch {
     pub refined: Vec<bool>,
 }
 
-fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
+/// The distinct `count`-partition patterns with every partition non-empty,
+/// and their `label_bits` (same order). Labels are below 4, so two
+/// labellings are equal exactly when their per-label bitsets are: the
+/// duplicate test compares bitsets (four words per label) instead of label
+/// vectors.
+fn build_parts(fp: AstcFootprint, count: u32) -> (Vec<Partitioning>, Vec<PartBits>) {
     let texels = fp.texels() as usize;
     let small = texels < 31;
     let mut out: Vec<Partitioning> = Vec::new();
+    let mut outb: Vec<PartBits> = Vec::new();
     for seed in 0..1024u32 {
+        let gen = PartitionGen::new(seed, count, small);
         let mut labels = Vec::with_capacity(texels);
         for z in 0..fp.depth() {
             for y in 0..fp.height() {
                 for x in 0..fp.width() {
-                    labels.push(select_partition(seed, x, y, z, count, small));
+                    labels.push(gen.label(x, y, z));
                 }
             }
         }
-        let mut seen = [false; 4];
-        for &l in &labels {
-            seen[l as usize] = true;
-        }
-        if seen.iter().take(count as usize).any(|s| !s) {
+        let lb = label_bits(&labels);
+        if lb.cnt.iter().take(count as usize).any(|&n| n == 0) {
             continue;
         }
-        if out.iter().any(|p| p.labels == labels) {
+        if outb.iter().any(|q| q.bits == lb.bits) {
             continue;
         }
         out.push(Partitioning {
@@ -113,8 +123,9 @@ fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
             labels,
             bits: [0; 4],
         });
+        outb.push(lb);
     }
-    out
+    (out, outb)
 }
 
 impl Ctx {
@@ -197,31 +208,43 @@ impl Ctx {
             });
         }
         let small = texels < 31;
+        // The footprint's texels as a bitset.
+        let mask: [u64; 4] = core::array::from_fn(|w| {
+            let lo = 64 * w;
+            match texels.saturating_sub(lo) {
+                0 => 0,
+                n if n >= 64 => u64::MAX,
+                n => (1u64 << n) - 1,
+            }
+        });
         let mut part2: Vec<Partitioning> = Vec::new();
         for seed in 0..1024u32 {
+            let gen = PartitionGen::new(seed, 2, small);
             let mut labels = Vec::with_capacity(texels);
             for z in 0..fp.depth() {
                 for y in 0..fp.height() {
                     for x in 0..fp.width() {
-                        labels.push(select_partition(seed, x, y, z, 2, small));
+                        labels.push(gen.label(x, y, z));
                     }
                 }
             }
-            let ones = labels.iter().filter(|&&l| l == 1).count();
-            if ones == 0 || ones == texels {
+            // Labels are 0 or 1: the partition-1 bitset is the labelling.
+            let mut bits = [0u64; 4];
+            for (i, &l) in labels.iter().enumerate() {
+                if l == 1 {
+                    bits[i / 64] |= 1 << (i % 64);
+                }
+            }
+            let ones: u32 = bits.iter().map(|w| w.count_ones()).sum();
+            if ones == 0 || ones as usize == texels {
                 continue;
             }
-            // Deduplicate, including the complement (same split, swapped labels).
-            let dup = part2
-                .iter()
-                .any(|p| p.labels == labels || p.labels.iter().zip(&labels).all(|(a, b)| *a != *b));
+            // Deduplicate, including the complement (same split, swapped
+            // labels): equal labels are equal bitsets, all labels differing
+            // is the bitset's complement within the footprint's texels.
+            let comp: [u64; 4] = core::array::from_fn(|w| bits[w] ^ mask[w]);
+            let dup = part2.iter().any(|p| p.bits == bits || p.bits == comp);
             if !dup {
-                let mut bits = [0u64; 4];
-                for (i, &l) in labels.iter().enumerate() {
-                    if l == 1 {
-                        bits[i / 64] |= 1 << (i % 64);
-                    }
-                }
                 part2.push(Partitioning {
                     seed: seed as u16,
                     labels,
@@ -229,18 +252,16 @@ impl Ctx {
                 });
             }
         }
-        let part3 = if max_partitions >= 3 {
+        let (part3, bits3) = if max_partitions >= 3 {
             build_parts(fp, 3)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        let part4 = if max_partitions >= 4 {
+        let (part4, bits4) = if max_partitions >= 4 {
             build_parts(fp, 4)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        let bits3 = part3.iter().map(|p| label_bits(&p.labels)).collect();
-        let bits4 = part4.iter().map(|p| label_bits(&p.labels)).collect();
         let ng = grids.len();
         Ctx {
             texels,
@@ -267,6 +288,8 @@ impl Ctx {
                 None
             },
             #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+            quads: super::simd::Avx2::detect(),
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             popcnt: super::simd::Popcnt::detect(),
         }
     }
@@ -277,6 +300,69 @@ mod tests {
     use super::*;
     use crate::astc::infill::{infill, GRID_PAD};
     use crate::astc::testgen::Rng;
+
+    /// The bitset duplicate tests keep exactly the patterns the label-vector
+    /// comparison kept (two partitions: equal or complementary labels; three
+    /// and four: equal labels), in the same order.
+    #[test]
+    fn pattern_dedup_equals_label_compare() {
+        use crate::astc::partition::select_partition;
+        let fps = [
+            AstcFootprint::new_2d(4, 4).unwrap(),
+            AstcFootprint::new_2d(6, 5).unwrap(),
+            AstcFootprint::new_2d(8, 8).unwrap(),
+            AstcFootprint::ALL_3D[0],
+        ];
+        for fp in fps {
+            let texels = fp.texels() as usize;
+            let small = texels < 31;
+            let labels_of = |seed: u32, count: u32| -> Vec<u8> {
+                let mut l = Vec::new();
+                for z in 0..fp.depth() {
+                    for y in 0..fp.height() {
+                        for x in 0..fp.width() {
+                            l.push(select_partition(seed, x, y, z, count, small));
+                        }
+                    }
+                }
+                l
+            };
+            let ctx = Ctx::new(fp, 4);
+            let mut want2: Vec<Vec<u8>> = Vec::new();
+            let mut seeds2 = Vec::new();
+            for seed in 0..1024 {
+                let l = labels_of(seed, 2);
+                let ones = l.iter().filter(|&&v| v == 1).count();
+                if ones == 0 || ones == texels {
+                    continue;
+                }
+                if want2
+                    .iter()
+                    .any(|p| *p == l || p.iter().zip(&l).all(|(a, b)| a != b))
+                {
+                    continue;
+                }
+                want2.push(l);
+                seeds2.push(seed as u16);
+            }
+            let got2: Vec<u16> = ctx.part2.iter().map(|p| p.seed).collect();
+            assert_eq!(got2, seeds2, "{fp} two partitions");
+            for (count, got) in [(3u32, &ctx.part3), (4, &ctx.part4)] {
+                let mut want: Vec<Vec<u8>> = Vec::new();
+                let mut seeds = Vec::new();
+                for seed in 0..1024 {
+                    let l = labels_of(seed, count);
+                    if (0..count as u8).any(|k| !l.contains(&k)) || want.contains(&l) {
+                        continue;
+                    }
+                    want.push(l);
+                    seeds.push(seed as u16);
+                }
+                let g: Vec<u16> = got.iter().map(|p| p.seed).collect();
+                assert_eq!(g, seeds, "{fp} {count} partitions");
+            }
+        }
+    }
 
     /// The tap tables reproduce the reference infill for every grid of every
     /// footprint, with random stored weights.

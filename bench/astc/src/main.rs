@@ -308,6 +308,113 @@ fn ir_encode(args: &[String]) {
     println!("ir-encode {}: images {} fps {} blocks {blocks} bytes {bytes} hash {h:016x}", args[0], imgs.len(), fps.len());
 }
 
+/// Radiance .hdr (RGBE, new-style RLE or flat) to RGBA f32, alpha 1
+/// (the same loader as tools/astc-harness `hdrq`).
+fn load_hdr(path: &str) -> (u32, u32, Vec<f32>) {
+    let d = std::fs::read(path).unwrap();
+    let mut pos = 0;
+    let mut line = || {
+        let s = pos;
+        while d[pos] != b'\n' {
+            pos += 1;
+        }
+        pos += 1;
+        String::from_utf8_lossy(&d[s..pos - 1]).into_owned()
+    };
+    while !line().is_empty() {}
+    let res = line();
+    let parts: Vec<&str> = res.split_whitespace().collect();
+    let (h, w): (u32, u32) = (parts[1].parse().unwrap(), parts[3].parse().unwrap());
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let mut scan = vec![[0u8; 4]; w as usize];
+    for _ in 0..h {
+        if d[pos] == 2 && d[pos + 1] == 2 && w >= 8 && w < 32768 {
+            pos += 4;
+            for c in 0..4 {
+                let mut x = 0usize;
+                while x < w as usize {
+                    let n = d[pos] as usize;
+                    pos += 1;
+                    if n > 128 {
+                        let v = d[pos];
+                        pos += 1;
+                        for _ in 0..n - 128 {
+                            scan[x][c] = v;
+                            x += 1;
+                        }
+                    } else {
+                        for _ in 0..n {
+                            scan[x][c] = d[pos];
+                            pos += 1;
+                            x += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for px in scan.iter_mut() {
+                px.copy_from_slice(&d[pos..pos + 4]);
+                pos += 4;
+            }
+        }
+        for px in &scan {
+            let f = if px[3] == 0 { 0.0 } else { 2f32.powi(px[3] as i32 - 136) };
+            out.extend_from_slice(&[px[0] as f32 * f, px[1] as f32 * f, px[2] as f32 * f, 1.0]);
+        }
+    }
+    (w, h, out)
+}
+
+/// `--ir-encode-hdr <preset> <fp,fp,...> <hdr[@x,y,w,h]>...`: one HDR encode
+/// (`encode_rgba_f32`, profile `HdrRgbLdrA`) per (image, footprint). Same
+/// anchors as `--ir-encode`.
+fn ir_encode_hdr(args: &[String]) {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let fps: Vec<AstcFootprint> = args[1]
+        .split(',')
+        .map(|f| {
+            let v: Vec<u32> = f.split('x').map(|t| t.parse().unwrap()).collect();
+            AstcFootprint::new_2d(v[0], v[1]).unwrap()
+        })
+        .collect();
+    let imgs: Vec<(u32, u32, Vec<f32>)> = args[2..]
+        .iter()
+        .map(|spec| {
+            let (path, crop) = match spec.split_once('@') {
+                Some((p, c)) => (p, Some(c.split(',').map(|t| t.parse::<u32>().unwrap()).collect::<Vec<_>>())),
+                None => (spec.as_str(), None),
+            };
+            let (w, h, img) = load_hdr(path);
+            let Some(c) = crop else { return (w, h, img) };
+            let (x0, y0, cw, ch) = (c[0], c[1], c[2].min(w - c[0]), c[3].min(h - c[1]));
+            let mut out = Vec::with_capacity((cw * ch * 4) as usize);
+            for y in y0..y0 + ch {
+                let s = ((y * w + x0) * 4) as usize;
+                out.extend_from_slice(&img[s..s + (cw * 4) as usize]);
+            }
+            (cw, ch, out)
+        })
+        .collect();
+    let (mut blocks, mut bytes) = (0u64, 0u64);
+    let mut h = 0xCBF2_9CE4_8422_2325u64;
+    for (w, ht, img) in &imgs {
+        for &fp in &fps {
+            let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::HdrRgbLdrA).with_preset(preset);
+            let out = astc::encode_rgba_f32(img, *w, *ht, &opts).unwrap();
+            fnv_words(&mut h, &out);
+            blocks += (out.len() / 16) as u64;
+            bytes += out.len() as u64;
+        }
+    }
+    println!("ir-encode-hdr {}: images {} fps {} blocks {blocks} bytes {bytes} hash {h:016x}", args[0], imgs.len(), fps.len());
+}
+
 /// `--ir-container <files>...`: parse each container (.astc, .ktx, .ktx2 with
 /// zstd inflate when the `zstd` feature is on, .dds), then decode every
 /// subresource through the container's own surface API. Prints surfaces,
@@ -415,6 +522,42 @@ fn time_decode(args: &[String]) {
 /// of all images per footprint (`encode_rgba8_into`, output allocated once),
 /// `samples` samples on the thread CPU clock. Prints
 /// `preset fp min_ms med_ms med_MTs hash`.
+/// `--time-encode-hdr <preset> <fp,...> <samples> <hdr>...`: HDR encode
+/// (`encode_rgba_f32`, HdrRgbLdrA) timed like `--time-encode`; same output
+/// columns (preset prefixed `hdr-`).
+fn time_encode_hdr(args: &[String]) {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let samples: usize = args[2].parse().unwrap();
+    let imgs: Vec<(u32, u32, Vec<f32>)> = args[3..].iter().map(|s| load_hdr(s)).collect();
+    let px: f64 = imgs.iter().map(|(w, h, _)| (*w * *h) as f64).sum();
+    for f in args[1].split(',') {
+        let v: Vec<u32> = f.split('x').map(|t| t.parse().unwrap()).collect();
+        let fp = AstcFootprint::new_2d(v[0], v[1]).unwrap();
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::HdrRgbLdrA).with_preset(preset);
+        let mut ms = Vec::with_capacity(samples);
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        for s in 0..samples {
+            let t = clock_now();
+            let outs: Vec<Vec<u8>> = imgs.iter().map(|(w, ht, img)| astc::encode_rgba_f32(img, *w, *ht, &opts).unwrap()).collect();
+            ms.push((clock_now() - t) * 1e3);
+            if s == 0 {
+                for o in &outs {
+                    fnv_words(&mut h, o);
+                }
+            }
+        }
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        let med = median_of(ms);
+        println!("hdr-{} {fp} {min:.3} {med:.3} {:.4} {h:016x}", args[0], px / (med * 1e3));
+    }
+}
+
 fn time_encode(args: &[String]) {
     let preset = match args[0].as_str() {
         "fastest" => astc::AstcPreset::Fastest,
@@ -455,8 +598,10 @@ fn main() {
         Some("--encode") => return encode_mode(&args[1..]),
         Some("--time-decode") => return time_decode(&args[1..]),
         Some("--time-encode") => return time_encode(&args[1..]),
+        Some("--time-encode-hdr") => return time_encode_hdr(&args[1..]),
         Some("--ir-decode") => return ir_decode(&args[1..]),
         Some("--ir-encode") => return ir_encode(&args[1..]),
+        Some("--ir-encode-hdr") => return ir_encode_hdr(&args[1..]),
         Some("--ir-container") => return ir_container(&args[1..]),
         Some("--ir-rows") => return ir_rows(&args[1..]),
         _ => {}

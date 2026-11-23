@@ -14,7 +14,7 @@
 
 use alloc::vec::Vec;
 
-use super::block::{decimate, infill_eff, quantize_weights, Best, MAX_TEXELS};
+use super::block::{decimate, infill_eff, quantize_weights, residual_tw, Best, MAX_TEXELS};
 use super::context::Ctx;
 use crate::astc::cem;
 use crate::astc::ise::LEVELS;
@@ -22,6 +22,9 @@ use crate::astc::parse::{BlockKind, SymbolicBlock};
 use crate::astc::quant::COLOR_NEAREST;
 use crate::astc::texel::lerp;
 use crate::astc::AstcProfile;
+
+/// Unit residual weights: `d * d * 1.0` is exactly `d * d`.
+static ONES: [f32; MAX_TEXELS] = [1.0; MAX_TEXELS];
 
 /// f32 to binary16 bits, round to nearest even; NaN and negatives become 0,
 /// values above the half range clamp to 65504 (ASTC HDR has no negatives).
@@ -265,16 +268,27 @@ fn mode7_candidates(t: &Mode7, e0: [f32; 3], e1: [f32; 3], out: &mut Vec<[u8; 4]
     }
 }
 
+/// The interpolation-domain endpoints the values `v` decode to.
+fn ep_of(cem_v: u8, profile: AstcProfile, v: &[u8; 8]) -> cem::Endpoints {
+    cem::expand(&cem::decode(cem_v, v), profile)
+}
+
 /// Squared distance of the endpoints `v` decode to from the fitted
-/// endpoints `target` (interpolation domain), over `chans` channels.
+/// endpoints `target` (interpolation domain), over `chans` channels; and
+/// those endpoints.
 fn endpoint_err(
     cem_v: u8,
     profile: AstcProfile,
     v: &[u8; 8],
     target: ([f32; 4], [f32; 4]),
     chans: usize,
-) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
+) -> (f64, cem::Endpoints) {
+    let ep = ep_of(cem_v, profile, v);
+    (endpoint_err_ep(&ep, target, chans), ep)
+}
+
+/// [`endpoint_err`] of already decoded endpoints.
+fn endpoint_err_ep(ep: &cem::Endpoints, target: ([f32; 4], [f32; 4]), chans: usize) -> f64 {
     let mut e = 0f64;
     for c in 0..chans {
         let a = ep.e0[c] as f64 - target.0[c] as f64;
@@ -296,7 +310,7 @@ fn step_level(range: usize, x: u8, up: bool) -> Option<u8> {
 
 /// Coordinate search over the packed values `v` (each moved one
 /// representable level at a time) minimising [`endpoint_err`]; `e` is the
-/// error of `v` on entry. True if `v` changed.
+/// error of `v` on entry. The endpoints of the new `v` if it changed.
 #[allow(clippy::too_many_arguments)]
 fn repair(
     cem_v: u8,
@@ -307,29 +321,43 @@ fn repair(
     mut e: f64,
     target: ([f32; 4], [f32; 4]),
     chans: usize,
-) -> bool {
-    let mut changed = false;
+) -> Option<cem::Endpoints> {
+    let mut changed = None;
+    // Position (2 k + up) of the last accepted move of the previous sweep.
+    // A later position tested before anything is accepted in this sweep
+    // sees exactly the vector it saw in the previous sweep (nothing was
+    // accepted after it there, or since), and was rejected then against an
+    // error at least as large as now: rejected again. So is every position
+    // after it, so the sweep ends with no move, as the full sweep would.
+    let mut last: Option<usize> = None;
     for _ in 0..3 {
         let mut moved = false;
-        for k in 0..nvals {
-            for up in [false, true] {
+        let mut this_last = None;
+        'sweep: for k in 0..nvals {
+            for (ui, up) in [false, true].into_iter().enumerate() {
+                let pos = 2 * k + ui;
+                if !moved && last.is_some_and(|l| pos > l) {
+                    break 'sweep;
+                }
                 let Some(q) = step_level(range, v[k], up) else {
                     continue;
                 };
                 let mut w = *v;
                 w[k] = q;
-                let ew = endpoint_err(cem_v, profile, &w, target, chans);
+                let (ew, ep) = endpoint_err(cem_v, profile, &w, target, chans);
                 if ew < e {
                     *v = w;
                     e = ew;
                     moved = true;
-                    changed = true;
+                    this_last = Some(pos);
+                    changed = Some(ep);
                 }
             }
         }
         if !moved {
             break;
         }
+        last = this_last;
     }
     changed
 }
@@ -367,25 +395,32 @@ fn mode7_fit(t: &[[f32; 4]], eff: &[u8; MAX_TEXELS]) -> ([f32; 4], [f32; 4]) {
     (e0, e1)
 }
 
-/// Exact error of the values `v` (endpoint mode `cem_v`) against the
-/// targets `t` with texel weights `eff`: squared differences of the
-/// decoder's interpolated values (interpolation domain), over `chans`.
+/// Exact error of the decoded endpoints `ep` against the targets `t` with
+/// texel weights `eff`: squared differences of the decoder's interpolated
+/// values (interpolation domain), over `chans`.
+///
+/// Callers keep a candidate only if its error is strictly below `bound`
+/// (their best so far). The terms are non-negative and a rounded f64 sum of
+/// non-negative terms never decreases, so once a partial sum reaches
+/// `bound` the full sum would too: the walk stops there and returns that
+/// partial sum, which loses the comparison exactly as the full sum would.
 // One index walks parallel per-channel arrays (and fixes the operation order).
 #[allow(clippy::needless_range_loop)]
 fn texel_err(
-    cem_v: u8,
-    profile: AstcProfile,
-    v: &[u8; 8],
+    ep: &cem::Endpoints,
     eff: &[u8; MAX_TEXELS],
     t: &[[f32; 4]],
     chans: usize,
+    bound: f64,
 ) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
     let mut err = 0f64;
     for (i, ti) in t.iter().enumerate() {
         for c in 0..chans {
             let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - ti[c] as f64;
             err += d * d;
+        }
+        if err >= bound {
+            break;
         }
     }
     err
@@ -396,6 +431,8 @@ fn texel_err(
 /// endpoints land nearest the fitted ones by a coordinate search over
 /// neighbouring levels ([`repair`]), and append the repaired values; the
 /// exact texel error then chooses among the originals and the repaired.
+/// `eps` holds the decoded endpoints of `quantized` (same order) on entry;
+/// each appended value appends its endpoints.
 #[allow(clippy::too_many_arguments)]
 fn repair_best(
     cem_v: u8,
@@ -403,24 +440,48 @@ fn repair_best(
     range: usize,
     nvals: usize,
     quantized: &mut Vec<[u8; 8]>,
+    eps: &mut Vec<cem::Endpoints>,
     target: ([f32; 4], [f32; 4]),
     chans: usize,
 ) {
     if range >= COLOR_NEAREST.len() - 1 {
         return;
     }
-    let mut ranked: Vec<(f64, usize)> = quantized
-        .iter()
-        .enumerate()
-        .map(|(j, v)| (endpoint_err(cem_v, profile, v, target, chans), j))
-        .collect();
-    ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    for &(e, j) in ranked.iter().take(2) {
-        let mut v = quantized[j];
-        if repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
-            quantized.push(v);
+    // The two lowest (error, index) pairs, in that order: what a stable sort
+    // by error (ties by index) would put first, without sorting the rest.
+    // Indices rise, so an equal error never displaces an earlier entry.
+    let mut two: [Option<(f64, usize)>; 2] = [None, None];
+    for (j, ep) in eps.iter().enumerate() {
+        let e = endpoint_err_ep(ep, target, chans);
+        let below = |s: Option<(f64, usize)>| s.map_or(true, |(b, _)| e.total_cmp(&b).is_lt());
+        if below(two[0]) {
+            two[1] = two[0];
+            two[0] = Some((e, j));
+        } else if below(two[1]) {
+            two[1] = Some((e, j));
         }
     }
+    for &(e, j) in two.iter().flatten() {
+        let mut v = quantized[j];
+        if let Some(ep) = repair(cem_v, profile, range, nvals, &mut v, e, target, chans) {
+            quantized.push(v);
+            eps.push(ep);
+        }
+    }
+}
+
+/// Insert `c` into `top`, kept ascending by `lt` and at most `k` long: the
+/// first `k` entries a stable sort by `lt` would give over everything
+/// offered. Callers offer candidates in index order and break ties in `lt`
+/// by that index, so `lt` is a strict total order and an entry tied on the
+/// estimate lands after the earlier ones, as a stable sort leaves it.
+fn push_top<T>(top: &mut Vec<T>, k: usize, c: T, lt: impl Fn(&T, &T) -> bool) {
+    if top.len() == k && !lt(&c, &top[k - 1]) {
+        return;
+    }
+    let pos = top.iter().position(|t| lt(&c, t)).unwrap_or(top.len());
+    top.insert(pos, c);
+    top.truncate(k);
 }
 
 /// Principal-axis line fit of the texels `idx` of `t` over `chans` channels
@@ -521,7 +582,11 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
     let mut c0 = far(&mean);
     let mut c1 = far(&c0);
     let mut bits = [0u64; 4];
-    for _ in 0..4 {
+    // An iteration that assigns every texel as the one before it would
+    // recompute the same centroids (same sums, same order; an empty side
+    // keeps its centroid either way) and repeat itself: stop there.
+    for it in 0..4 {
+        let prev = bits;
         bits = [0; 4];
         let (mut s0, mut s1) = ([0f32; 4], [0f32; 4]);
         let (mut n0, mut n1) = (0f32, 0f32);
@@ -539,6 +604,9 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
                 }
             }
         }
+        if it > 0 && bits == prev {
+            break;
+        }
         if n0 > 0.0 {
             c0 = s0.map(|v| v / n0);
         }
@@ -549,25 +617,27 @@ fn two_means_hdr(t: &[[f32; 4]], chans: usize) -> [u64; 4] {
     bits
 }
 
-/// Exact error over the texels `idx` (see [`texel_err`]).
+/// Exact error over the texels `idx`, with the same early stop at `bound`
+/// (see [`texel_err`]).
 // One index walks parallel per-channel / per-partition arrays.
 #[allow(clippy::needless_range_loop)]
 fn texel_err_idx(
-    cem_v: u8,
-    profile: AstcProfile,
-    v: &[u8; 8],
+    ep: &cem::Endpoints,
     eff: &[u8; MAX_TEXELS],
     t: &[[f32; 4]],
     idx: &[u8],
     chans: usize,
+    bound: f64,
 ) -> f64 {
-    let ep = cem::expand(&cem::decode(cem_v, v), profile);
     let mut err = 0f64;
     for &i in idx {
         let i = i as usize;
         for c in 0..chans {
             let d = lerp(ep.e0[c], ep.e1[c], eff[i]) as f64 - t[i][c] as f64;
             err += d * d;
+        }
+        if err >= bound {
+            break;
         }
     }
     err
@@ -607,6 +677,7 @@ fn search_two_partitions(
     }
     let mut six: Vec<[u8; 6]> = Vec::new();
     let mut quantized: Vec<[u8; 8]> = Vec::new();
+    let mut eps: Vec<cem::Endpoints> = Vec::new();
     let mut dec = alloc::vec![[0f32; 64]; ctx.grids.len()];
     let mut res = alloc::vec![-1f32; ctx.grids.len()];
     for &(_, pi) in &top {
@@ -640,26 +711,25 @@ fn search_two_partitions(
             let g = m.grid as usize;
             if res[g] < 0.0 {
                 decimate(ctx, g, &ideal, 2, &mut dec[g]);
-                let mut e = 0f32;
-                for (ti, &(nt, tp)) in ctx.grids[g].taps.iter().enumerate() {
-                    let v: f32 = tp[..nt as usize]
-                        .iter()
-                        .map(|&(k, c)| dec[g][k as usize] * c as f32)
-                        .sum();
-                    let d = v / (16.0 * 64.0) - ideal[ti];
-                    e += d * d * tw[ti];
-                }
-                res[g] = e;
+                // The block encoder's residual kernel (and its AVX2 twin):
+                // the same per-texel terms summed in texel order. Its taps
+                // are padded to four with zero contributions, which add +0
+                // to the tap sum (decimated weights are in 0..=64), and
+                // `* (1 / 1024)` equals `/ 1024` exactly (a power of two).
+                res[g] = residual_tw(ctx, g, &dec[g], &ideal, &tw);
             }
             let lw = LEVELS[m.range as usize] as f32;
             let wq = sum_l2 * ctx.grids[g].noise / (12.0 * (lw - 1.0) * (lw - 1.0));
             let lc = LEVELS[r as usize] as f32;
             let step = 65535.0 / (lc - 1.0);
             let cq = n as f32 * step * step / 12.0 * 0.5;
-            cands.push((res[g] + wq + cq, mi, r as usize));
+            push_top(
+                &mut cands,
+                exact.max(1),
+                (res[g] + wq + cq, mi, r as usize),
+                |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).is_lt(),
+            );
         }
-        cands.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        cands.truncate(exact.max(1));
         for &(_, mi, range) in &cands {
             let m = ctx.modes[mi];
             let g = m.grid as usize;
@@ -667,28 +737,42 @@ fn search_two_partitions(
             let mut gw = [0u8; 64];
             quantize_weights(m.range as usize, &dec[g][..count], &mut gw[..count]);
             let mut eff = [0u8; MAX_TEXELS];
-            for _pass in 0..2 {
+            for pass in 0..2 {
                 infill_eff(ctx, g, &gw, &mut eff);
                 let mut total = 0f64;
                 let mut chosen = [[0u8; 8]; 2];
                 for p in 0..2 {
+                    // The last pass only competes with `best` (nothing is
+                    // re-derived after it), and partition errors are
+                    // non-negative: once partition 0 alone reaches the best
+                    // error the total cannot get below it, so partition 1
+                    // need not be searched.
+                    if p == 1 && pass == 1 && total >= best.err {
+                        break;
+                    }
                     let id = &idx[p][..cnt[p]];
+                    // Weight sums once per partition, channel sums per
+                    // channel, each in texel order (the values the
+                    // per-channel loop computed).
                     let mut e0 = [0f32; 4];
                     let mut e1 = [0f32; 4];
-                    for c in 0..chans {
-                        let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
-                        let mut mean_c = 0f32;
-                        for &i in id {
-                            let i = i as usize;
-                            let w = eff[i] as f32 / 64.0;
-                            let u = 1.0 - w;
-                            a += u * u;
-                            b += u * w;
-                            d += w * w;
-                            x0 += u * t[i][c];
-                            x1 += w * t[i][c];
-                            mean_c += t[i][c];
+                    let (mut a, mut b, mut d) = (0f32, 0f32, 0f32);
+                    let (mut x0, mut x1, mut mean) = ([0f32; 4], [0f32; 4], [0f32; 4]);
+                    for &i in id {
+                        let i = i as usize;
+                        let w = eff[i] as f32 / 64.0;
+                        let u = 1.0 - w;
+                        a += u * u;
+                        b += u * w;
+                        d += w * w;
+                        for c in 0..chans {
+                            x0[c] += u * t[i][c];
+                            x1[c] += w * t[i][c];
+                            mean[c] += t[i][c];
                         }
+                    }
+                    for c in 0..chans {
+                        let (x0, x1, mut mean_c) = (x0[c], x1[c], mean[c]);
                         let det = a * d - b * b;
                         if det.abs() > 1e-6 {
                             e0[c] = ((x0 * d - x1 * b) / det).clamp(0.0, 65535.0);
@@ -721,18 +805,22 @@ fn search_two_partitions(
                         }
                         quantized.push(v);
                     }
+                    eps.clear();
+                    eps.extend(quantized.iter().map(|v| ep_of(cem_v, profile, v)));
                     repair_best(
                         cem_v,
                         profile,
                         range,
                         nvals,
                         &mut quantized,
+                        &mut eps,
                         (e0, e1),
                         chans,
                     );
                     let mut pb: Option<(f64, [u8; 8])> = None;
-                    for v in &quantized {
-                        let err = texel_err_idx(cem_v, profile, v, &eff, t, id, chans);
+                    for (v, ep) in quantized.iter().zip(&eps) {
+                        let bound = pb.map_or(f64::INFINITY, |b| b.0);
+                        let err = texel_err_idx(ep, &eff, t, id, chans, bound);
                         if pb.map_or(true, |b| err < b.0) {
                             pb = Some((err, *v));
                         }
@@ -759,6 +847,10 @@ fn search_two_partitions(
                     s.weights[..count].copy_from_slice(&gw[..count]);
                     *best = Best { err: total, sym: s };
                 }
+                // The weights re-derived below feed only the next pass.
+                if pass == 1 {
+                    break;
+                }
                 // Re-derive ideal weights per partition from its decoded endpoints.
                 let mut w = [0f32; MAX_TEXELS];
                 for p in 0..2 {
@@ -779,8 +871,15 @@ fn search_two_partitions(
                     }
                 }
                 let mut d1 = [0f32; 64];
+                let old = gw;
                 decimate(ctx, g, &w, 2, &mut d1);
                 quantize_weights(m.range as usize, &d1[..count], &mut gw[..count]);
+                // The pass is a function of the weights: unchanged weights
+                // would repeat it exactly, and its total no longer beats
+                // `best`.
+                if gw[..count] == old[..count] {
+                    break;
+                }
             }
         }
     }
@@ -881,16 +980,8 @@ pub(crate) fn encode_block_hdr(
         let g = m.grid as usize;
         if res[g] < 0.0 {
             decimate(ctx, g, &ideal, 2, &mut dec[g]);
-            let mut e = 0f32;
-            for (ti, &(nt, tp)) in ctx.grids[g].taps.iter().enumerate() {
-                let v: f32 = tp[..nt as usize]
-                    .iter()
-                    .map(|&(k, c)| dec[g][k as usize] * c as f32)
-                    .sum();
-                let d = v / (16.0 * 64.0) - ideal[ti];
-                e += d * d;
-            }
-            res[g] = e * len2;
+            // As in `search_two_partitions`, with unit texel weights.
+            res[g] = residual_tw(ctx, g, &dec[g], &ideal, &ONES) * len2;
         }
         let r = m.crange[0][(nvals / 2 - 1) as usize];
         if r == 0xFF {
@@ -901,20 +992,27 @@ pub(crate) fn encode_block_hdr(
         let lc = LEVELS[r as usize] as f32;
         let step = 65535.0 / (lc - 1.0);
         let cq = n as f32 * step * step / 12.0 * 0.5;
-        cands.push((res[g] + wq + cq, mi, r as usize));
+        // The estimate is a sum of finite non-negative terms (never NaN), so
+        // this comparison is the strict total order the sort used.
+        push_top(
+            &mut cands,
+            exact.max(1),
+            (res[g] + wq + cq, mi, r as usize),
+            |a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+                    .is_lt()
+            },
+        );
     }
-    cands.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(core::cmp::Ordering::Equal)
-            .then(a.1.cmp(&b.1))
-    });
-    cands.truncate(exact.max(1));
     let mut best = Best {
         err: f64::MAX,
         sym: SymbolicBlock::empty(BlockKind::VoidHdr, 0),
     };
     let mut six: Vec<[u8; 6]> = Vec::new();
     let mut quantized: Vec<[u8; 8]> = Vec::new();
+    let mut eps: Vec<cem::Endpoints> = Vec::new();
     let mut quads: Vec<[u8; 4]> = Vec::new();
     for &(_, mi, range) in &cands {
         let m = ctx.modes[mi];
@@ -923,22 +1021,29 @@ pub(crate) fn encode_block_hdr(
         let mut gw = [0u8; 64];
         quantize_weights(m.range as usize, &dec[g][..count], &mut gw[..count]);
         let mut eff = [0u8; MAX_TEXELS];
-        for _pass in 0..2 {
+        for pass in 0..2 {
             infill_eff(ctx, g, &gw, &mut eff);
-            // Least-squares endpoints per channel in the domain.
+            // Least-squares endpoints per channel in the domain. The weight
+            // sums (a, b, d) do not depend on the channel: summed once, in
+            // the texel order each channel's fit summed them, so every value
+            // is the one the per-channel loop computed.
             let mut e0 = [0f32; 4];
             let mut e1 = [0f32; 4];
-            for c in 0..chans {
-                let (mut a, mut b, mut d, mut x0, mut x1) = (0f32, 0f32, 0f32, 0f32, 0f32);
-                for i in 0..n {
-                    let w = eff[i] as f32 / 64.0;
-                    let u = 1.0 - w;
-                    a += u * u;
-                    b += u * w;
-                    d += w * w;
-                    x0 += u * t[i][c];
-                    x1 += w * t[i][c];
+            let (mut a, mut b, mut d) = (0f32, 0f32, 0f32);
+            let (mut x0, mut x1) = ([0f32; 4], [0f32; 4]);
+            for i in 0..n {
+                let w = eff[i] as f32 / 64.0;
+                let u = 1.0 - w;
+                a += u * u;
+                b += u * w;
+                d += w * w;
+                for c in 0..chans {
+                    x0[c] += u * t[i][c];
+                    x1[c] += w * t[i][c];
                 }
+            }
+            for c in 0..chans {
+                let (x0, x1) = (x0[c], x1[c]);
                 let det = a * d - b * b;
                 if det.abs() > 1e-6 {
                     e0[c] = ((x0 * d - x1 * b) / det).clamp(0.0, 65535.0);
@@ -974,17 +1079,21 @@ pub(crate) fn encode_block_hdr(
                 quantized.push(v);
             }
             let target = (e0, e1);
+            eps.clear();
+            eps.extend(quantized.iter().map(|v| ep_of(cem_v, profile, v)));
             repair_best(
                 cem_v,
                 profile,
                 range,
                 nvals as usize,
                 &mut quantized,
+                &mut eps,
                 target,
                 chans,
             );
-            for v in &quantized {
-                let err = texel_err(cem_v, profile, v, &eff, t, chans);
+            for (v, ep) in quantized.iter().zip(&eps) {
+                let bound = pass_best.map_or(f64::INFINITY, |b| b.0);
+                let err = texel_err(ep, &eff, t, chans, bound);
                 if pass_best.map_or(true, |b| err < b.0) {
                     pass_best = Some((err, *v, cem_v, range));
                 }
@@ -1013,9 +1122,12 @@ pub(crate) fn encode_block_hdr(
                         }
                         quantized.push(v);
                     }
-                    repair_best(7, profile, r4, 4, &mut quantized, (f0, f1), chans);
-                    for v in &quantized {
-                        let err = texel_err(7, profile, v, &eff, t, chans);
+                    eps.clear();
+                    eps.extend(quantized.iter().map(|v| ep_of(7, profile, v)));
+                    repair_best(7, profile, r4, 4, &mut quantized, &mut eps, (f0, f1), chans);
+                    for (v, ep) in quantized.iter().zip(&eps) {
+                        let bound = pass_best.map_or(f64::INFINITY, |b| b.0);
+                        let err = texel_err(ep, &eff, t, chans, bound);
                         if pass_best.map_or(true, |b| err < b.0) {
                             pass_best = Some((err, *v, 7, r4));
                         }
@@ -1039,6 +1151,10 @@ pub(crate) fn encode_block_hdr(
                 s.weights[..count].copy_from_slice(&gw[..count]);
                 best = Best { err, sym: s };
             }
+            // The weights re-derived below feed only the next pass.
+            if pass == 1 {
+                break;
+            }
             // Re-derive ideal weights from the decoded endpoints.
             let ep = cem::expand(&cem::decode(pc, &v), profile);
             let mut w = [0f32; MAX_TEXELS];
@@ -1056,8 +1172,14 @@ pub(crate) fn encode_block_hdr(
                 };
             }
             let mut d1 = [0f32; 64];
+            let old = gw;
             decimate(ctx, g, &w, 2, &mut d1);
             quantize_weights(m.range as usize, &d1[..count], &mut gw[..count]);
+            // As in `search_two_partitions`: unchanged weights would repeat
+            // the pass exactly, and its error no longer beats `best`.
+            if gw[..count] == old[..count] {
+                break;
+            }
         }
     }
     // Two partitions: about half as many patterns as exact candidates.
