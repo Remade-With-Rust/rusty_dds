@@ -703,9 +703,12 @@ fn search_two_partitions(
             let lc = LEVELS[r as usize] as f32;
             let step = 65535.0 / (lc - 1.0);
             let cq = n as f32 * step * step / 12.0 * 0.5;
-            push_top(&mut cands, exact.max(1), (res[g] + wq + cq, mi, r as usize), |a, b| {
-                a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).is_lt()
-            });
+            push_top(
+                &mut cands,
+                exact.max(1),
+                (res[g] + wq + cq, mi, r as usize),
+                |a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)).is_lt(),
+            );
         }
         for &(_, mi, range) in &cands {
             let m = ctx.modes[mi];
@@ -954,12 +957,17 @@ pub(crate) fn encode_block_hdr(
         let cq = n as f32 * step * step / 12.0 * 0.5;
         // The estimate is a sum of finite non-negative terms (never NaN), so
         // this comparison is the strict total order the sort used.
-        push_top(&mut cands, exact.max(1), (res[g] + wq + cq, mi, r as usize), |a, b| {
-            a.0.partial_cmp(&b.0)
-                .unwrap_or(core::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1))
-                .is_lt()
-        });
+        push_top(
+            &mut cands,
+            exact.max(1),
+            (res[g] + wq + cq, mi, r as usize),
+            |a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+                    .is_lt()
+            },
+        );
     }
     let mut best = Best {
         err: f64::MAX,
