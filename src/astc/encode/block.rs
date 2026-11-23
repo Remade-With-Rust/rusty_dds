@@ -189,13 +189,17 @@ struct SearchScratch {
     cands: Vec<Cand>,
     top: Vec<usize>,
     keep: Vec<usize>,
-    tried: Vec<(f64, usize, [u8; 64], [u8; 64])>,
+    tried: Vec<(f64, usize, [u8; 64], [u8; 64], Option<Pick>)>,
     encs: Vec<(u8, [u8; 8])>,
     /// `exact_candidate`'s best encoding per (CEM, partition). Not cleared
     /// between passes: a cell is valid only while its CEM's bit is set in
     /// that pass's per-partition mask.
     chosen: [[(f64, [u8; 8]); 4]; 16],
 }
+
+/// The encoding a pass of `exact_candidate` chose: its CEM and each
+/// partition's values.
+type Pick = (usize, [[u8; 8]; 4]);
 
 /// The best block found so far.
 pub(crate) struct Best {
@@ -1036,8 +1040,9 @@ fn search_fit(
             );
         }
         // One unrefined pass for every kept candidate ...
-        let e = exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, best, encs, chosen);
-        tried.push((e, i, gw1, gw2));
+        let (e, pick) =
+            exact_candidate(ctx, prm, src, fit, c, gw1, gw2, 0, None, best, encs, chosen);
+        tried.push((e, i, gw1, gw2, pick));
     }
     // ... and the refinement passes only for the best few.
     if prm.refine > 0 {
@@ -1046,10 +1051,16 @@ fn search_fit(
                 .unwrap_or(core::cmp::Ordering::Equal)
                 .then(a.1.cmp(&b.1))
         });
-        for &(_, i, gw1, gw2) in tried.iter().take(prm.refine_top.max(1)) {
-            exact_candidate(
-                ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, best, encs, chosen,
-            );
+        // A refinement's first pass would repeat the unrefined pass above
+        // (same weights, same candidate): it resumes from that pass's
+        // encoding instead. No encoding there means the first pass would
+        // have returned at once.
+        for &(_, i, gw1, gw2, pick) in tried.iter().take(prm.refine_top.max(1)) {
+            if pick.is_some() {
+                exact_candidate(
+                    ctx, prm, src, fit, &cands[i], gw1, gw2, prm.refine, pick, best, encs, chosen,
+                );
+            }
         }
     }
 }
@@ -1116,7 +1127,11 @@ pub(super) fn residual_scalar(
 
 #[allow(clippy::too_many_arguments)]
 /// Encode one candidate exactly with `refine` weight/endpoint passes; updates
-/// `best` and returns the lowest exact error this candidate reached.
+/// `best` and returns the lowest exact error this candidate reached (of the
+/// passes it ran) and, for an unrefined call, the encoding it chose.
+/// `resume`: the encoding an earlier unrefined call chose with these same
+/// weights; the first pass is then not re-run (it would compute exactly
+/// that, and its error is already in `best`) and refinement starts from it.
 // One index walks several parallel per-texel / per-channel arrays (and in the encoder fixes the floating-point operation order); iterator chains would obscure that.
 #[allow(clippy::needless_range_loop)]
 fn exact_candidate(
@@ -1128,11 +1143,13 @@ fn exact_candidate(
     gw1: [u8; 64],
     gw2: [u8; 64],
     refine: u8,
+    resume: Option<Pick>,
     best: &mut Best,
     encs: &mut Vec<(u8, [u8; 8])>,
     chosen: &mut [[(f64, [u8; 8]); 4]; 16],
-) -> f64 {
+) -> (f64, Option<Pick>) {
     let mut mine = f64::MAX;
+    let mut resume = resume;
     let m: Mode = ctx.modes[cand.mode];
     let g = m.grid as usize;
     let count = ctx.grids[g].count;
@@ -1143,110 +1160,124 @@ fn exact_candidate(
     let mut eff1 = [0u8; MAX_TEXELS];
     let mut eff2 = [0u8; MAX_TEXELS];
     for _pass in 0..=refine {
-        infill_eff(ctx, g, &gw1, &mut eff1);
-        if dual {
-            infill_eff(ctx, g, &gw2, &mut eff2);
-        }
-        // Refit endpoints to the quantised weights, then pick the best
-        // encoding per partition (same CEM for all partitions: matched).
-        let mut lines = fit.lines;
-        // Opaque: alpha is overwritten with 255 below, so it is not refitted.
-        let chans = if src.opaque { 3 } else { 4 };
-        for p in 0..parts {
-            let fits = refit_part(src, fit.part(p), &eff1, &eff2, fit.ccs, chans);
-            for c in 0..chans {
-                if let Some((a, b)) = fits[c] {
-                    lines[p].e0[c] = a;
-                    lines[p].e1[c] = b;
+        let cemv = if let Some((c, vals)) = resume.take() {
+            for p in 0..parts {
+                chosen[c][p].1 = vals[p];
+            }
+            c
+        } else {
+            infill_eff(ctx, g, &gw1, &mut eff1);
+            if dual {
+                infill_eff(ctx, g, &gw2, &mut eff2);
+            }
+            // Refit endpoints to the quantised weights, then pick the best
+            // encoding per partition (same CEM for all partitions: matched).
+            let mut lines = fit.lines;
+            // Opaque: alpha is overwritten with 255 below, so it is not refitted.
+            let chans = if src.opaque { 3 } else { 4 };
+            for p in 0..parts {
+                let fits = refit_part(src, fit.part(p), &eff1, &eff2, fit.ccs, chans);
+                for c in 0..chans {
+                    if let Some((a, b)) = fits[c] {
+                        lines[p].e0[c] = a;
+                        lines[p].e1[c] = b;
+                    }
+                }
+                if src.opaque {
+                    lines[p].e0[3] = 255.0;
+                    lines[p].e1[3] = 255.0;
                 }
             }
-            if src.opaque {
-                lines[p].e0[3] = 255.0;
-                lines[p].e1[3] = 255.0;
-            }
-        }
-        // Collect encodings per partition; choose the CEM with the lowest
-        // total error over partitions. `chosen[cem][p]` is valid when bit
-        // `cem` of that partition's `seen` mask is set (its first encoding
-        // fills it, as a strict `<` against an f64::MAX start did: every
-        // exact error is finite); `all` keeps the CEMs seen in every
-        // partition, and `total` sums a CEM's partitions in partition order.
-        let mut total = [0f64; 16];
-        let mut all = u16::MAX;
-        for p in 0..parts {
-            encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, encs);
-            // Same-budget alternatives: a class with no more values fits the
-            // candidate's colour range too.
-            let mut extra: Vec<(u8, [u8; 8])> = Vec::new();
-            for &alt in classes(src) {
-                if alt != cand.class && alt.values() == cand.class.values() {
-                    encode_endpoints(alt, cand.range, lines[p].e0, lines[p].e1, &mut extra);
-                    encs.extend_from_slice(&extra);
+            // Collect encodings per partition; choose the CEM with the lowest
+            // total error over partitions. `chosen[cem][p]` is valid when bit
+            // `cem` of that partition's `seen` mask is set (its first encoding
+            // fills it, as a strict `<` against an f64::MAX start did: every
+            // exact error is finite); `all` keeps the CEMs seen in every
+            // partition, and `total` sums a CEM's partitions in partition order.
+            let mut total = [0f64; 16];
+            let mut all = u16::MAX;
+            for p in 0..parts {
+                encode_endpoints(cand.class, cand.range, lines[p].e0, lines[p].e1, encs);
+                // Same-budget alternatives: a class with no more values fits the
+                // candidate's colour range too.
+                let mut extra: Vec<(u8, [u8; 8])> = Vec::new();
+                for &alt in classes(src) {
+                    if alt != cand.class && alt.values() == cand.class.values() {
+                        encode_endpoints(alt, cand.range, lines[p].e0, lines[p].e1, &mut extra);
+                        encs.extend_from_slice(&extra);
+                    }
+                }
+                let mut seen = 0u16;
+                for &(cemv, v) in encs.iter() {
+                    let raw = cem::decode(cemv, &v);
+                    let ep = cem::expand(&raw, src.tgt.profile);
+                    let e = exact_part_err(ctx, src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
+                    let bit = 1u16 << (cemv & 15);
+                    let cell = &mut chosen[(cemv & 15) as usize][p];
+                    if seen & bit == 0 || e < cell.0 {
+                        *cell = (e, v);
+                    }
+                    seen |= bit;
+                }
+                all &= seen;
+                let mut mk = seen;
+                while mk != 0 {
+                    let cemv = mk.trailing_zeros() as usize;
+                    total[cemv] += chosen[cemv][p].0;
+                    mk &= mk - 1;
                 }
             }
-            let mut seen = 0u16;
-            for &(cemv, v) in encs.iter() {
-                let raw = cem::decode(cemv, &v);
-                let ep = cem::expand(&raw, src.tgt.profile);
-                let e = exact_part_err(ctx, src, fit.part(p), &ep, &eff1, &eff2, fit.ccs);
-                let bit = 1u16 << (cemv & 15);
-                let cell = &mut chosen[(cemv & 15) as usize][p];
-                if seen & bit == 0 || e < cell.0 {
-                    *cell = (e, v);
-                }
-                seen |= bit;
-            }
-            all &= seen;
-            let mut mk = seen;
+            // Lowest CEM first, strict `<`: ties keep the lowest CEM.
+            let mut pick = None;
+            let mut mk = all;
             while mk != 0 {
                 let cemv = mk.trailing_zeros() as usize;
-                total[cemv] += chosen[cemv][p].0;
                 mk &= mk - 1;
-            }
-        }
-        // Lowest CEM first, strict `<`: ties keep the lowest CEM.
-        let mut pick = None;
-        let mut mk = all;
-        while mk != 0 {
-            let cemv = mk.trailing_zeros() as usize;
-            mk &= mk - 1;
-            let e = total[cemv];
-            if pick.map_or(true, |(be, _)| e < be) {
-                pick = Some((e, cemv));
-            }
-        }
-        let Some((err, cemv)) = pick else { return mine };
-        mine = mine.min(err);
-        if err < best.err {
-            let mut s = SymbolicBlock::empty_normal();
-            s.mode = m.mode;
-            let gm = ctx.grids[g].w;
-            s.grid = [gm, ctx.grids[g].h, ctx.grids[g].d];
-            s.weight_range = m.range;
-            s.dual_plane = dual;
-            s.plane2_component = if dual { fit.ccs as u8 } else { 0 };
-            s.partitions = fit.parts;
-            s.partition_seed = if parts > 1 { fit.seed } else { 0 };
-            s.cem = [cemv as u8; 4];
-            s.cem_matched = parts > 1;
-            s.color_range = cand.range as u8;
-            let vc = cem::value_count(cemv as u8);
-            s.color_count = (vc * parts) as u8;
-            for p in 0..parts {
-                s.color_values[p * vc..(p + 1) * vc].copy_from_slice(&chosen[cemv][p].1[..vc]);
-            }
-            if dual {
-                for i in 0..count {
-                    s.weights[2 * i] = gw1[i];
-                    s.weights[2 * i + 1] = gw2[i];
+                let e = total[cemv];
+                if pick.map_or(true, |(be, _)| e < be) {
+                    pick = Some((e, cemv));
                 }
-            } else {
-                s.weights[..count].copy_from_slice(&gw1[..count]);
             }
-            best.err = err;
-            best.sym = s;
-        }
+            let Some((err, cemv)) = pick else {
+                return (mine, None);
+            };
+            mine = mine.min(err);
+            if err < best.err {
+                let mut s = SymbolicBlock::empty_normal();
+                s.mode = m.mode;
+                let gm = ctx.grids[g].w;
+                s.grid = [gm, ctx.grids[g].h, ctx.grids[g].d];
+                s.weight_range = m.range;
+                s.dual_plane = dual;
+                s.plane2_component = if dual { fit.ccs as u8 } else { 0 };
+                s.partitions = fit.parts;
+                s.partition_seed = if parts > 1 { fit.seed } else { 0 };
+                s.cem = [cemv as u8; 4];
+                s.cem_matched = parts > 1;
+                s.color_range = cand.range as u8;
+                let vc = cem::value_count(cemv as u8);
+                s.color_count = (vc * parts) as u8;
+                for p in 0..parts {
+                    s.color_values[p * vc..(p + 1) * vc].copy_from_slice(&chosen[cemv][p].1[..vc]);
+                }
+                if dual {
+                    for i in 0..count {
+                        s.weights[2 * i] = gw1[i];
+                        s.weights[2 * i + 1] = gw2[i];
+                    }
+                } else {
+                    s.weights[..count].copy_from_slice(&gw1[..count]);
+                }
+                best.err = err;
+                best.sym = s;
+            }
+            cemv
+        };
         if _pass == refine {
+            if refine == 0 {
+                let vals = core::array::from_fn(|p| chosen[cemv][p].1);
+                return (mine, Some((cemv, vals)));
+            }
             break;
         }
         // Re-derive ideal weights from the decoded endpoints of the chosen
@@ -1313,7 +1344,7 @@ fn exact_candidate(
             break;
         }
     }
-    mine
+    (mine, None)
 }
 
 /// k-means clustering (k = 2..=4) of the block's colours; deterministic
