@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use crate::astc::block_mode::{self, ModeClass};
 use crate::astc::footprint::AstcFootprint;
-use crate::astc::partition::select_partition;
+use crate::astc::partition::PartitionGen;
 pub(crate) use crate::astc::tables::{build_grid, Grid};
 
 /// A legal block mode for the footprint.
@@ -90,11 +90,12 @@ fn build_parts(fp: AstcFootprint, count: u32) -> Vec<Partitioning> {
     let small = texels < 31;
     let mut out: Vec<Partitioning> = Vec::new();
     for seed in 0..1024u32 {
+        let gen = PartitionGen::new(seed, count, small);
         let mut labels = Vec::with_capacity(texels);
         for z in 0..fp.depth() {
             for y in 0..fp.height() {
                 for x in 0..fp.width() {
-                    labels.push(select_partition(seed, x, y, z, count, small));
+                    labels.push(gen.label(x, y, z));
                 }
             }
         }
@@ -199,11 +200,12 @@ impl Ctx {
         let small = texels < 31;
         let mut part2: Vec<Partitioning> = Vec::new();
         for seed in 0..1024u32 {
+            let gen = PartitionGen::new(seed, 2, small);
             let mut labels = Vec::with_capacity(texels);
             for z in 0..fp.depth() {
                 for y in 0..fp.height() {
                     for x in 0..fp.width() {
-                        labels.push(select_partition(seed, x, y, z, 2, small));
+                        labels.push(gen.label(x, y, z));
                     }
                 }
             }
