@@ -524,10 +524,17 @@ const fn build_wq_lut() -> [[u8; 257]; 12] {
 static WQ_LUT: [[u8; 257]; 12] = build_wq_lut();
 
 /// Quantise grid weights (0..=64 float) to the weight range's levels.
+///
+/// The index is `((v * 4 + 0.5) as usize).min(256)`, computed through a
+/// saturating `i32` cast and an integer clamp: both casts truncate toward
+/// zero and send NaN to 0; a negative value is 0 as `usize` and at most 0 as
+/// `i32` (clamped to 0); a value past `i32::MAX` saturates and is clamped to
+/// 256 either way. Same index for every input, without the 64-bit unsigned
+/// conversion sequence.
 pub(super) fn quantize_weights(range: usize, g: &[f32], out: &mut [u8]) {
     let lut = &WQ_LUT[range];
     for (o, &v) in out.iter_mut().zip(g) {
-        *o = lut[((v * 4.0 + 0.5) as usize).min(256)];
+        *o = lut[((v * 4.0 + 0.5) as i32).clamp(0, 256) as usize];
     }
 }
 
@@ -1799,6 +1806,40 @@ mod oracle_tests {
                 rank_patterns_body(&pats, &labels, 4, m, &mut got);
                 assert_eq!(got, want, "n {n} m {m}");
             }
+        }
+    }
+
+    /// The weight-quantisation index equals the `usize` form for every
+    /// class of input: NaN, infinities, negatives, the clamp, huge values
+    /// and a dense sweep of the working range.
+    #[test]
+    fn quantize_index_equals_usize_cast() {
+        let old = |v: f32| ((v * 4.0 + 0.5) as usize).min(256);
+        let new = |v: f32| ((v * 4.0 + 0.5) as i32).clamp(0, 256) as usize;
+        let mut xs = alloc::vec![
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN,
+            -0.0,
+            0.0,
+            -0.124_999_99,
+            -0.125,
+            -0.4,
+            -1.0e9,
+            1.0e9,
+            3.0e9,
+            64.0,
+            64.125,
+            1.0e30,
+        ];
+        // Every 65537th bit pattern (all exponents, both signs), then the
+        // working range at a fine step.
+        xs.extend((0..=u32::MAX).step_by(65_537).map(f32::from_bits));
+        xs.extend((0..=720_000).map(|i| -2.0 + i as f32 * 1.0e-4));
+        for x in xs {
+            assert_eq!(new(x), old(x), "{x:e}");
         }
     }
 
