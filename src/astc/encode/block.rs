@@ -651,9 +651,14 @@ fn refit_part(
     out
 }
 
+/// The colour level of `range` nearest `x`. After the float clamp the value
+/// is NaN (cast to 0 either way) or in 0..=255, where an `i32` cast
+/// truncates exactly as the former `usize` cast did: same index, without
+/// the 64-bit unsigned conversion sequence (`(v as usize).min(255)` was
+/// already a no-op clamp).
 fn near(range: usize, x: f32) -> u8 {
-    let v = (x + 0.5).clamp(0.0, 255.0) as usize;
-    COLOR_NEAREST[range][v.min(255)]
+    let v = (x + 0.5).clamp(0.0, 255.0) as i32;
+    COLOR_NEAREST[range][(v as usize).min(255)]
 }
 
 /// Candidate endpoint encodings (CEM, values) for a class.
