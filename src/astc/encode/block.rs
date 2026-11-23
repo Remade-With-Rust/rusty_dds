@@ -1542,6 +1542,54 @@ fn rank_patterns(
     rank_patterns_body(bits, labels, k, m, top);
 }
 
+/// The best `m` two-partition patterns by bitset distance to the clustering
+/// `lb` (either labelling), ties by pattern index, into `top` (empty on
+/// entry). With the POPCNT instruction it runs as `simd::rank_two` (the
+/// same body compiled for it), like [`rank_patterns`].
+#[inline(never)]
+fn rank_two(
+    ctx: &Ctx,
+    pats: &[super::context::Partitioning],
+    lb: &[u64; 4],
+    n: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
+    if let Some(t) = ctx.popcnt {
+        return super::simd::rank_two(t, pats, lb, n, m, top);
+    }
+    #[cfg(not(all(feature = "simd", target_arch = "x86_64")))]
+    let _ = ctx;
+    rank_two_body(pats, lb, n, m, top);
+}
+
+/// The body of [`rank_two`] (inlined into each instruction-set variant).
+#[inline(always)]
+pub(super) fn rank_two_body(
+    pats: &[super::context::Partitioning],
+    lb: &[u64; 4],
+    n: usize,
+    m: usize,
+    top: &mut Vec<(u32, usize)>,
+) {
+    // Words past the footprint's texels are zero in both bitsets.
+    let words = n.div_ceil(64);
+    for (pi, p) in pats.iter().enumerate() {
+        // popcount of the XOR of bitsets, either labelling.
+        let x = (0..words)
+            .map(|w| (p.bits[w] ^ lb[w]).count_ones())
+            .sum::<u32>();
+        let key = (x.min(n as u32 - x), pi);
+        if top.len() == m && key >= top[m - 1] {
+            continue;
+        }
+        let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
+        top.insert(pos, key);
+        top.truncate(m);
+    }
+}
+
 /// The body of [`rank_patterns`] (inlined into each instruction-set variant).
 #[inline(always)]
 pub(super) fn rank_patterns_body(
@@ -1779,21 +1827,7 @@ pub(crate) fn encode_block(ctx: &Ctx, prm: &Params, tgt: Target, px: &[[u8; 4]])
                     lb[i / 64] |= 1 << (i % 64);
                 }
             }
-            // Words past the footprint's texels are zero in both bitsets.
-            let words = n.div_ceil(64);
-            for (pi, p) in pats.iter().enumerate() {
-                // popcount of the XOR of bitsets, either labelling.
-                let x = (0..words)
-                    .map(|w| (p.bits[w] ^ lb[w]).count_ones())
-                    .sum::<u32>();
-                let key = (x.min(n as u32 - x), pi);
-                if top.len() == m && key >= top[m - 1] {
-                    continue;
-                }
-                let pos = top.iter().position(|t| key < *t).unwrap_or(top.len());
-                top.insert(pos, key);
-                top.truncate(m);
-            }
+            rank_two(ctx, pats, &lb, n, m, top);
         } else {
             let bits = if k == 3 { &ctx.bits3 } else { &ctx.bits4 };
             rank_patterns(ctx, bits, &labels[..n], k, m, top);
