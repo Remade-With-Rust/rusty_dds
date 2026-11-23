@@ -522,6 +522,42 @@ fn time_decode(args: &[String]) {
 /// of all images per footprint (`encode_rgba8_into`, output allocated once),
 /// `samples` samples on the thread CPU clock. Prints
 /// `preset fp min_ms med_ms med_MTs hash`.
+/// `--time-encode-hdr <preset> <fp,...> <samples> <hdr>...`: HDR encode
+/// (`encode_rgba_f32`, HdrRgbLdrA) timed like `--time-encode`; same output
+/// columns (preset prefixed `hdr-`).
+fn time_encode_hdr(args: &[String]) {
+    let preset = match args[0].as_str() {
+        "fastest" => astc::AstcPreset::Fastest,
+        "fast" => astc::AstcPreset::Fast,
+        "medium" => astc::AstcPreset::Medium,
+        "thorough" => astc::AstcPreset::Thorough,
+        _ => astc::AstcPreset::Exhaustive,
+    };
+    let samples: usize = args[2].parse().unwrap();
+    let imgs: Vec<(u32, u32, Vec<f32>)> = args[3..].iter().map(|s| load_hdr(s)).collect();
+    let px: f64 = imgs.iter().map(|(w, h, _)| (*w * *h) as f64).sum();
+    for f in args[1].split(',') {
+        let v: Vec<u32> = f.split('x').map(|t| t.parse().unwrap()).collect();
+        let fp = AstcFootprint::new_2d(v[0], v[1]).unwrap();
+        let opts = astc::AstcEncodeOptions::new(fp, AstcProfile::HdrRgbLdrA).with_preset(preset);
+        let mut ms = Vec::with_capacity(samples);
+        let mut h = 0xCBF2_9CE4_8422_2325u64;
+        for s in 0..samples {
+            let t = clock_now();
+            let outs: Vec<Vec<u8>> = imgs.iter().map(|(w, ht, img)| astc::encode_rgba_f32(img, *w, *ht, &opts).unwrap()).collect();
+            ms.push((clock_now() - t) * 1e3);
+            if s == 0 {
+                for o in &outs {
+                    fnv_words(&mut h, o);
+                }
+            }
+        }
+        let min = ms.iter().cloned().fold(f64::MAX, f64::min);
+        let med = median_of(ms);
+        println!("hdr-{} {fp} {min:.3} {med:.3} {:.4} {h:016x}", args[0], px / (med * 1e3));
+    }
+}
+
 fn time_encode(args: &[String]) {
     let preset = match args[0].as_str() {
         "fastest" => astc::AstcPreset::Fastest,
@@ -562,6 +598,7 @@ fn main() {
         Some("--encode") => return encode_mode(&args[1..]),
         Some("--time-decode") => return time_decode(&args[1..]),
         Some("--time-encode") => return time_encode(&args[1..]),
+        Some("--time-encode-hdr") => return time_encode_hdr(&args[1..]),
         Some("--ir-decode") => return ir_decode(&args[1..]),
         Some("--ir-encode") => return ir_encode(&args[1..]),
         Some("--ir-encode-hdr") => return ir_encode_hdr(&args[1..]),
