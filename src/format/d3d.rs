@@ -75,7 +75,7 @@ impl DataFormat for D3DFormat {
         // `None` (-> `Error::UnsupportedFormat`) is the honest answer. A
         // wrapped pitch would go on to size a payload slice.
         match *self {
-            D3DFormat::R8G8_B8G8 | D3DFormat::G8R8_G8B8 => {
+            D3DFormat::R8G8_B8G8 | D3DFormat::G8R8_G8B8 | D3DFormat::UYVY | D3DFormat::YUY2 => {
                 return width.checked_add(1).map(|w| w >> 1)?.checked_mul(4);
             }
             _ => {}

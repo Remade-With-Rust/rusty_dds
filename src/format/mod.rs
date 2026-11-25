@@ -97,6 +97,22 @@ pub(crate) enum FormatOf {
     D3d(D3DFormat),
 }
 
+impl FormatOf {
+    /// See [`DxgiFormat::surface_rows`]. No D3D format here is planar.
+    pub(crate) fn surface_rows(&self, height: u32) -> Option<u32> {
+        match self {
+            FormatOf::Dxgi(f) => f.surface_rows(height),
+            FormatOf::D3d(f) => {
+                let ph = f.get_pitch_height();
+                if ph == 0 {
+                    return None;
+                }
+                Some(height.checked_add(ph - 1)? / ph)
+            }
+        }
+    }
+}
+
 impl DataFormat for FormatOf {
     fn get_pitch(&self, width: u32) -> Option<u32> {
         match self {

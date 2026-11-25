@@ -274,8 +274,8 @@ impl Dds {
             header10: Some(header10),
             data: Vec::new(),
         };
-        // Block-compressed formats size each mip level exactly (see
-        // `has_exact_mip_chain`); the quarter chain above is the fallback.
+        // Most formats size each mip level exactly (see `has_exact_mip_chain`);
+        // the quarter chain above is the fallback.
         let data_size = if dds.has_exact_mip_chain() {
             dds.get_array_stride()?
                 .checked_mul(params.array_layers.unwrap_or(1))
@@ -551,6 +551,12 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 
     pub fn get_main_texture_size(&self) -> Option<u32> {
+        // A planar surface has more rows than its height in pixels.
+        if let Some(f) = self.format_of() {
+            if f.get_block_size().is_none() && f.surface_rows(2) != Some(2) {
+                return self.exact_mip_size(0);
+            }
+        }
         get_texture_size(
             self.get_pitch(),
             self.header.linear_size,
@@ -573,20 +579,18 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         Ok(get_array_stride(size, min_mipmap_size, mml))
     }
 
-    /// True when every mip level is sized exactly from its own dimensions:
-    /// `max(1, ceil(w_l / bw)) * max(1, ceil(h_l / bh)) * block_bytes * d_l`,
-    /// whole blocks per level, the DXGI / DirectXTex rule. This covers every
-    /// block-compressed format: BCn / DXTn (4x4) and ASTC (its footprint).
+    /// True when every mip level is sized exactly from its own dimensions,
+    /// `pitch(w_l) * rows(h_l) * d_l`, the DXGI / DirectXTex rule. This covers
+    /// block-compressed formats (BCn / DXTn, ASTC), in whole blocks per level,
+    /// and every uncompressed, packed or planar format with a known pitch.
     ///
-    /// Other formats keep the historical chain: mip 0 from the header, each
-    /// later level a quarter of the previous one, clamped to the minimum mip
-    /// size. That quarter chain is exact only for square power-of-two 2D
-    /// surfaces; for an NPOT BCn texture it truncated `ceil(w / 4)` blocks
-    /// to `w / 4` and misplaced every later level (#12).
+    /// Unrecognised formats keep the historical chain: mip 0 from the header,
+    /// each later level a quarter of the previous one, clamped to the minimum
+    /// mip size. That is exact only while both dimensions halve evenly;
+    /// elsewhere it misplaces every later level (#12, #24).
     pub(crate) fn has_exact_mip_chain(&self) -> bool {
-        self.format_of().is_some_and(|f| {
-            f.get_block_size().is_some() && f.get_pitch_height() != 0 && f.get_pitch(1).is_some()
-        })
+        self.format_of()
+            .is_some_and(|f| f.get_pitch_height() != 0 && f.get_pitch(1).is_some())
     }
 
     /// Exact bytes of mip `level` of one slice: block columns x block rows x
@@ -600,28 +604,28 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             dim(self.header.depth.unwrap_or(1)),
         );
         let pitch = format.get_pitch(w)?;
-        let ph = format.get_pitch_height();
-        if ph == 0 {
-            return None;
-        }
-        let rows = h.checked_add(ph - 1)? / ph;
+        let rows = format.surface_rows(h)?;
         pitch.checked_mul(rows)?.checked_mul(d)
     }
 
-    /// Exact bytes of one slice's whole mip chain. Past level 32 every
-    /// dimension is 1, so the tail is closed-form (a header may claim
-    /// `mip_map_count = u32::MAX`).
-    fn exact_array_stride(&self) -> Option<u32> {
-        let levels = self.get_num_mipmap_levels();
-        let mut stride: u32 = 0;
+    /// Exact bytes of the first `levels` mips of one slice, which is also the
+    /// offset of mip `levels`. Past level 32 every dimension is 1, so the tail
+    /// is closed-form (a header may claim `mip_map_count = u32::MAX`).
+    pub(crate) fn exact_chain_size(&self, levels: u32) -> Option<u64> {
+        let mut size: u64 = 0;
         for level in 0..levels.min(33) {
-            stride = stride.saturating_add(self.exact_mip_size(level)?);
+            size += u64::from(self.exact_mip_size(level)?);
         }
         if levels > 33 {
-            let tail = self.exact_mip_size(32)?;
-            stride = stride.saturating_add((levels - 33).saturating_mul(tail));
+            size += u64::from(levels - 33) * u64::from(self.exact_mip_size(32)?);
         }
-        Some(stride)
+        Some(size)
+    }
+
+    /// Exact bytes of one slice's whole mip chain, saturating.
+    fn exact_array_stride(&self) -> Option<u32> {
+        let size = self.exact_chain_size(self.get_num_mipmap_levels())?;
+        Some(u32::try_from(size).unwrap_or(u32::MAX))
     }
 
     pub fn get_num_array_layers(&self) -> u32 {

@@ -206,9 +206,27 @@ impl DataFormat for DxgiFormat {
         // `None` (-> `Error::UnsupportedFormat`) is the honest answer. A
         // wrapped pitch would go on to size a payload slice.
         match *self {
-            DxgiFormat::R8G8_B8G8_UNorm | DxgiFormat::G8R8_G8B8_UNorm => {
+            // Two pixels share four bytes (4:2:2), or a row holds chroma pairs
+            // at 16 bits a sample (P010, P016).
+            DxgiFormat::R8G8_B8G8_UNorm
+            | DxgiFormat::G8R8_G8B8_UNorm
+            | DxgiFormat::YUY2
+            | DxgiFormat::P010
+            | DxgiFormat::P016 => {
                 return width.checked_add(1).map(|w| w >> 1)?.checked_mul(4);
             }
+            DxgiFormat::Y210 | DxgiFormat::Y216 => {
+                return width.checked_add(1).map(|w| w >> 1)?.checked_mul(8);
+            }
+            // Planar: one row of the luma plane, padded to the chroma pairs.
+            // `surface_rows` counts the rows of the other planes.
+            DxgiFormat::NV12 | DxgiFormat::Format_420_Opaque | DxgiFormat::P208 => {
+                return width.checked_add(1).map(|w| w >> 1)?.checked_mul(2);
+            }
+            DxgiFormat::NV11 => {
+                return width.checked_add(3).map(|w| w >> 2)?.checked_mul(4);
+            }
+            DxgiFormat::V208 | DxgiFormat::V408 => return Some(width),
             _ => {}
         };
 
@@ -317,24 +335,24 @@ impl DataFormat for DxgiFormat {
             | DxgiFormat::B8G8R8X8_UNorm_sRGB => Some(32),
 
             DxgiFormat::AYUV => Some(32),
-            DxgiFormat::Y410 => Some(10),
-            DxgiFormat::Y416 => Some(16),
+            DxgiFormat::Y410 => Some(32),
+            DxgiFormat::Y416 => Some(64),
             DxgiFormat::NV12 => Some(12),
-            DxgiFormat::P010 => Some(10),
-            DxgiFormat::P016 => Some(16),
-            DxgiFormat::Format_420_Opaque => Some(20),
+            DxgiFormat::P010 => Some(24),
+            DxgiFormat::P016 => Some(24),
+            DxgiFormat::Format_420_Opaque => Some(12),
             DxgiFormat::YUY2 => Some(16),
-            DxgiFormat::Y210 => Some(10),
-            DxgiFormat::Y216 => Some(16),
-            DxgiFormat::NV11 => Some(11),
-            DxgiFormat::AI44 => Some(44),
-            DxgiFormat::IA44 => Some(44),
+            DxgiFormat::Y210 => Some(32),
+            DxgiFormat::Y216 => Some(32),
+            DxgiFormat::NV11 => Some(12),
+            DxgiFormat::AI44 => Some(8),
+            DxgiFormat::IA44 => Some(8),
             DxgiFormat::P8 => Some(8),
             DxgiFormat::A8P8 => Some(16),
             DxgiFormat::B4G4R4A4_UNorm => Some(16),
-            DxgiFormat::P208 => Some(8),
-            DxgiFormat::V208 => Some(8),
-            DxgiFormat::V408 => Some(8),
+            DxgiFormat::P208 => Some(16),
+            DxgiFormat::V208 => Some(16),
+            DxgiFormat::V408 => Some(24),
 
             _ => None,
         }
@@ -483,6 +501,28 @@ impl DataFormat for DxgiFormat {
 }
 
 impl DxgiFormat {
+    /// Rows of `get_pitch` bytes in one surface `height` pixels tall, counting
+    /// every plane of a planar format (DirectXTex `ComputePitch`). DirectXTex
+    /// rejects odd heights for NV12, 420_OPAQUE, P010, P016 and V208; here the
+    /// chroma rows round up.
+    pub(crate) fn surface_rows(&self, height: u32) -> Option<u32> {
+        use DxgiFormat::*;
+        let half_up = height / 2 + height % 2;
+        match self {
+            NV12 | P010 | P016 | Format_420_Opaque => height.checked_add(half_up),
+            NV11 | P208 => height.checked_mul(2),
+            V208 => height.checked_add(half_up.checked_mul(2)?),
+            V408 => height.checked_add((height / 2).checked_mul(4)?),
+            _ => {
+                let ph = self.get_pitch_height();
+                if ph == 0 {
+                    return None;
+                }
+                Some(height.checked_add(ph - 1)? / ph)
+            }
+        }
+    }
+
     pub fn try_from_pixel_format(pixel_format: &PixelFormat) -> Option<DxgiFormat> {
         if let Some(ref fourcc) = pixel_format.fourcc {
             match fourcc.0 {
