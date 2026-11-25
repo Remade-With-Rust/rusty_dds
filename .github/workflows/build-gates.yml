@@ -7,6 +7,7 @@
 #              wasm32-unknown-unknown.
 # - clippy:    `cargo clippy --all-targets --all-features -- -D warnings` is
 #              clean, src/astc/ included.
+# - miri:      the AVX2 block kernels make no misaligned typed reads (#29).
 # - release:   the ASTC robustness test at full size (10^6 arbitrary blocks per
 #              footprint) and the oracle golden vectors, optimised.
 
@@ -105,3 +106,20 @@ jobs:
           toolchain: "1.99"
           components: clippy
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  miri:
+    runs-on: ubuntu-latest
+    env:
+      # Without +avx2 Miri reports no AVX2 and only the scalar paths run.
+      RUSTFLAGS: "-C target-feature=+avx2"
+      # Check alignment by type, not by where the allocation happened to land.
+      MIRIFLAGS: "-Zmiri-symbolic-alignment-check"
+    steps:
+      - uses: actions/checkout@v7
+      # Pinned: Miri is nightly-only and not every nightly ships it.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-05
+          components: miri, rust-src
+      - run: cargo miri test --test simd_alignment
+      - run: cargo miri test --lib mode6_avx2_matches_scalar_exhaustive
