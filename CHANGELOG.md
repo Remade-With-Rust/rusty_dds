@@ -3,6 +3,12 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.5](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.4...v0.11.5) - 2026-11-25
+
+### Fixed
+
+- *(simd)* read BC7/BC1 AVX2 lanes unaligned
+
 ## [0.11.4](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.3...v0.11.4) - 2026-11-23
 
 ### Other
