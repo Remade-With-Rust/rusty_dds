@@ -75,7 +75,7 @@ impl DataFormat for D3DFormat {
         // `None` (-> `Error::UnsupportedFormat`) is the honest answer. A
         // wrapped pitch would go on to size a payload slice.
         match *self {
-            D3DFormat::R8G8_B8G8 | D3DFormat::G8R8_G8B8 => {
+            D3DFormat::R8G8_B8G8 | D3DFormat::G8R8_G8B8 | D3DFormat::UYVY | D3DFormat::YUY2 => {
                 return width.checked_add(1).map(|w| w >> 1)?.checked_mul(4);
             }
             _ => {}
@@ -192,11 +192,6 @@ impl DataFormat for D3DFormat {
 }
 
 impl D3DFormat {
-    /// Packed YUV formats; see [`DxgiFormat::is_video`](crate::DxgiFormat).
-    pub(crate) fn is_video(&self) -> bool {
-        matches!(self, D3DFormat::UYVY | D3DFormat::YUY2)
-    }
-
     /// This gets the bitmask for the red channel pixels
     pub fn r_bit_mask(&self) -> Option<u32> {
         match *self {

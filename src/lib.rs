@@ -551,6 +551,12 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     }
 
     pub fn get_main_texture_size(&self) -> Option<u32> {
+        // A planar surface has more rows than its height in pixels.
+        if let Some(f) = self.format_of() {
+            if f.get_block_size().is_none() && f.surface_rows(2) != Some(2) {
+                return self.exact_mip_size(0);
+            }
+        }
         get_texture_size(
             self.get_pitch(),
             self.header.linear_size,
@@ -576,15 +582,15 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
     /// True when every mip level is sized exactly from its own dimensions,
     /// `pitch(w_l) * rows(h_l) * d_l`, the DXGI / DirectXTex rule. This covers
     /// block-compressed formats (BCn / DXTn, ASTC), in whole blocks per level,
-    /// and every uncompressed or packed format with a known pitch.
+    /// and every uncompressed, packed or planar format with a known pitch.
     ///
-    /// Video formats and unrecognised formats keep the historical chain: mip 0
-    /// from the header, each later level a quarter of the previous one, clamped
-    /// to the minimum mip size. That is exact only while both dimensions halve
-    /// evenly; elsewhere it misplaces every later level (#12, #24).
+    /// Unrecognised formats keep the historical chain: mip 0 from the header,
+    /// each later level a quarter of the previous one, clamped to the minimum
+    /// mip size. That is exact only while both dimensions halve evenly;
+    /// elsewhere it misplaces every later level (#12, #24).
     pub(crate) fn has_exact_mip_chain(&self) -> bool {
         self.format_of()
-            .is_some_and(|f| !f.is_video() && f.get_pitch_height() != 0 && f.get_pitch(1).is_some())
+            .is_some_and(|f| f.get_pitch_height() != 0 && f.get_pitch(1).is_some())
     }
 
     /// Exact bytes of mip `level` of one slice: block columns x block rows x
@@ -598,11 +604,7 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
             dim(self.header.depth.unwrap_or(1)),
         );
         let pitch = format.get_pitch(w)?;
-        let ph = format.get_pitch_height();
-        if ph == 0 {
-            return None;
-        }
-        let rows = h.checked_add(ph - 1)? / ph;
+        let rows = format.surface_rows(h)?;
         pitch.checked_mul(rows)?.checked_mul(d)
     }
 

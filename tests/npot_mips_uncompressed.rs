@@ -294,3 +294,127 @@ fn absurd_mip_counts_are_bounded() {
         .subresource_range(SubresourceId::mip_layer(u32::MAX - 1, 0))
         .is_err());
 }
+
+/// `(row pitch, rows)` of a video surface, from DirectXTex `ComputePitch`.
+fn video_surface(f: DxgiFormat, w: u32, h: u32) -> (u32, u32) {
+    use DxgiFormat::*;
+    let half = |v: u32| v.div_ceil(2);
+    match f {
+        AYUV | Y410 => (w * 4, h),
+        Y416 => (w * 8, h),
+        YUY2 => (half(w) * 4, h),
+        Y210 | Y216 => (half(w) * 8, h),
+        NV12 | Format_420_Opaque => (half(w) * 2, h + half(h)),
+        P010 | P016 => (half(w) * 4, h + half(h)),
+        NV11 => (w.div_ceil(4) * 4, h * 2),
+        P208 => (half(w) * 2, h * 2),
+        V208 => (w, h + half(h) * 2),
+        V408 => (w, h + h / 2 * 4),
+        AI44 | IA44 | P8 => (w, h),
+        A8P8 => (w * 2, h),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn video_layouts_match_directxtex_rules() {
+    use DxgiFormat::*;
+    for f in [
+        AYUV,
+        Y410,
+        Y416,
+        YUY2,
+        Y210,
+        Y216,
+        NV12,
+        Format_420_Opaque,
+        P010,
+        P016,
+        NV11,
+        P208,
+        V208,
+        V408,
+        AI44,
+        IA44,
+        P8,
+        A8P8,
+    ] {
+        for &(w, h) in SIZES {
+            let levels = full_levels(w, h, 1);
+            let label = format!("{f:?} {w}x{h}");
+            let mut offset = 0;
+            let mut want = Vec::new();
+            for l in 0..levels {
+                let (p, r) = video_surface(f, (w >> l).max(1), (h >> l).max(1));
+                want.push((offset, (p * r) as usize));
+                offset += (p * r) as usize;
+            }
+            let d = new(f, (w, h, None), levels, None, false);
+            assert_eq!(d.data.len(), offset, "{label}: allocation");
+            assert_eq!(ours(&d, 0, 0), want, "{label}");
+            assert_eq!(
+                d.get_main_texture_size(),
+                Some(want[0].1 as u32),
+                "{label}: main size"
+            );
+            let back = Dds::read(Cursor::new(bytes(&d))).unwrap();
+            assert_eq!(ours(&back, 0, 0), want, "{label}: round trip");
+        }
+    }
+}
+
+/// The `dds` crate knows nine of these. It does not pad odd-width planar rows
+/// the way DirectXTex does, so planar formats are compared at even sizes only.
+#[test]
+fn video_layouts_match_dds_crate() {
+    use DxgiFormat::*;
+    for (f, planar) in [
+        (AYUV, false),
+        (Y410, false),
+        (Y416, false),
+        (YUY2, false),
+        (Y210, false),
+        (Y216, false),
+        (NV12, true),
+        (P010, true),
+        (P016, true),
+    ] {
+        for &(w, h) in SIZES {
+            if planar && (w % 2 != 0 || h % 2 != 0) {
+                continue;
+            }
+            let levels = if planar { 1 } else { full_levels(w, h, 1) };
+            let d = new(f, (w, h, None), levels, None, false);
+            let dec = dds::Decoder::new(Cursor::new(bytes(&d))).unwrap();
+            let theirs: Vec<_> = dec
+                .layout()
+                .texture()
+                .unwrap()
+                .iter_mips()
+                .map(|m| (m.data_offset() as usize, m.data_len() as usize))
+                .collect();
+            assert_eq!(ours(&d, 0, 0), theirs, "{f:?} {w}x{h}");
+        }
+    }
+}
+
+#[test]
+fn legacy_packed_yuv_rows_hold_whole_pixel_pairs() {
+    for f in [D3DFormat::UYVY, D3DFormat::YUY2] {
+        for &(w, h) in SIZES {
+            let levels = full_levels(w, h, 1);
+            let want = chain(|x| x.div_ceil(2) * 4, w, h, 1, levels);
+            let d = Dds::new_d3d(NewD3dParams {
+                height: h,
+                width: w,
+                depth: None,
+                format: f,
+                mipmap_levels: Some(levels),
+                caps2: None,
+            })
+            .unwrap();
+            let back = Dds::read(Cursor::new(bytes(&d))).unwrap();
+            assert_eq!(ours(&back, 0, 0), want, "{f:?} {w}x{h}");
+        }
+    }
+}

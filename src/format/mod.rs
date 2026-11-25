@@ -98,10 +98,17 @@ pub(crate) enum FormatOf {
 }
 
 impl FormatOf {
-    pub(crate) fn is_video(&self) -> bool {
+    /// See [`DxgiFormat::surface_rows`]. No D3D format here is planar.
+    pub(crate) fn surface_rows(&self, height: u32) -> Option<u32> {
         match self {
-            FormatOf::Dxgi(f) => f.is_video(),
-            FormatOf::D3d(f) => f.is_video(),
+            FormatOf::Dxgi(f) => f.surface_rows(height),
+            FormatOf::D3d(f) => {
+                let ph = f.get_pitch_height();
+                if ph == 0 {
+                    return None;
+                }
+                Some(height.checked_add(ph - 1)? / ph)
+            }
         }
     }
 }
