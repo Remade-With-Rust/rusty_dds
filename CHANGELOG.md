@@ -3,6 +3,20 @@
 All notable changes to `rusty_dds`. Dates are release dates; every performance
 figure is reproducible from the repo with the command given beside it.
 
+## [0.11.6](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.5...v0.11.6) - 2026-11-25
+
+### Fixed
+
+- *(format)* lay out video formats by DirectXTex rules
+- size uncompressed mip chains per level ([#24](https://github.com/Remade-With-Rust/rusty_dds/issues/24), [#32](https://github.com/Remade-With-Rust/rusty_dds/pull/32)): later mips, array layers and cube faces of NPOT, elongated and volume textures were misplaced
+- `mip_dimensions` no longer overflows on headers claiming more than 32 mip levels
+
+### Changed
+
+- Affected files written by older versions read differently: NPOT, elongated or volume mip chains of uncompressed formats, some small or square `R1` / `R8G8_B8G8` / `G8R8_G8B8` chains, and most video-format textures, including single-level ones. Other uncompressed layouts are unchanged; BCn and ASTC are untouched.
+- Recognised uncompressed formats ignore a `linear_size` header field and size mip 0 from the dimensions, as BCn already did.
+- `get_bits_per_pixel` and `get_pitch` return corrected values for video formats.
+
 ## [0.11.5](https://github.com/Remade-With-Rust/rusty_dds/compare/v0.11.4...v0.11.5) - 2026-11-25
 
 ### Fixed
