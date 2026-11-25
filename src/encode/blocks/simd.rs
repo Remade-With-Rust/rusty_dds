@@ -238,7 +238,7 @@ unsafe fn fit_indices_mode6_avx2_impl(
     let mut kv = _mm256_setzero_si256();
     for kk in 0..4usize {
         for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
-            let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
+            let pv = _mm256_set1_epi64x((pal16.as_ptr().add(k * 4) as *const i64).read_unaligned());
 
             // The permute that puts lanes back in pixel order is NOT done here.
             // Everything downstream of it — the compare, both blends, and the
@@ -1873,7 +1873,7 @@ unsafe fn palette_fit_mode6_avx2_impl(
 
     for kk in 0..4usize {
         for k in [kk * 4, kk * 4 + 1, kk * 4 + 2, kk * 4 + 3] {
-            let pv = _mm256_set1_epi64x(*(pal16.as_ptr().add(k * 4) as *const i64));
+            let pv = _mm256_set1_epi64x((pal16.as_ptr().add(k * 4) as *const i64).read_unaligned());
             let da = _mm256_sub_epi16(q0, pv);
             let db = _mm256_sub_epi16(q1, pv);
             let cur_lo = _mm256_hadd_epi32(_mm256_madd_epi16(da, da), _mm256_madd_epi16(db, db));
@@ -2353,7 +2353,7 @@ unsafe fn bc1_ls_endpoints_avx2_impl(
         // measured 8-26% SLOWER end to end than the scalar loop it replaced.
         let wv = _mm256_blend_ps(_mm256_set1_ps(u), _mm256_set1_ps(wgt), 0b1111_0000);
         let px = _mm_cvtepi32_ps(_mm_cvtepu8_epi32(_mm_cvtsi32_si128(
-            *(src.add(i * 4) as *const i32),
+            (src.add(i * 4) as *const i32).read_unaligned(),
         )));
         let pv = _mm256_permutevar8x32_ps(
             _mm256_castps128_ps256(px),
@@ -2594,7 +2594,9 @@ mod oracle {
             state ^= state << 17;
             state
         };
-        for case in 0..200_000u32 {
+        // Miri is far too slow for the full sweep; a few cases reach the reads (#29).
+        let cases = if cfg!(miri) { 4 } else { 200_000u32 };
+        for case in 0..cases {
             let mut px = [[0u8; 4]; 16];
             let mut pal = [[0u8; 4]; 16];
             for p in px.iter_mut() {
