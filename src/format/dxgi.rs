@@ -483,6 +483,31 @@ impl DataFormat for DxgiFormat {
 }
 
 impl DxgiFormat {
+    /// Video (YUV, planar, palette-nibble) formats. Their bits per pixel and
+    /// pitch here are not a reliable layout model (planes, chroma subsampling),
+    /// so they are kept out of exact per-level sizing.
+    pub(crate) fn is_video(&self) -> bool {
+        use DxgiFormat::*;
+        matches!(
+            self,
+            AYUV | Y410
+                | Y416
+                | NV12
+                | P010
+                | P016
+                | Format_420_Opaque
+                | YUY2
+                | Y210
+                | Y216
+                | NV11
+                | AI44
+                | IA44
+                | P208
+                | V208
+                | V408
+        )
+    }
+
     pub fn try_from_pixel_format(pixel_format: &PixelFormat) -> Option<DxgiFormat> {
         if let Some(ref fourcc) = pixel_format.fourcc {
             match fourcc.0 {

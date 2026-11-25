@@ -173,10 +173,13 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         if mip >= self.get_num_mipmap_levels() {
             return Err(Error::OutOfBounds);
         }
-        let width = (self.header.width >> mip).max(1);
-        let height = (self.header.height >> mip).max(1);
-        let depth = (self.header.depth.unwrap_or(1) >> mip).max(1);
-        Ok((width, height, depth))
+        // A header may claim more than 32 levels, so a plain shift can overflow.
+        let dim = |v: u32| v.checked_shr(mip).unwrap_or(0).max(1);
+        Ok((
+            dim(self.header.width),
+            dim(self.header.height),
+            dim(self.header.depth.unwrap_or(1)),
+        ))
     }
 
     /// Byte range of one subresource inside [`DdsBase::data`](crate::DdsBase::data).
@@ -306,26 +309,22 @@ impl<D: AsRef<[u8]>> DdsBase<D> {
         if mip >= levels {
             return Err(Error::OutOfBounds);
         }
+        if self.has_exact_mip_chain() {
+            let offset = self.exact_chain_size(mip).ok_or(Error::UnsupportedFormat)?;
+            let offset = u32::try_from(offset).map_err(|_| Error::OutOfBounds)?;
+            let size = self.exact_mip_size(mip).ok_or(Error::UnsupportedFormat)?;
+            return Ok((offset, size));
+        }
         let mut current = self
             .get_main_texture_size()
             .ok_or(Error::UnsupportedFormat)?;
         let min_size = self.get_min_mipmap_size_in_bytes();
-        let exact = self.has_exact_mip_chain();
-        if exact {
-            current = self.exact_mip_size(0).ok_or(Error::UnsupportedFormat)?;
-        }
         let mut offset = 0_u32;
         for level in 0..levels {
             if level == mip {
                 return Ok((offset, current));
             }
             offset = offset.checked_add(current).ok_or(Error::OutOfBounds)?;
-            if exact {
-                current = self
-                    .exact_mip_size(level + 1)
-                    .ok_or(Error::UnsupportedFormat)?;
-                continue;
-            }
             current /= 4;
             if current < min_size {
                 current = min_size;

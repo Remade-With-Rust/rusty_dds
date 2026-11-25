@@ -13,6 +13,11 @@
 //! were short or misplaced before); square power-of-two 2D chains, the
 //! committed fixtures and all non-block formats are unchanged.
 //!
+//! A second: #24 did the same for every uncompressed and packed format. 580
+//! lines changed, all multi-level chains: NPOT, elongated or volume shapes,
+//! plus 1x1, 4x4 and square 100x100 chains of R1 and the two 4:2:2 formats.
+//! Fixtures, BCn, ASTC and video (YUV / planar) lines are unchanged.
+//!
 //! Regenerate only on purpose: `UPDATE_LAYOUT_SNAPSHOT=1 cargo test --test layout_snapshot`.
 
 use rusty_dds::{

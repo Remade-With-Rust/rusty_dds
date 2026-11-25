@@ -97,6 +97,15 @@ pub(crate) enum FormatOf {
     D3d(D3DFormat),
 }
 
+impl FormatOf {
+    pub(crate) fn is_video(&self) -> bool {
+        match self {
+            FormatOf::Dxgi(f) => f.is_video(),
+            FormatOf::D3d(f) => f.is_video(),
+        }
+    }
+}
+
 impl DataFormat for FormatOf {
     fn get_pitch(&self, width: u32) -> Option<u32> {
         match self {

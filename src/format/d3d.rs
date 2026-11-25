@@ -192,6 +192,11 @@ impl DataFormat for D3DFormat {
 }
 
 impl D3DFormat {
+    /// Packed YUV formats; see [`DxgiFormat::is_video`](crate::DxgiFormat).
+    pub(crate) fn is_video(&self) -> bool {
+        matches!(self, D3DFormat::UYVY | D3DFormat::YUY2)
+    }
+
     /// This gets the bitmask for the red channel pixels
     pub fn r_bit_mask(&self) -> Option<u32> {
         match *self {
